@@ -1,19 +1,32 @@
 \set ON_ERROR_STOP on
 \pset pager off
 
--- Current serving schema only. Capture immediately before and after the
--- approved writer fence to tie its recovery receipt to the ingest boundary.
+-- Capture before and after the approved writer fence and again when resuming,
+-- so the paired recovery receipt can be tied to the actual ingest boundary.
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout = '8s';
 SET LOCAL lock_timeout = '500ms';
 SET LOCAL timezone = 'UTC';
+
+SELECT EXISTS (
+    SELECT 1 FROM market.fact_storage_state
+    WHERE layout_version='market.canonical_cold_history.v1' AND state='ready'
+      AND completed_at IS NOT NULL
+)::text AS cold_authoritative \gset
+\if :cold_authoritative
+SELECT COALESCE(max(last_commit_seq), 0) AS cold_market_commit_seq
+FROM market.cold_fact_pages \gset
+\else
+\set cold_market_commit_seq 0
+\endif
 
 SELECT transaction_timestamp() AS captured_at,
        current_setting('server_version_num') AS postgres_version,
        (SELECT extversion FROM pg_extension WHERE extname = 'timescaledb') AS timescaledb_version,
        pg_current_wal_lsn() AS observed_wal_lsn,
        pg_current_wal_flush_lsn() AS flushed_wal_lsn,
-       (SELECT COALESCE(MAX(latest.market_commit_seq), 0)
+       CAST(:'cold_authoritative' AS boolean) AS cold_authoritative,
+       GREATEST(:cold_market_commit_seq, (SELECT COALESCE(MAX(latest.market_commit_seq), 0)
         FROM market.series AS series
         CROSS JOIN LATERAL (
             SELECT fact.market_commit_seq
@@ -21,7 +34,7 @@ SELECT transaction_timestamp() AS captured_at,
             WHERE fact.series_id = series.id
             ORDER BY fact.market_commit_seq DESC
             LIMIT 1
-        ) AS latest) AS visible_market_commit_seq;
+        ) AS latest)) AS visible_market_commit_seq;
 
 SELECT policy.revision, policy.policy->'recent_days' AS recent_days,
        policy.policy->'reserve_percent' AS reserve_percent,

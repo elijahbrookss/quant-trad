@@ -335,6 +335,14 @@ class PostgresCanonicalFactReclamationRepository:
                 raise RuntimeError(f"canonical_reclaim_relation_changed: storage_day={day}")
             size = session.execute(text("SELECT pg_total_relation_size(:oid)"), {"oid": relation_oid}).scalar_one()
             check_budget()
+            from .cold_history import cold_layout_active
+
+            if cold_layout_active(session):
+                # Do not silently resume building a permanent historical SQL
+                # directory on this layout. The final retirement owner must
+                # publish the cold page and retire both source structures in
+                # one verified operation.
+                raise RuntimeError(f"cold_fact_atomic_retirement_required: storage_day={day}")
             # Exact generated daily relation only; no CASCADE or row DELETE.
             session.execute(text(f'DROP TABLE market."{name}"'))
             self._assert_archive_admission(objects)

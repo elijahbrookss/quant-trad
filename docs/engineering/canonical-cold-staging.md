@@ -35,6 +35,14 @@ python -m scripts.db.canonical_cold_load \
 
 The loader validates each page's current mounted bytes through the serving codec, acquires a state-table lock and checks for an inactive cold layout before each admission transaction. It never changes that layout flag or source relations. Record `last_processed_ordinal`. On retry, reread the same page idempotently or provide `--after-ordinal` with the previously committed value. An end-of-checkpoint receipt only describes the batch traversal. The activation procedure must verify every page, loaded memberships, dependency holds and the final writer fence independently.
 
+## Verify the retiring prefix and prepared catalog
+
+`python -m scripts.db.canonical_cold_audit` takes the same database identity and checkpoint arguments as the loader. Add `--cold-before-day <first-retained-day>` to print the bounded audit scope. Its plan uses the first matching source row and the registered dated physical children. The legacy range must be intact, so the cutoff cannot split the legacy relation.
+
+For **every** day in the resulting oldest prefix, run `--day <storage-day>` and capture the receipt. A nonempty day needs a completed migration checkpoint. The audit decodes each current HDD page and checks the exact Fact identity, observation key, revision, commit and row hash against the source row, global identity registry and loaded ordinal. It also checks actual source child OID and loaded series bounds. A retained row for the same series must have a later commit, and a retained row for the same exact observation key must have a higher revision. Retain `--after-ordinal` and the matching preceding receipt for subsequent batches. Compare the sum of pages and rows with the day counts and require traversal from ordinal zero through the recorded source tail.
+
+Separately, scan `--inverse-inventory` from the beginning through `inventory_scan_end_reached`, advancing with `--after-manifest <last_verified_manifest>` to detect an unexpected loaded page. All receipts must agree on `prefix_hash`, checkpoint binding hash and database identity. Missing receipts, skipped pages, lookup discrepancies, an unmatched loaded manifest or nonempty uncheckpointed day halt progression. These read-only transactions do not freeze writers or hold a production fence between batches. Reconcile the full receipt set under the final owner fence and qualify the independent paired restore, raw and L2 coverage and holds, frozen/as-of reads, remaining relation dependencies, and physical retirement separately. The audit emits `activation_ready: false` even after a successful bounded batch.
+
 ## Data decisions
 
 | Inventory evidence | Disposition |
@@ -45,6 +53,20 @@ The loader validates each page's current mounted bytes through the serving codec
 | Ambiguous operator history, stale retention evidence, unresolved hold, or unsupported contract | Preserve exactly and escalate the missing evidence before changing its lifecycle. |
 
 QT's advanced-trade adapter requests at most 300 candles and advances by 299 intervals to account for a provider that may include both endpoints. Coinbase's current public product-candle endpoint documents a maximum of 350. Planning uses the installed adapter's observed behavior. Five 365-day years for one symbol need at least 8,790 requests for 1m, 147 for 1h, or 7 for 1d, before retries, coverage holes and any product retention limits. Ten symbols at 1m need at least 87,900 requests. Count each requested half-open contiguous window separately. Window data or count parity does not establish accepted-row parity. Benchmark the same API product and adapter away from production, with the same no-trade and error handling. Record successful ranges, throttling, elapsed publication, gaps, and capacity effects before using any ETA or replacing copy work with a provider workflow. [QT Coinbase adapter](../../src/data_providers/providers/coinbase.py) · [Coinbase Advanced Trade candles](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/public/get-public-product-candles) · [Coinbase WebSocket channels](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-endpoints)
+
+### Cutover recommendation for Coinbase history
+
+Reuse verified archive bytes and move only the accepted versions still missing a durable placement. Limit provider work to verified missing coverage and reproducible derived work whose original inputs and transformation can be reproduced. A provider version matching the same OHLCV values may have a different source revision, acceptance time or causal availability. It also cannot fill the replay gap between two Level 2 connections or attest to QT's raw receive ordinals.
+
+The November 14 live PostgreSQL statistics estimated candles at **2.97% of legacy header rows** and **1.25% of the November 13 dated header rows**. These include derived candles and other candle lineage as well as native historical Coinbase captures. Three quarters of the legacy sample was Level 2 and depth observations. These are analyzed row estimates from `pg_stats` and do not attribute bytes or authorize retirement. The **382.21 GB** legacy header is a single attached PostgreSQL relation with its indexes. Removing a candle subset has zero guaranteed filesystem credit. Both strategies ultimately require a verified replacement and retirement of the same physical relation. Existing archived candle pages can often be reused without decoding a new provider response or waiting for its history windows. A measured cold copy/resume pilot is therefore the primary schedule input.
+
+| Method | Reclaim and time basis | Qualification |
+| --- | --- | --- |
+| Reuse bytes plus exact copy | Read verified HDD pages and compare retained envelopes. Encode only uncovered accepted rows. Measure complete validated rows/hour and target catalog growth on the restored hardware. Credit blocks only after approved drop of the exact source relation. | Preserves versions, clocks and proof. Current hashes, external holds and frozen replays remain mandatory. |
+| Provider reacquisition | Request budget is a lower bound. Measure complete windows/time, retries, product reach, and publication separately. Do work outside the writer fence. No standalone SSD credit for the provider leg. | Fresh observation uses its own run. Compare overlaps, disclose holes and preserve prior accepted versions. |
+| Rebuild disposable data | Delete or replace named full physical units only after validating inputs, deterministic transformation/output, and absence of custody. Track cache or index allocation independently. | Retain exact evidence for any derived result that is a canonical version or frozen input. Standalone projections and caches can be rebuilt from verified authority. |
+
+No existing accepted Coinbase datasets are approved for replacement-only retirement. Reacquisition is optional for measured gaps and must never be on the critical path for the writer fence.
 
 ## Readback evidence before handoff
 

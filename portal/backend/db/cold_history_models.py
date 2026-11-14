@@ -14,6 +14,19 @@ COLD_LOCATOR_TABLE_NAMES = (
 )
 COLD_TABLE_NAMES = ("cold_fact_pages", "cold_fact_page_series", *COLD_LOCATOR_TABLE_NAMES)
 COLD_HISTORY_LAYOUT_VERSION = "market.canonical_cold_history.v1"
+COLD_IMMUTABILITY_TRIGGER = "trg_cold_fact_immutable"
+
+
+def assert_cold_history_immutability(conn):
+    guarded = set(conn.execute(text("""
+        SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        JOIN pg_trigger t ON t.tgrelid=c.oid
+        WHERE n.nspname='market' AND c.relname=ANY(CAST(:names AS text[]))
+          AND t.tgname=:trigger AND t.tgenabled='A' AND t.tgtype=58 AND t.tgqual IS NULL
+          AND t.tgfoid=to_regprocedure('market.reject_immutable_mutation()')
+    """), {"names": list(COLD_TABLE_NAMES), "trigger": COLD_IMMUTABILITY_TRIGGER}).scalars())
+    if guarded != set(COLD_TABLE_NAMES):
+        raise RuntimeError("cold_fact_catalog_immutability_required")
 
 
 def assert_cold_history_placement(conn):
@@ -83,11 +96,7 @@ class ColdFactPageSeriesRecord(Base):
             name="ck_cold_page_series_observation",
         ),
         CheckConstraint(
-            """(first_active_accepted_at IS NULL AND last_active_accepted_at IS NULL
-                AND last_active_observation_at IS NULL)
-               OR (first_active_accepted_at IS NOT NULL AND last_active_accepted_at IS NOT NULL
-                   AND last_active_observation_at IS NOT NULL
-                   AND first_active_accepted_at <= last_active_accepted_at)""",
+            "(last_active_accepted_at IS NULL) = (last_active_observation_at IS NULL)",
             name="ck_cold_page_series_active_bounds",
         ),
         Index(
@@ -107,7 +116,6 @@ class ColdFactPageSeriesRecord(Base):
     first_observation_at = Column(DateTime(timezone=True), nullable=False)
     last_observation_at = Column(DateTime(timezone=True), nullable=False)
     last_commit_seq = Column(BigInteger, nullable=False)
-    first_active_accepted_at = Column(DateTime(timezone=True))
     last_active_accepted_at = Column(DateTime(timezone=True))
     last_active_observation_at = Column(DateTime(timezone=True))
 

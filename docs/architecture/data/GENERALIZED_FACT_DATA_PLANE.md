@@ -19,6 +19,7 @@ code_paths:
   - src/market_data/contracts.py
   - src/market_data/canonical.py
   - src/market_data/canonical_storage.py
+  - src/market_data/cold_history.py
   - src/market_data/fact_archive.py
   - src/market_data/history_read_cache.py
   - src/market_data/archive.py

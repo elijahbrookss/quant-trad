@@ -9,7 +9,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from portal.backend.db.cold_history_models import (
-    Base, COLD_LOCATOR_TABLE_NAMES, COLD_TABLE_NAMES, assert_cold_history_placement,
+    Base, COLD_IMMUTABILITY_TRIGGER, COLD_LOCATOR_TABLE_NAMES, COLD_TABLE_NAMES,
+    assert_cold_history_immutability, assert_cold_history_placement,
 )
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION
 
@@ -66,7 +67,17 @@ def prepare_catalog(conn, *, expected_database: str, target_id: str) -> None:
             for name in index_names:
                 quoted = conn.dialect.identifier_preparer.quote_identifier(name)
                 conn.execute(text(f"ALTER INDEX market.{quoted} SET TABLESPACE {tablespace}"))
+        quoted_table = conn.dialect.identifier_preparer.quote_identifier(table.name)
+        conn.execute(text(f"""
+            CREATE TRIGGER {COLD_IMMUTABILITY_TRIGGER}
+            BEFORE UPDATE OR DELETE OR TRUNCATE ON market.{quoted_table}
+            FOR EACH STATEMENT EXECUTE FUNCTION market.reject_immutable_mutation()
+        """))
+        conn.execute(text(f"""
+            ALTER TABLE market.{quoted_table} ENABLE ALWAYS TRIGGER {COLD_IMMUTABILITY_TRIGGER}
+        """))
     assert_cold_history_placement(conn)
+    assert_cold_history_immutability(conn)
 
 
 def main():

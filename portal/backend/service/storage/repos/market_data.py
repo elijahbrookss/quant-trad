@@ -10,7 +10,7 @@ import uuid
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from portal.backend.db.execution_control import owned_connection_cancel
@@ -93,6 +93,39 @@ from .fact_storage import (
 _SERIES_IDENTITY_VERSION = "market_series.v1"
 _DIMENSIONAL_SERIES_IDENTITY_VERSION = "market_series.v2"
 _MANAGED_L2_BOOK_CONTRACT_VERSION = "market.l2_book.v1"
+
+
+def _observation_runs(rows, step_seconds):
+    runs = {}
+    sources = {}
+    counts = Counter()
+    step = timedelta(seconds=step_seconds)
+    for row in rows:
+        key = row["source_identity_key"]
+        sources[key] = {
+            "provider": row["source_provider"], "venue": row["source_venue"],
+            "source_kind": row["source_kind"], "adapter_version": row["source_adapter_version"],
+        }
+        counts[key] += 1
+        timestamp = row["observation_time"]
+        source_runs = runs.setdefault(row["source_id"], [])
+        if source_runs and timestamp <= source_runs[-1]["last"]:
+            continue
+        if source_runs and timestamp == source_runs[-1]["last"] + step:
+            source_runs[-1]["last"] = timestamp
+        else:
+            source_runs.append({"first": timestamp, "last": timestamp})
+    ordered = sorted(
+        ((run["first"], source_id, run) for source_id, values in runs.items() for run in values),
+        key=lambda item: (item[0], item[1]),
+    )
+    intervals = [run for _, _, run in ordered]
+    return {
+        "row_count": sum(counts.values()), "timeframe_seconds": step_seconds,
+        "first_observation_at": intervals[0]["first"] if intervals else None,
+        "source_summary": {"sources": sources, "counts": dict(counts)},
+        "observation_intervals": intervals,
+    }
 
 
 def _json_text(value: Mapping[str, Any] | None) -> str:
@@ -2713,10 +2746,14 @@ class PostgresMarketDataRepository:
         cold_batch = []
         cold_cutoff = None
         series_dimensions = {}
-        if (
-            cold_active and source.provider.lower() == "coinbase" and source.source_kind == "historical_api"
+        historical = (
+            source.provider.lower() == "coinbase" and source.source_kind == "historical_api"
             and rows and all(fact.fact_type == CANDLE_FACT_TYPE for fact in rows)
-        ):
+        )
+        if cold_active and historical:
+            from .cold_history import require_cold_acquisition_headroom
+
+            require_cold_acquisition_headroom(session)
             cold_cutoff = session.execute(text("""
                 SELECT clock_timestamp() - make_interval(days => (policy->>'recent_days')::integer)
                 FROM public.portal_storage_policy WHERE id=1
@@ -3763,7 +3800,7 @@ class PostgresMarketDataRepository:
         and actual reads retain their full payload and archive checks.
         """
         execution_checkpoint()
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             identity = session.execute(text(
                 "SELECT fact_type,timeframe_seconds FROM market.series WHERE id=:series_id"
             ), {"series_id": int(series_id)}).mappings().one_or_none()
@@ -3771,6 +3808,13 @@ class PostgresMarketDataRepository:
                     or not identity["timeframe_seconds"] or identity["timeframe_seconds"] <= 0):
                 raise ValueError(f"candle_selection_series_invalid: series_id={series_id}")
             step = int(identity["timeframe_seconds"])
+            if cold_layout_active(session):
+                scope = dict(
+                    series_id=series_id, start=start, end=end,
+                    as_of_commit_seq=as_of_commit_seq, known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
+                )
+                return _observation_runs(self._iter_canonical_rows_with_session(session, **scope), step)
             selection_sql, params = self._canonical_selection_sql(
                 series_id=series_id, start=start, end=end,
                 as_of_commit_seq=as_of_commit_seq, known_at_lte=known_at_lte,

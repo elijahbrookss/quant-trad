@@ -104,6 +104,23 @@ def cold_layout_active(session) -> bool:
     """), {"layout": COLD_HISTORY_LAYOUT_VERSION}).scalar_one())
 
 
+def require_cold_acquisition_headroom(session) -> None:
+    """Pause optional historical acquisition before it competes with live writes."""
+    from ..history_policy import _read, registered_header_targets, _target
+
+    saved, _ = _read(session)
+    if saved is None or not saved.movement_enabled:
+        raise RuntimeError("cold_fact_publish_storage_policy_disabled")
+    targets = {row.id: _target(row) for row in registered_header_targets(session)}
+    recent = targets.get(saved.recent[0])
+    if recent is None or recent.medium != "ssd":
+        raise RuntimeError("cold_fact_recent_target_missing")
+    witness = recent.inspect(require_writable=False)
+    usable = witness.used_bytes + witness.available_bytes
+    if usable <= 0 or witness.used_bytes * 100 >= usable * 60:
+        raise RuntimeError("cold_fact_historical_acquisition_ssd_pressure")
+
+
 def publish_cold_candle_rows(session, rows: Iterable[Mapping]) -> None:
     """Publish bounded pages for the candle writer while its series lock is held."""
     from .fact_storage import ensure_payload_contracts
@@ -177,23 +194,21 @@ class PostgresColdHistory:
                 series_id = row["series_id"]
                 series_heads[series_id] = max(series_heads.get(series_id, 0), row["market_commit_seq"])
                 if row["state"] == "active":
-                    times = row["accepted_at"], row["accepted_at"], row["observation_time"]
-                    first, last, observation = active_times.get(series_id, times)
-                    active_times[series_id] = (
-                        min(first, times[0]), max(last, times[1]), max(observation, times[2]),
-                    )
-            session.execute(insert(_page_series), [
-                {
+                    accepted_at, observation_at = row["accepted_at"], row["observation_time"]
+                    last, observation = active_times.get(series_id, (accepted_at, observation_at))
+                    active_times[series_id] = (max(last, accepted_at), max(observation, observation_at))
+            catalog_rows = []
+            for bounds in manifest.series:
+                last, observation = active_times.get(bounds.series_id, (None, None))
+                catalog_rows.append({
                     "page_id": manifest.manifest_id, "series_id": bounds.series_id,
                     "first_observation_at": bounds.first_observation_at,
                     "last_observation_at": bounds.last_observation_at,
                     "last_commit_seq": series_heads[bounds.series_id],
-                    "first_active_accepted_at": active_times.get(bounds.series_id, (None, None, None))[0],
-                    "last_active_accepted_at": active_times.get(bounds.series_id, (None, None, None))[1],
-                    "last_active_observation_at": active_times.get(bounds.series_id, (None, None, None))[2],
-                }
-                for bounds in manifest.series
-            ])
+                    "last_active_accepted_at": last,
+                    "last_active_observation_at": observation,
+                })
+            session.execute(insert(_page_series), catalog_rows)
             for offset in range(0, len(rows), _BATCH_SIZE):
                 batch = rows[offset:offset + _BATCH_SIZE]
                 session.execute(insert(_locators), [
@@ -389,6 +404,20 @@ class PostgresColdHistory:
             _locators.c.market_commit_seq == commit_seq,
         ).limit(2)).scalar_one_or_none()
 
+    def trade_source_ids(self, session, *, derived_series_id: int):
+        """Distinct admitted cold source IDs for trade series of the same instrument."""
+        return session.execute(text("""
+            SELECT DISTINCT source.value::bigint
+            FROM market.series derived JOIN market.series trade
+              ON trade.instrument_id=derived.instrument_id AND trade.fact_type='market.trade'
+            JOIN market.cold_fact_page_series catalog ON catalog.series_id=trade.id
+            JOIN market.cold_fact_pages page ON page.id=catalog.page_id
+            CROSS JOIN LATERAL jsonb_array_elements(page.descriptor->'series') bounds(value)
+            CROSS JOIN LATERAL jsonb_array_elements_text(bounds.value->'source_ids') source(value)
+            WHERE derived.id=:series_id AND (bounds.value->>'series_id')::bigint=trade.id
+            ORDER BY 1 LIMIT 2
+        """), {"series_id": derived_series_id}).scalars().all()
+
     def book_session_ids(self, session, *, definition_id: str, session_id: str):
         result = session.execute(select(_book_sessions.c.fact_id).where(
             _book_sessions.c.session_digest == _book_session_digest(definition_id, session_id),
@@ -400,7 +429,7 @@ class PostgresColdHistory:
         finally:
             result.close()
 
-    def latest_for_keys(self, session, *, series_id: int, keys: Sequence[str]):
+    def latest_for_keys(self, session, *, series_id: int, keys: Sequence[str], page_admission=None):
         """Probe HDD only for keys with no hot head and confirm every hash hit."""
         keys_by_digest = {}
         for key in set(keys):
@@ -424,6 +453,10 @@ class PostgresColdHistory:
             }
             if not locations:
                 continue
+            if page_admission is not None:
+                manifests = {location.manifest.manifest_id: location.manifest for location in locations.values()}
+                for manifest in manifests.values():
+                    page_admission(manifest)
             decoded = self.reader.read_by_ids(locations)
             for candidate in found:
                 row = decoded[candidate["fact_id"]]

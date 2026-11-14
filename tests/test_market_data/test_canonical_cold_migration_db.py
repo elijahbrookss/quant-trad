@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import JSON, bindparam, create_engine, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from market_data.archive import FilesystemRawArchiveObjectStore
@@ -64,6 +65,11 @@ def _prepare(engine, rows, archived, tablespace, history_root):
     columns = ", ".join(f"{name} {SOURCE_FIELDS.get(name, 'text')}" for name in fields)
     with engine.begin() as conn:
         conn.execute(text("CREATE SCHEMA market"))
+        conn.execute(text("""
+            CREATE FUNCTION market.reject_immutable_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'immutable canonical fixture'; END;
+            $$
+        """))
         conn.execute(text(f"CREATE TABLE market.fact_versions ({columns})"))
         conn.execute(text("""CREATE TABLE market.sources (id bigint PRIMARY KEY, identity_key text, provider text,
                           venue text, source_kind text, adapter_version text)"""))
@@ -152,6 +158,9 @@ def test_native_pg_stages_and_resumes_inactive_catalog(prepared_database, tmp_pa
         assert not cold_layout_active(session)
         repo = PostgresColdHistory(ColdHistoryReader(destination, limits=LIMITS))
         assert repo.read_by_ids(session, [row["id"] for row in rows]) == {row["id"]: row for row in rows}
+        with pytest.raises(DBAPIError, match="immutable canonical fixture"):
+            with session.begin_nested():
+                session.execute(text("DELETE FROM market.cold_fact_locators"))
         assert session.execute(text("SELECT count(*) FROM market.fact_versions")).scalar_one() == 4
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO market.fact_storage_state VALUES (:version, 'ready', clock_timestamp())"),
