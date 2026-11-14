@@ -18,7 +18,7 @@ from market_data.canonical_storage import legacy_material_evidence_key, legacy_m
 from market_data.fact_archive import FactArchiveLimits
 from market_data.market_state import derive_basis_features
 
-from .fact_dependencies import read_canonical_dependency_rows
+from .fact_dependencies import _cold_enabled, read_canonical_dependency_rows
 from .fact_storage import PostgresCanonicalFactStorageRepository
 
 
@@ -145,6 +145,8 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
         indexed[identity] = request
     selections = defaultdict(list)
     count = 0
+    cold_candidates = defaultdict(set)
+    cold = reader.cold_history(session) if _cold_enabled(session) else None
     # The selected-ID SQL and all causal/ambiguity checks remain unchanged.
     # Only its transaction-local planner setting changes; restore before the
     # hydration and validation statements below share the same connection.
@@ -193,7 +195,32 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
                 raise RuntimeError("canonical_material_source_budget_exceeded: reduce archive page size")
             for root, role, identity in found:
                 selections[(root, role)].append(identity)
-    identities = sorted({identity for ids in selections.values() for identity in ids})
+    for request_batch in _material_source_batches(requests) if cold is not None else ():
+        if check_budget is not None:
+            check_budget()
+        batch = [{**request, "known_at": request["known_at"].isoformat(),
+                  "evidence_key": legacy_material_evidence_key(request["fact_type"])}
+                 for request in request_batch]
+        groups = defaultdict(list)
+        for item in batch:
+            groups[(item["series_id"], item["evidence_key"])].append(item)
+        for (series_id, evidence_key), items in groups.items():
+            by_hash = defaultdict(list)
+            for item in items:
+                by_hash[item["material_hash"]].append((item["root_id"], item["role"]))
+            matches = cold.material_candidates(
+                session, series_ids=[series_id], material_hashes=by_hash, evidence_key=evidence_key,
+                include_legacy=evidence_key is not None, max_candidates=max_rows - count,
+            )
+            for fact_id, material_hash in matches:
+                for key in by_hash[material_hash]:
+                    if fact_id not in selections[key] and fact_id not in cold_candidates[key]:
+                        cold_candidates[key].add(fact_id)
+                        count += 1
+                        if count > max_rows:
+                            raise RuntimeError("canonical_material_source_budget_exceeded: reduce archive page size")
+    identities = sorted({identity for ids in selections.values() for identity in ids}
+                        | {identity for ids in cold_candidates.values() for identity in ids})
     sources = read_canonical_dependency_rows(session, identities, reader=reader,
         max_logical_bytes=max_logical_bytes, check_budget=check_budget)
     if set(sources) != set(identities):
@@ -202,6 +229,16 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
         if check_budget is not None:
             check_budget()
         record_from_storage_row(row)
+    for key, candidates in cold_candidates.items():
+        request = indexed[key]
+        for fact_id in sorted(candidates):
+            row = sources[fact_id]
+            alias = legacy_material_alias(row)
+            if (row["series_id"] != request["series_id"] or row["fact_type"] != request["fact_type"]
+                    or request["material_hash"] not in {row["material_hash"], alias["material_hash"] if alias else None}):
+                raise RuntimeError(f"canonical_material_source_mismatch: fact_version_id={key[0]} role={key[1]} source_id={fact_id}")
+            if row["market_commit_seq"] <= request["commit_seq"] and row["known_at"] <= request["known_at"]:
+                selections[key].append(fact_id)
     for identity, request in indexed.items():
         selected = [sources[source_id] for source_id in selections[identity]]
         if not selected:

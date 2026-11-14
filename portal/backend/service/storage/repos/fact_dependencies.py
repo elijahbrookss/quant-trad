@@ -1,14 +1,17 @@
 """Current placement proof for immutable canonical archive source edges."""
 from collections import OrderedDict, defaultdict
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 import json
 
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
-from market_data.fact_archive import archive_evidence_hash
+from market_data.fact_archive import _json_bytes, archive_evidence_hash
+from .cold_history import cold_layout_active
 from .fact_storage import (
-    _catalog_manifest, CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM,
+    _catalog_manifest, CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, canonical_fact_storage_repository,
     ensure_payload_contracts,
 )
 
@@ -136,6 +139,77 @@ class CheckpointSourceEvidenceCache:
         self.retained_bytes = 0
 
 
+def _checkpoint(check_budget: Callable[[], None] | None) -> None:
+    if check_budget is not None:
+        check_budget()
+
+
+def _cold_enabled(session) -> bool:
+    # Runtime repositories use SQLAlchemy Sessions. Standalone evidence
+    # validators may use read adapters without a serving-layout certificate.
+    return isinstance(session, Session) and cold_layout_active(session)
+
+
+def _window_matches(request, row):
+    return (
+        row["fact_type"] == request["fact_type"]
+        and (request["series_id"] is None or row["series_id"] == request["series_id"])
+        and (request["source_id"] is None or row["source_id"] == request["source_id"])
+        and row["market_commit_seq"] <= request["root_commit"]
+        and row["known_at"] <= request["known_at"]
+        and row["observation_time"] >= request["range_start"]
+        and (row["observation_time"] < request["range_end"]
+             or (request["include_end"] and row["observation_time"] == request["range_end"]))
+    )
+
+
+def _cold_window_revisions(session, *, indexed, requests, cold, max_rows, max_logical_bytes, check_budget):
+    pages = {}
+    page_scopes = defaultdict(list)
+    edge_count = 0
+    logical_bytes = 0
+    for offset in range(0, len(requests), 128):
+        _checkpoint(check_budget)
+        for root_id, series_id, manifest in cold.causal_window_pages(
+            session, requests[offset:offset + 128], max_candidates=max_rows - edge_count,
+        ):
+            _checkpoint(check_budget)
+            edge_count += 1
+            manifest_id = manifest.manifest_id
+            if manifest_id not in pages:
+                pages[manifest_id] = manifest
+                logical_bytes += manifest.logical_byte_count
+                if logical_bytes > max_logical_bytes:
+                    raise CanonicalSourceByteBudgetExceeded(
+                        logical_bytes=logical_bytes, max_logical_bytes=max_logical_bytes,
+                    )
+            elif pages[manifest_id] != manifest:
+                raise RuntimeError(f"canonical_window_cold_manifest_conflict: manifest_id={manifest_id}")
+            page_scopes[manifest_id].append((root_id, series_id))
+
+    selections = defaultdict(list)
+    sources = {}
+    matched_edges = 0
+    for manifest_id, manifest in pages.items():
+        _checkpoint(check_budget)
+        scopes_by_series = defaultdict(list)
+        for root_id, series_id in page_scopes[manifest_id]:
+            scopes_by_series[series_id].append(root_id)
+        for row in cold.reader.read_page(manifest):
+            _checkpoint(check_budget)
+            identity = row["id"]
+            for root_id in scopes_by_series[row["series_id"]]:
+                if not _window_matches(indexed[root_id], row):
+                    continue
+                matched_edges += 1
+                if matched_edges > max_rows:
+                    raise RuntimeError("canonical_window_source_budget_exceeded: reduce archive page size")
+                selections[root_id].append(identity)
+                if sources.setdefault(identity, row) is not row:
+                    raise RuntimeError(f"canonical_window_duplicate_cold_source: fact_version_id={identity}")
+    return sources, selections, logical_bytes
+
+
 def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
     """Keep complete bounded canonical windows, including corrections/invalidations.
 
@@ -155,11 +229,15 @@ def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_
             raise RuntimeError(f"canonical_window_request_invalid: fact_version_id={item['root_id']}")
     selections = defaultdict(list)
     count = 0
+    cold_requests = []
+    cold = reader.cold_history(session) if _cold_enabled(session) else None
     for offset in range(0, len(requests), _CAUSAL_WINDOW_REQUEST_BATCH_ROWS):
         if check_budget is not None:
             check_budget()
         batch = [{**item, **{name: item[name].isoformat() for name in ("known_at", "range_start", "range_end")}}
                  for item in requests[offset:offset + _CAUSAL_WINDOW_REQUEST_BATCH_ROWS]]
+        if cold is not None:
+            cold_requests.extend(batch)
         # Resolve optional series expansion once, then share an exact routed
         # observation range across roots with the same immutable scope. The
         # code-owned reader derives physical storage days from conservative
@@ -244,23 +322,41 @@ def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_
             if root_id not in indexed:
                 raise RuntimeError("canonical_window_source_scope_mismatch")
             selections[root_id].append(identity)
+    cold_sources, cold_selections, cold_bytes = ({}, {}, 0)
+    if cold is not None:
+        cold_sources, cold_selections, cold_bytes = _cold_window_revisions(
+            session, indexed=indexed, requests=cold_requests, cold=cold,
+            max_rows=max_rows, max_logical_bytes=max_logical_bytes, check_budget=check_budget,
+        )
     identities = sorted({identity for selected in selections.values() for identity in selected})
     sources = read_canonical_dependency_rows(session, identities, reader=reader,
-        max_logical_bytes=max_logical_bytes, check_budget=check_budget)
+        max_logical_bytes=max_logical_bytes - cold_bytes, check_budget=check_budget,
+    )
     if set(sources) != set(identities):
         raise RuntimeError("canonical_window_source_missing")
+    for identity, row in cold_sources.items():
+        if identity in sources:
+            original = dict(sources[identity])
+            original.pop("storage_day", None)
+            if _json_bytes(original) != _json_bytes(row):
+                raise RuntimeError(f"canonical_window_source_overlap_mismatch: fact_version_id={identity}")
+        sources[identity] = row
+    for root_id, selected in cold_selections.items():
+        selections[root_id].extend(selected)
+    edge_count = 0
+    order = lambda identity: (sources[identity]["series_id"], sources[identity]["observation_key"],
+                              sources[identity]["revision"])
     for root_id, selected in selections.items():
+        selections[root_id] = selected = sorted(set(selected), key=order)
+        edge_count += len(selected)
+        if edge_count > max_rows:
+            raise RuntimeError("canonical_window_source_budget_exceeded: reduce archive page size")
         request = indexed[root_id]
         for identity in selected:
             if check_budget is not None:
                 check_budget()
             row = sources[identity]
-            if (row["fact_type"] != request["fact_type"]
-                    or (request["series_id"] is not None and row["series_id"] != request["series_id"])
-                    or (request["source_id"] is not None and row["source_id"] != request["source_id"])
-                    or row["market_commit_seq"] > request["root_commit"] or row["known_at"] > request["known_at"]
-                    or row["observation_time"] < request["range_start"] or row["observation_time"] > request["range_end"]
-                    or (not request["include_end"] and row["observation_time"] == request["range_end"])):
+            if not _window_matches(request, row):
                 raise RuntimeError(f"canonical_window_source_scope_mismatch: fact_version_id={root_id} source_id={identity}")
     return sources, dict(selections)
 
@@ -287,16 +383,27 @@ def collect_source_history_archive_refs(session, *, rows, object_store):
     return references
 
 
-def _measure_canonical_dependency_rows(session, identities, *, max_logical_bytes, check_budget=None):
+def _measure_canonical_dependency_rows(session, identities, *, reader, max_logical_bytes, check_budget=None):
     """Charge the same hot documents and complete cold pages as hydration."""
     if not identities:
         return 0
     logical_bytes = 0
     cold_pages = {}
+    cold = reader.cold_history(session) if _cold_enabled(session) else None
     for offset in range(0, len(identities), 1000):
         if check_budget is not None:
             check_budget()
         batch = identities[offset:offset + 1000]
+        if cold is not None:
+            for location in cold.locations_by_ids(session, batch, require_all=False).values():
+                manifest = location.manifest
+                if manifest.manifest_id not in cold_pages:
+                    cold_pages[manifest.manifest_id] = manifest
+                    logical_bytes += manifest.logical_byte_count
+                    if logical_bytes > max_logical_bytes:
+                        raise CanonicalSourceByteBudgetExceeded(
+                            logical_bytes=logical_bytes, max_logical_bytes=max_logical_bytes,
+                        )
         logical_bytes += session.execute(text(f"""
             SELECT coalesce(sum(6::bigint * octet_length(to_jsonb(candidates)::text)),0)
             FROM (SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
@@ -332,14 +439,16 @@ def read_canonical_dependency_rows(session, identities, *, reader, max_logical_b
     if not identities:
         return {}
     _measure_canonical_dependency_rows(
-        session, identities, max_logical_bytes=max_logical_bytes, check_budget=check_budget,
+        session, identities, reader=reader, max_logical_bytes=max_logical_bytes, check_budget=check_budget,
     )
     return reader.read_rows_by_ids(session, identities)
 
 
-def _checkpoint_source_groups(session, identities, max_objects, check_budget):
+def _checkpoint_source_groups(session, identities, max_objects, check_budget, *, reader):
     """Locate exact identities without decoding payloads; one cold page per group."""
     groups, manifests = defaultdict(list), {}
+    authoritative_manifests = set()
+    cold = reader.cold_history(session) if _cold_enabled(session) else None
     for offset in range(0, len(identities), 1000):
         if check_budget is not None:
             check_budget()
@@ -347,8 +456,22 @@ def _checkpoint_source_groups(session, identities, max_objects, check_budget):
         locations = session.execute(text(
             "SELECT id,storage_day FROM market.fact_identities WHERE id=ANY(:ids)"
         ), {"ids": batch}).mappings().all()
-        if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+        found = {row["id"] for row in locations}
+        missing = set(batch) - found
+        if len(locations) != len(found) or (missing and cold is None):
             raise RuntimeError("canonical_checkpoint_source_identity_coverage_invalid")
+        if missing:
+            for identity, location in cold.locations_by_ids(session, sorted(missing)).items():
+                manifest = location.manifest
+                previous = manifests.setdefault(manifest.manifest_id, manifest)
+                if previous != manifest:
+                    raise RuntimeError("canonical_checkpoint_source_archive_catalog_conflict")
+                if len(manifests) > max_objects:
+                    raise RuntimeError("canonical_checkpoint_source_object_budget_exceeded")
+                groups[manifest.manifest_id].append(identity)
+                authoritative_manifests.add(manifest.manifest_id)
+        if not locations:
+            continue
         rows = session.execute(text("""
             SELECT source.id AS requested_id, hot.id AS hot_id, manifests.*
             FROM market.fact_versions AS source
@@ -360,9 +483,9 @@ def _checkpoint_source_groups(session, identities, max_objects, check_budget):
              AND (manifests.last_commit_seq,manifests.last_id)>=(source.market_commit_seq,source.id)
             WHERE source.id=ANY(:ids) AND source.storage_day=ANY(:days)
             ORDER BY source.id,manifests.page_ordinal LIMIT :limit
-        """), {"ids": batch, "days": sorted({row["storage_day"] for row in locations}),
-               "limit": len(batch) + 1}).mappings().all()
-        if len(rows) != len(batch) or {row["requested_id"] for row in rows} != set(batch):
+        """), {"ids": sorted(found), "days": sorted({row["storage_day"] for row in locations}),
+               "limit": len(found) + 1}).mappings().all()
+        if len(rows) != len(found) or {row["requested_id"] for row in rows} != found:
             raise RuntimeError("canonical_checkpoint_source_archive_coverage_invalid")
         for row in rows:
             if row["hot_id"] is not None:
@@ -377,7 +500,7 @@ def _checkpoint_source_groups(session, identities, max_objects, check_budget):
             if prior != manifest:
                 raise RuntimeError("canonical_checkpoint_source_archive_catalog_conflict")
             groups[manifest.manifest_id].append(row["requested_id"])
-    return groups, manifests
+    return groups, manifests, authoritative_manifests
 
 
 def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifier,
@@ -393,7 +516,9 @@ def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifie
     identities = sorted(set(identities))
     if not identities:
         return {}
-    groups, manifests = _checkpoint_source_groups(session, identities, max_objects, check_budget)
+    groups, manifests, authoritative_manifests = _checkpoint_source_groups(
+        session, identities, max_objects, check_budget, reader=reader,
+    )
     result, retained_bytes = {}, 0
     for manifest_id, batch in groups.items():
         if check_budget is not None:
@@ -408,14 +533,14 @@ def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifie
             byte_verifier.verify(manifest.object_key, manifest.object_sha256,
                                  expected_bytes=manifest.byte_count)
         selected = None
-        if manifest_id is not None and evidence_cache is not None:
+        if manifest_id is not None and manifest_id not in authoritative_manifests and evidence_cache is not None:
             selected = evidence_cache.get(manifest, batch)
             if selected is not None:
                 # Reapply the complete page charge and current header/contract
                 # proof. Dynamic contracts for unselected series are part of
                 # the full-page proof too; only Parquet decode is reused.
                 _measure_canonical_dependency_rows(
-                    session, batch, max_logical_bytes=remaining, check_budget=check_budget,
+                    session, batch, reader=reader, max_logical_bytes=remaining, check_budget=check_budget,
                 )
                 ensure_payload_contracts(session, [
                     contract for bounds in manifest.series
@@ -442,7 +567,7 @@ def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifie
                 raise CanonicalSourceByteBudgetExceeded(
                     logical_bytes=retained_bytes, max_logical_bytes=max_logical_bytes)
             result[identity] = row
-        if manifest_id is not None and evidence_cache is not None:
+        if manifest_id is not None and manifest_id not in authoritative_manifests and evidence_cache is not None:
             evidence_cache.remember(manifest, selected)
     return result
 
@@ -460,6 +585,7 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
         raise RuntimeError("canonical_source_dependency_duplicate")
     placements = []
     identities = sorted(expected)
+    cold_catalog = None
     for offset in range(0, len(identities), 1000):
         if check_budget is not None:
             check_budget()
@@ -469,9 +595,13 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
         locations = session.execute(text(
             "SELECT id,storage_day FROM market.fact_identities WHERE id=ANY(:ids)"
         ), {"ids": batch}).mappings().all()
-        if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
-            raise RuntimeError("canonical_source_dependency_missing")
         location_days = {row["id"]: row["storage_day"] for row in locations}
+        absent = set(batch) - location_days.keys()
+        if len(locations) != len(location_days) or (absent and (handoff is not None or not _cold_enabled(session))):
+            # The deployed physical-reclaim handoff compares an exact set of
+            # SQL-era relations. A cold-only edge requires a new handoff proof
+            # before that destructive path can be used.
+            raise RuntimeError("canonical_source_dependency_missing")
         days = sorted(set(location_days.values()))
         if check_budget is not None:
             check_budget()
@@ -488,10 +618,41 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
              AND hot.storage_day=ANY(:days)
             WHERE versions.id=ANY(:ids) AND versions.storage_day=ANY(:days)
             ORDER BY versions.id
-        """), {"ids": batch, "days": days}).mappings().all()
-        if ({item["id"] for item in headers} != set(batch)
+        """), {"ids": sorted(location_days), "days": days}).mappings().all() if location_days else []
+        if ({item["id"] for item in headers} != location_days.keys()
                 or any(item["storage_day"] != location_days[item["id"]] for item in headers)):
             raise RuntimeError("canonical_source_dependency_missing")
+        if absent:
+            if cold_catalog is None:
+                if not _cold_enabled(session):
+                    raise RuntimeError("canonical_source_dependency_missing")
+                cold_catalog = canonical_fact_storage_repository.cold_history(session)
+            claims = cold_catalog.placement_claims(session, sorted(absent), require_all=False)
+            if claims.keys() != absent:
+                raise RuntimeError("canonical_source_dependency_missing")
+            locations = {}
+            for identity, (location, row_hash) in claims.items():
+                _checkpoint(check_budget)
+                if row_hash != expected[identity]:
+                    raise RuntimeError(f"canonical_source_dependency_hash_mismatch: fact_version_id={identity}")
+                manifest = location.manifest
+                if objects is not None:
+                    objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
+                    locations[identity] = location
+                placements.append({
+                    "id": identity, "tier": "canonical_cold", "ordinal": location.ordinal,
+                    "manifest_id": manifest.manifest_id, "manifest_hash": manifest.manifest_hash,
+                })
+            if locations:
+                # The retirement proof must bypass any disposable SSD read cache.
+                from market_data.cold_history import ColdHistoryReader
+                verifier = ColdHistoryReader(
+                    cold_catalog.reader.object_store, limits=cold_catalog.reader.limits,
+                    ensure_contracts=cold_catalog.reader.ensure_contracts,
+                )
+                for identity, row in verifier.read_by_ids(locations).items():
+                    if row["row_hash"] != expected[identity]:
+                        raise RuntimeError(f"canonical_source_dependency_hash_mismatch: fact_version_id={identity}")
         cold = [item["id"] for item in headers if not item["hot_present"]]
         pages = defaultdict(list)
         matches = []
@@ -530,4 +691,4 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
             placements.append(placement)
         if handoff is not None:
             handoff.capture_sources(session, manifest_id, headers, matches)
-    return archive_evidence_hash({"placements": placements})
+    return archive_evidence_hash({"placements": sorted(placements, key=lambda item: item["id"])})

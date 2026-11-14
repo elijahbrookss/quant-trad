@@ -15,6 +15,7 @@ from sqlalchemy import text
 from data_providers.streams.coinbase import quiet_transport_witness
 from market_data.archive import read_raw_archive_parquet, raw_archive_content_fingerprint
 from market_data.range_evidence import utc, producer_range_evidence
+from .cold_history import cold_layout_active
 from .fact_lineage import _witness, BOOK_SCOPE_FIELDS
 
 MAX_OBJECTS = 256
@@ -343,6 +344,28 @@ def read_book_range_evidence(session, *, repository, series_id, start, end, wate
              "cutoff": known_at_lte, "limit": MAX_RECORDS + 1}).scalar_one()
     if count > MAX_RECORDS:
         raise ValueError("book_range_evidence_budget_exceeded: narrow the requested range")
+    if cold_layout_active(session):
+        # Candidate pages may contain other series, out-of-range observations
+        # and copies still in the hot tier. Count the page's full rows and
+        # bytes because integrity validation must decode the complete page.
+        # Bound the SQL input as well as eventual decode work.
+        budget = session.execute(text("""
+            SELECT count(*) AS pages, COALESCE(sum(row_count), 0) AS rows,
+                   COALESCE(sum(byte_count), 0) AS bytes
+            FROM (
+                SELECT page.row_count, page.byte_count
+                FROM market.cold_fact_page_series AS bounds
+                JOIN market.cold_fact_pages AS page ON page.id=bounds.page_id
+                WHERE bounds.series_id=:series_id
+                  AND bounds.first_observation_at<:end AND bounds.last_observation_at>=:start
+                  AND page.first_commit_seq<=:watermark
+                LIMIT :limit
+            ) bounded
+        """), {"series_id": series_id, "start": start, "end": end, "watermark": watermark,
+                 "limit": MAX_OBJECTS + 1}).mappings().one()
+        if (budget["pages"] > MAX_OBJECTS or count + budget["rows"] > MAX_RECORDS
+                or budget["bytes"] > MAX_BYTES):
+            raise ValueError("book_range_evidence_budget_exceeded: narrow the requested range")
     rows = repository._read_canonical_rows_with_session(
         session, series_id=series_id, start=start, end=end, as_of_commit_seq=watermark,
         known_at_lte=known_at_lte, latest_only=False, include_invalidated=True)

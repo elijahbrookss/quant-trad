@@ -18,7 +18,7 @@ from market_data.order_book import BOOK_RECONSTRUCTION_VERSION, L2ProductContrac
 
 from .fact_lineage import _witness, BOOK_SCOPE_FIELDS
 from .fact_storage import PostgresCanonicalFactStorageRepository
-from .fact_dependencies import read_canonical_dependency_rows, read_checkpoint_dependency_rows
+from .fact_dependencies import _cold_enabled, read_canonical_dependency_rows, read_checkpoint_dependency_rows
 
 
 BOOK_FACT_TYPES = frozenset({"market.l2_book", "market.bbo", "market.depth_observation"})
@@ -94,13 +94,37 @@ def resolve_book_position_revisions(session, *, requests, object_store, max_rows
             raise RuntimeError("canonical_book_source_budget_exceeded: reduce archive page size")
         for root, identity in found:
             selections[root].append(identity)
-    identities = sorted({identity for ids in selections.values() for identity in ids})
     reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
         limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
                                 max_file_bytes=max_file_bytes))
+    candidates = defaultdict(set)
+    if _cold_enabled(session):
+        cold = reader.cold_history(session)
+        for root, item in indexed.items():
+            for identity in cold.key_candidate_ids(
+                session, series_id=item["series_id"], key=item["observation_key"], max_candidates=max_rows - count,
+            ):
+                if identity not in selections[root]:
+                    candidates[root].add(identity)
+                    count += 1
+                    if count > max_rows:
+                        raise RuntimeError("canonical_book_source_budget_exceeded: reduce archive page size")
+    identities = sorted({identity for ids in selections.values() for identity in ids}
+                        | {identity for ids in candidates.values() for identity in ids})
     sources = read_canonical_dependency_rows(session, identities,
         reader=reader, max_logical_bytes=max_logical_bytes, check_budget=check_budget)
-    if set(sources) != set(identities) or set(selections) != set(indexed):
+    if set(sources) != set(identities):
+        raise RuntimeError("canonical_book_source_missing")
+    for root, ids in candidates.items():
+        request = indexed[root]
+        for identity in sorted(ids, key=lambda value: (sources[value]["market_commit_seq"], value)):
+            row = sources[identity]
+            if (row["series_id"] != request["series_id"] or row["observation_key"] != request["observation_key"]
+                    or row["fact_type"] != "market.l2_book"):
+                raise RuntimeError(f"canonical_book_source_scope_mismatch: fact_version_id={root} source_id={identity}")
+            if row["market_commit_seq"] <= request["commit_seq"] and row["known_at"] <= request["known_at"]:
+                selections[root].append(identity)
+    if any(not selections[root] for root in indexed):
         raise RuntimeError("canonical_book_source_missing")
     for source in sources.values():
         if check_budget is not None:
@@ -128,7 +152,8 @@ def resolve_book_position_revisions(session, *, requests, object_store, max_rows
             raise RuntimeError(f"canonical_book_source_missing: fact_version_id={request['root_id']}")
     # Conservatively retain other causal revisions at the same declared
     # position too. They are evidence, not alternative current-state inputs.
-    return sources, dict(selections)
+    retained = {identity for ids in selections.values() for identity in ids}
+    return {identity: sources[identity] for identity in sorted(retained)}, dict(selections)
 
 
 def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_verifier,
@@ -165,6 +190,11 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
     dependencies = {}
     checkpoint_contexts = []
     source_selections = {}
+    cold_candidates = {}
+    reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
+        limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
+                                max_file_bytes=max_file_bytes))
+    cold = reader.cold_history(session) if _cold_enabled(session) else None
     source_count = 0
     wanted = None if bound_checkpoint_ids is None else set(bound_checkpoint_ids)
     for (series_id, interval_id, product_id), (row, position) in scopes.items():
@@ -247,15 +277,21 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
             """), {"series": series_id, "key": source_key, "seq": row["market_commit_seq"],
                    "known_at": checkpoint["known_at"], "limit": max_rows - source_count + 1}).scalars().all()
             source_count += len(source_ids)
+            if cold is not None:
+                candidates = set(cold.key_candidate_ids(
+                    session, series_id=series_id, key=source_key, max_candidates=max_rows - source_count,
+                )) - set(source_ids)
+                cold_candidates[checkpoint["id"]] = (
+                    candidates, row["market_commit_seq"], checkpoint["known_at"], series_id, source_key,
+                )
+                source_count += len(candidates)
             if source_count > max_rows:
                 raise RuntimeError("canonical_book_checkpoint_source_budget_exceeded: reduce archive page size")
             source_selections[checkpoint["id"]] = source_ids
             checkpoint_contexts.append((checkpoint, opening, position, contract))
     sources = {row["id"]: row for row in rows}
-    requested = {identity for ids in source_selections.values() for identity in ids}
-    reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
-        limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
-                                max_file_bytes=max_file_bytes))
+    requested = ({identity for ids in source_selections.values() for identity in ids}
+                 | {identity for ids, *_ in cold_candidates.values() for identity in ids})
     additional = read_checkpoint_dependency_rows(session, sorted(requested - sources.keys()), reader=reader,
         byte_verifier=byte_verifier, max_logical_bytes=max_logical_bytes,
         max_objects=max_objects, check_budget=check_budget,
@@ -263,6 +299,14 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
     for source in additional.values():
         record_from_storage_row(source)
     sources.update(additional)
+    for checkpoint_id, (candidates, commit, known_at, series_id, source_key) in cold_candidates.items():
+        for identity in sorted(candidates):
+            row = sources[identity]
+            if (row["series_id"] != series_id or row["observation_key"] != source_key
+                    or row["fact_type"] != "market.l2_book"):
+                raise RuntimeError(f"canonical_book_checkpoint_source_scope_mismatch: checkpoint_id={checkpoint_id}")
+            if row["market_commit_seq"] <= commit and row["known_at"] <= known_at:
+                source_selections[checkpoint_id].append(identity)
     for checkpoint, opening, position, contract in checkpoint_contexts:
         matched = False
         for identity in source_selections[checkpoint["id"]]:
@@ -288,4 +332,4 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
     if wanted is not None and set(dependencies) != wanted:
         raise RuntimeError("canonical_book_checkpoint_bound_coverage_missing")
     return ([dependencies[identity] for identity in sorted(dependencies)],
-            [sources[identity] for identity in sorted(requested)])
+            [sources[identity] for identity in sorted({item for ids in source_selections.values() for item in ids})])
