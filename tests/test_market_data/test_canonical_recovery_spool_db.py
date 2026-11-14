@@ -97,19 +97,7 @@ def _admitted_rows(database, series):
         return facts, archive
 
 
-def test_logical_copy_restore_replays_retained_acknowledged_provider_spool(storage, tmp_path, monkeypatch):
-    if make_url(storage.dsn).host not in ("127.0.0.1", "timescaledb"):
-        pytest.skip("requires dedicated isolated PostgreSQL endpoint")
-    pg_dump, pg_restore = (shutil.which(name) for name in ("pg_dump", "pg_restore"))
-    if not pg_dump or not pg_restore:
-        pytest.skip("requires native PostgreSQL dump and restore clients")
-    target = tmp_path / "copy-filesystem"
-    target.mkdir()
-    udev = tmp_path / "udev"
-    udev.mkdir()
-    device = target.stat().st_dev
-    (udev / f"b{os.major(device)}:{os.minor(device)}").write_text("E:ID_FS_UUID=recovery-spool-fixture\n")
-    monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(udev))
+def _define_trade_stream(storage, monkeypatch):
     monkeypatch.delenv("MARKET_STRUCTURE_WORKING_ROOT", raising=False)
     monkeypatch.delenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", raising=False)
     monkeypatch.delenv("QT_MARKET_DATA_EXPECTED_UUID", raising=False)
@@ -140,6 +128,44 @@ def test_logical_copy_restore_replays_retained_acknowledged_provider_spool(stora
     structures.append_session_event(claim, event_ordinal=0, connection_epoch=0, event_type="session_started",
                                     occurred_at=datetime.now(UTC))
     structures.release(claim)
+    return structures, claim, series
+
+
+def _seal_trade(root, claim, *, trade_id):
+    timestamp = datetime.now(UTC).isoformat()
+    message = ProviderRawMessage.build(
+        provider=claim.provider, venue=claim.venue, stream_session_id=claim.session_id, connection_epoch=0,
+        receive_ordinal=1, received_at=timestamp, raw_frame=json.dumps({
+            "channel": "market_trades", "timestamp": timestamp, "sequence_num": 1,
+            "events": [{"type": "update", "trades": [{"product_id": "BTC-USD", "trade_id": trade_id,
+                         "price": "100", "size": "0.01", "side": "BUY", "time": timestamp}]}],
+        }),
+    )
+    segment = DurableRawSpoolSegment(root=root / "spool", definition_id=DEFINITION,
+                                     session_id=claim.session_id, connection_epoch=0)
+    record = RawStreamRecord.from_provider_message(
+        message, definition_id=DEFINITION, spool_segment_id=segment.spool_segment_id,
+        provider_product_id="BTC-USD", requested_channel="market_trades", observed_channel="market_trades",
+    )
+    segment.append(record)
+    segment.seal()
+    return segment, record
+
+
+def test_logical_copy_restore_replays_retained_acknowledged_provider_spool(storage, tmp_path, monkeypatch):
+    if make_url(storage.dsn).host not in ("127.0.0.1", "timescaledb"):
+        pytest.skip("requires dedicated isolated PostgreSQL endpoint")
+    pg_dump, pg_restore = (shutil.which(name) for name in ("pg_dump", "pg_restore"))
+    if not pg_dump or not pg_restore:
+        pytest.skip("requires native PostgreSQL dump and restore clients")
+    target = tmp_path / "copy-filesystem"
+    target.mkdir()
+    udev = tmp_path / "udev"
+    udev.mkdir()
+    device = target.stat().st_dev
+    (udev / f"b{os.major(device)}:{os.minor(device)}").write_text("E:ID_FS_UUID=recovery-spool-fixture\n")
+    monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(udev))
+    structures, claim, series = _define_trade_stream(storage, monkeypatch)
     source_root = tmp_path / "source"
     store = FilesystemRawArchiveObjectStore(source_root / "objects")
     with PostgresMarketStorageLifecycleRepository.dataset_snapshot_session(database=storage.database) as snapshot:
@@ -157,23 +183,7 @@ def test_logical_copy_restore_replays_retained_acknowledged_provider_spool(stora
     check = verify_logical_copy(copied)
     assert check["database_identity"] == identity and check["verified_archive_objects"] == 0
 
-    timestamp = datetime.now(UTC).isoformat()
-    message = ProviderRawMessage.build(
-        provider=source.provider, venue=source.venue, stream_session_id=claim.session_id, connection_epoch=0,
-        receive_ordinal=1, received_at=timestamp, raw_frame=json.dumps({
-            "channel": "market_trades", "timestamp": timestamp, "sequence_num": 1,
-            "events": [{"type": "update", "trades": [{"product_id": "BTC-USD", "trade_id": "rollback-trade",
-                         "price": "100", "size": "0.01", "side": "BUY", "time": timestamp}]}],
-        }),
-    )
-    segment = DurableRawSpoolSegment(root=source_root / "spool", definition_id=DEFINITION,
-                                     session_id=claim.session_id, connection_epoch=0)
-    record = RawStreamRecord.from_provider_message(
-        message, definition_id=DEFINITION, spool_segment_id=segment.spool_segment_id,
-        provider_product_id="BTC-USD", requested_channel="market_trades", observed_channel="market_trades",
-    )
-    segment.append(record)
-    segment.seal()
+    segment, record = _seal_trade(source_root, claim, trade_id="rollback-trade")
     relative_wal = segment.sealed_path.relative_to(source_root)
     saved_wal = tmp_path / "saved-provider-wal"
     shutil.copy2(segment.sealed_path, saved_wal)

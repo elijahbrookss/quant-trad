@@ -7,3 +7,7 @@ printf 'ci_proof_step Prove encrypted restore through actual QT current and froz
 
 printf 'ci_proof_step Prove packaged retained raw placement through encrypted restore\n'
 ./scripts/ci/run_test_suite.sh incremental-recovery tests/test_market_data/test_incremental_raw_placement_db.py -s -o cache_dir=/tmp/qt-incremental-raw-pytest-cache -p scripts.ci.proof_pytest
+
+
+printf 'ci_proof_step Prove exact recovery of the cold layout after acknowledged provider intake\n'
+./scripts/ci/run_test_suite.sh incremental-recovery tests/test_market_data/test_canonical_postwrite_recovery_db.py -s -o cache_dir=/tmp/qt-incremental-postwrite-pytest-cache -p scripts.ci.proof_pytest

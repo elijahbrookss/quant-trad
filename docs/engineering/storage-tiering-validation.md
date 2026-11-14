@@ -1353,3 +1353,27 @@ the accepted fact versions, commit order, lineage, and required derived and
 operational state. Normal raw spool retention alone ends at acknowledgement.
 This fixture uses a scripted trade and the v2 database layout. It verifies
 native replay and custody for that trade.
+
+## Exact recovery after an acknowledged cold-layout write
+
+The disposable paired-recovery rehearsal activates the cold canonical layout,
+admits a provider trade through the collector, freezes that accepted version,
+and takes a native encrypted physical database backup paired with a Restic
+archive inventory. It restores that exact endpoint into empty PostgreSQL data
+and archive roots and then starts the candidate schema. The checks compare
+canonical IDs, commit sequences, accepted and known-at times, latest and frozen
+reads, and the raw record, mapping, manifest, archive bytes and cold-page
+inventory. A later accepted trade is excluded by the selected endpoint.
+
+This recovers the cold layout at the tested post-write point. Restoring the
+original layout at a post-write point requires a different recovery path.
+Physical WAL spans both the cutover DDL and later DML, so replaying the same
+timeline through the later commit recreates the cold catalog. An isolated
+logical projection into a restored earlier layout could preserve the original
+catalog without applying that DDL. It would need to apply exact accepted rows
+and supporting catalogs in dependency order, including identities and commit
+sequence, source and raw custody, pinned lineage, session and coverage state,
+and any intervening non-collector writes. The provider-spool rehearsal above
+shows why ordinary provider replay does not supply those original clocks.
+An exact backward projection and a representative off-host restore remain
+unqualified.

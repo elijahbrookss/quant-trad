@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 _VERSION = "qt.local_recovery_copy.v1"
 _NAME = re.compile(r"copy_[0-9a-f]{32}")
 _HASH = re.compile(r"[0-9a-f]{64}")
+_RECOVERABLE_LAYOUTS = (
+    "market.fact_storage_tiers.v1", "market.fact_storage_tiers.v2", COLD_HISTORY_LAYOUT_VERSION,
+)
 _FAMILIES = (
     ("raw_archive_manifests", "raw_manifest"),
     ("book_checkpoint_manifests", "book_checkpoint"),
@@ -81,8 +84,7 @@ def _snapshot_layout(session):
         FROM market.fact_storage_state ORDER BY layout_version LIMIT 2
     """)).mappings().all()
     if (len(rows) != 1 or rows[0]["state"] != "ready"
-            or rows[0]["layout_version"] not in (
-                "market.fact_storage_tiers.v1", "market.fact_storage_tiers.v2", COLD_HISTORY_LAYOUT_VERSION)
+            or rows[0]["layout_version"] not in _RECOVERABLE_LAYOUTS
             or rows[0]["completed_at"] is None or rows[0]["completed_at"].tzinfo is None
             or not isinstance(rows[0]["evidence"], dict)):
         raise RuntimeError("recovery_storage_layout_not_ready")
@@ -378,8 +380,7 @@ class LocalRecoveryCopies:
                 layout = receipt["storage_layout"]
                 if (not isinstance(layout, dict)
                         or set(layout) != {"layout_version", "certificate_sha256"}
-                        or layout["layout_version"] not in (
-                            "market.fact_storage_tiers.v1", "market.fact_storage_tiers.v2")
+                        or layout["layout_version"] not in _RECOVERABLE_LAYOUTS
                         or not isinstance(layout["certificate_sha256"], str)
                         or not _HASH.fullmatch(layout["certificate_sha256"])):
                     raise RuntimeError("recovery_completion_layout_invalid")
