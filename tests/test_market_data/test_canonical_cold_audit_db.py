@@ -116,6 +116,18 @@ def test_source_hash_and_head_mismatches_block_audit(candidate):
         audit_candidate(engine, checkpoint, day=DAY, **kwargs)
 
 
+def test_initial_cutover_refuses_invisible_daily_staging(candidate):
+    engine, checkpoint, kwargs = candidate
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE market.cold_fact_pages DISABLE TRIGGER USER"))
+        conn.execute(text("UPDATE market.cold_fact_pages SET staged_storage_day=:day"), {"day": DAY})
+        conn.execute(text(f"ALTER TABLE market.cold_fact_pages ENABLE ALWAYS TRIGGER {COLD_IMMUTABILITY_TRIGGER}"))
+    with pytest.raises(RuntimeError, match="loaded_manifest_missing_or_changed"):
+        audit_candidate(engine, checkpoint, day=DAY, **kwargs)
+    with pytest.raises(RuntimeError, match="unplanned_loaded_manifest"):
+        audit_candidate(engine, checkpoint, inventory=True, **kwargs)
+
+
 def test_drift_in_loaded_locator_and_out_of_order_revision_are_detected(candidate):
     engine, checkpoint, kwargs = candidate
     first = _row()

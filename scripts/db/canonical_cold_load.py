@@ -54,9 +54,9 @@ def _guard(session, target, *, statement_timeout_ms):
 
 
 def _verify_resume_page(session, prior):
-    observed = session.execute(text("SELECT manifest_hash FROM market.cold_fact_pages WHERE id=:id"),
-                               {"id": prior.manifest.manifest_id}).scalar_one_or_none()
-    if observed != prior.manifest.manifest_hash:
+    observed = session.execute(text("SELECT manifest_hash,staged_storage_day FROM market.cold_fact_pages WHERE id=:id"),
+                               {"id": prior.manifest.manifest_id}).one_or_none()
+    if observed != (prior.manifest.manifest_hash, None):
         raise RuntimeError(f"canonical_cold_load_resume_page_not_admitted: id={prior.manifest.manifest_id}")
 
 

@@ -206,7 +206,7 @@ def _audit_page(conn, reader, *, page, child_oid, cutoff):
         raise RuntimeError(f"canonical_cold_audit_new_overlapping_source_archive_page: page={manifest.manifest_id}")
     loaded = conn.execute(text("SELECT * FROM market.cold_fact_pages WHERE id=:id"),
                           {"id": manifest.manifest_id}).mappings().one_or_none()
-    if loaded is None or _manifest(loaded) != manifest:
+    if loaded is None or loaded["staged_storage_day"] is not None or _manifest(loaded) != manifest:
         raise RuntimeError(f"canonical_cold_audit_loaded_manifest_missing_or_changed: page={manifest.manifest_id}")
     rows = reader.read_page(manifest)
     source = _source_rows(conn, day=page.source_day, after=page.after, through=manifest.last_cursor,
@@ -317,8 +317,11 @@ def _audit_inventory(conn, checkpoint, *, allowed_days, after_manifest, max_page
             manifest = _manifest(row)
             record = db.execute("""SELECT pages.day,pages.manifest_hash,pages.descriptor FROM pages JOIN cohorts USING(day)
                 WHERE pages.manifest_id=? AND cohorts.completed=1""", (manifest.manifest_id,)).fetchone()
-            if record is None or record[0] not in allowed_days or FactArchiveManifest.from_dict(
-                    json.loads(record[2]), expected_hash=record[1]) != manifest:
+            if (
+                row["staged_storage_day"] is not None or record is None
+                or record[0] not in allowed_days
+                or FactArchiveManifest.from_dict(json.loads(record[2]), expected_hash=record[1]) != manifest
+            ):
                 raise RuntimeError(f"canonical_cold_audit_unplanned_loaded_manifest: page={manifest.manifest_id}")
             pages.append(manifest.manifest_id)
     return {"start_after_manifest": after_manifest, "last_verified_manifest": pages[-1] if pages else after_manifest,
