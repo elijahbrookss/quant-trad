@@ -27,6 +27,7 @@ from portal.backend.service.storage.incremental_recovery import (
 from portal.backend.service.storage.recovery_copies import _identity, _snapshot_layout
 from portal.backend.service.storage.repos import market_data, market_lifecycle, market_structure
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, stage_handoff, verify_staged_handoff
 from scripts.automation.verify_encrypted_recovery_handoff import verify_handoff
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS
@@ -429,11 +430,33 @@ def _copy_repository(worker, selected):
     assert not list(restore_root.iterdir())
     copied = restore_root / "repository"
     copied.mkdir(mode=0o700)
-    shutil.copytree(worker.root / "database", copied / "database")
-    shutil.copytree(worker.root / "archives", copied / "archives")
-    receipt = copied / "complete.json"
-    shutil.copy2(worker.root / selected["name"] / "complete.json", receipt)
-    return restore_root, copied, receipt
+    receipt = worker.root / selected["name"] / "complete.json"
+    limits = TransferLimits(seconds=40, bytes=128 * 1024**2, files=10_000, reserve_bytes=16 * 1024**2)
+    options = dict(source=worker.root, receiving=copied, generation=selected["name"],
+                   receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(), limits=limits)
+    with worker.lock():
+        with pytest.raises(RuntimeError, match="source_writer_busy"):
+            stage_handoff(**options)
+    transfer = stage_handoff(**options)
+    assert transfer["encrypted_files"] > 0 and transfer["encrypted_bytes"] > 0
+    assert verify_staged_handoff(receiving=copied, transfer_receipt_sha256=transfer["transfer_receipt_sha256"],
+                                 limits=limits) == transfer
+    metadata = copied / "database" / "backup" / "qt" / "backup.info"
+    with metadata.open("r+b") as handle:
+        first = handle.read(1)
+        assert first
+        try:
+            handle.seek(0)
+            handle.write(bytes([first[0] ^ 0xff]))
+            handle.flush()
+            with pytest.raises(RuntimeError, match="receiving_ciphertext_changed"):
+                verify_staged_handoff(receiving=copied, transfer_receipt_sha256=transfer["transfer_receipt_sha256"],
+                                      limits=limits)
+        finally:
+            handle.seek(0)
+            handle.write(first)
+    print(f"QT_PAIRED_TRANSFER files={transfer['encrypted_files']} bytes={transfer['encrypted_bytes']}")
+    return restore_root, copied, copied / "complete.json"
 
 
 def _restored_access(worker, copied):
