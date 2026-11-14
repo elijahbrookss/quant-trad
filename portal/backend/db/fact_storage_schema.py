@@ -436,13 +436,15 @@ def assert_fact_storage_contract(
             cutover = FACT_ARCHIVE_GENERATION_CUTOVER if name in FACT_ARCHIVE_GENERATION_TABLES else FACT_STORAGE_CUTOVER
             raise RuntimeError(f"Canonical Fact storage is missing market.{name}. Run {cutover}")
     assert_fact_series_day_contract(conn)
-    assert_fact_identity_references(
-        conn, allow_missing_canonical_dependencies=allow_missing_canonical_dependency_tables,
-    )
     certificates = conn.execute(text(
         "SELECT layout_version,state FROM market.fact_storage_state ORDER BY layout_version LIMIT 2"
     )).all()
-    if certificates == [(COLD_HISTORY_LAYOUT_VERSION, "ready")]:
+    authoritative_cold = certificates == [(COLD_HISTORY_LAYOUT_VERSION, "ready")]
+    assert_fact_identity_references(
+        conn, allow_missing_canonical_dependencies=allow_missing_canonical_dependency_tables,
+        authoritative_cold=authoritative_cold,
+    )
+    if authoritative_cold:
         for table in COLD_TABLE_NAMES:
             if not inspector.has_table(table, schema="market"):
                 raise RuntimeError(f"cold_fact_catalog_missing: relation=market.{table}")

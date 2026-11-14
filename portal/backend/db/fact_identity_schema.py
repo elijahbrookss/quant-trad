@@ -238,15 +238,18 @@ def assert_fact_identity_contract(conn) -> None:
         raise RuntimeError("fact_header_partition_catalog_mismatch: explicit cutover or repair required")
 
 
-def assert_fact_identity_references(conn, *, allow_missing_canonical_dependencies=False) -> None:
-    """Require payload/archive references to bind to the global identity table."""
-    for table, column in (
-        ("fact_hot_payloads", "id"),
-        ("fact_archive_material_aliases", "fact_version_id"),
-        ("fact_archive_canonical_dependencies", "fact_version_id"),
-        ("fact_archive_prepared_material_aliases", "fact_version_id"),
-        ("fact_archive_prepared_canonical_dependencies", "fact_version_id"),
-    ):
+def assert_fact_identity_references(
+    conn, *, allow_missing_canonical_dependencies=False, authoritative_cold=False,
+) -> None:
+    """Check the reference enforcement appropriate for the authorized layout."""
+    from .cold_retirement_schema import ARCHIVE_FACT_REFERENCE_TABLES, assert_cold_dependency_bindings
+
+    references = [("fact_hot_payloads", "id")]
+    if authoritative_cold:
+        assert_cold_dependency_bindings(conn)
+    else:
+        references.extend((table, "fact_version_id") for table in ARCHIVE_FACT_REFERENCE_TABLES)
+    for table, column in references:
         relation = "market." + table
         if allow_missing_canonical_dependencies and table == "fact_archive_canonical_dependencies":
             if conn.execute(text("SELECT to_regclass(:relation)"),
