@@ -12,6 +12,7 @@ import re
 from sqlalchemy import text
 
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
+from scripts.db import fact_header_v2_online_proof as online
 
 
 STAGE_SCHEMA = "qt_cold_identity_rebuild"
@@ -32,6 +33,7 @@ _REFERENCES = {
     "qt_fact_header_cutover_v2.fact_versions": ("fk_market_fact_identity_day", "id, storage_day"),
 }
 _RETAINED_PARENT = "qt_fact_header_cutover_v2.fact_versions"
+_MAX_OID = 4_294_967_295
 _GUARDS = {
     "trg_guard_fact_identities": ("market.reject_fact_identity_mutation()", 27, "A", False),
     "trg_reject_mutation_fact_identities": ("market.reject_immutable_mutation()", 27, "O", False),
@@ -314,13 +316,73 @@ def _assert_no_external_dependencies(conn, oid):
         raise RuntimeError(f"cold_identity_incoming_dependency_unreviewed: {remaining}")
 
 
-def swap_identity_suffix(conn, *, expected_database: str, cutoff: date, statement_timeout_ms=900_000):
+def _assert_retained_parent(conn, expected_retired_legacy_oid):
+    conn.exec_driver_sql(f"LOCK TABLE ONLY {_RETAINED_PARENT} IN ACCESS EXCLUSIVE MODE NOWAIT")
+    parent_oid = _oid(conn, _RETAINED_PARENT)
+    empty_parent = conn.scalar(text("""
+        SELECT relkind='p' AND relfilenode=0
+          AND NOT EXISTS (SELECT FROM pg_inherits WHERE inhparent=c.oid OR inhrelid=c.oid)
+          AND NOT EXISTS (SELECT FROM pg_rewrite WHERE ev_class=c.oid)
+        FROM pg_class c WHERE oid=:oid
+    """), {"oid": parent_oid})
+    if empty_parent is not True:
+        raise RuntimeError("cold_identity_retained_cutover_parent_not_empty")
+    if _oid(conn, online.STATE) is None:
+        if expected_retired_legacy_oid is None:
+            old_closed_guard = conn.execute(text("""
+                SELECT tgname='trg_retained_source_closed' AND tgenabled='A' AND tgtype=7
+                    AND tgfoid=to_regprocedure('market.reject_immutable_mutation()')
+                    AND tgqual IS NULL AND tgnargs=0 AND NOT tgdeferrable AND NOT tginitdeferred
+                    AND tgoldtable IS NULL AND tgnewtable IS NULL
+                FROM pg_trigger WHERE tgrelid=:oid AND NOT tgisinternal
+            """), {"oid": parent_oid}).scalars().all()
+            if old_closed_guard == [True]:
+                return
+        raise RuntimeError("cold_identity_retained_cutover_parent_proof_missing")
+    online._inspect_triggers(conn, _RETAINED_PARENT, "header")
+    conn.exec_driver_sql(f"LOCK TABLE ONLY {online.STATE} IN SHARE MODE NOWAIT")
+    saved = conn.execute(text(f"SELECT id,binding FROM {online.STATE}")).one_or_none()
+    try:
+        binding = saved.binding if saved is not None and saved.id == 1 else None
+        original_oid = binding["source_oids"][online.headers.SOURCE]
+        raw_oid = binding["source_oids"][online.raw.SOURCE]
+        bound_parent_oid = binding["targets"]["fact_versions"][0]
+    except (IndexError, KeyError, TypeError):
+        raise RuntimeError("cold_identity_retained_cutover_parent_proof_invalid") from None
+    if (any(type(oid) is not int or not 0 < oid <= _MAX_OID
+            for oid in (original_oid, raw_oid, bound_parent_oid))
+            or bound_parent_oid != parent_oid
+            or original_oid == _oid(conn, online.headers.SOURCE)
+            or (expected_retired_legacy_oid is not None and original_oid != expected_retired_legacy_oid)):
+        raise RuntimeError("cold_identity_retained_cutover_parent_proof_mismatch")
+
+    # Forward adoption keeps the shadow guards but renames their original
+    # header source. Use that source's saved OID, even after its audited drop.
+    bodies = online._bodies(binding)
+    for role in ("header", "truncate"):
+        online._inspect_function(conn, role, bodies[role])
+        if conn.scalar(text("""
+            SELECT EXISTS (
+                SELECT FROM pg_proc p, aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) acl
+                WHERE p.oid=to_regprocedure(:name) AND acl.grantee<>p.proowner
+            )
+        """), {"name": f"{online.SCHEMA}.online_guard_{role}()"}):
+            raise RuntimeError(f"cold_identity_retained_cutover_parent_function_acl_changed: {role}")
+
+
+def swap_identity_suffix(conn, *, expected_database: str, cutoff: date,
+                         expected_retired_legacy_oid: int | None = None, statement_timeout_ms=900_000):
     """Replace the registry atomically after the audited hot prefix is removed.
 
     Requires the caller's exclusive writer fence, the four archive FK
     transitions, and a staged regular table. Leaves the old registry intact
-    for a separately verified and approved physical retirement.
+    for a separately verified and approved physical retirement. Pass the
+    audited original header OID when retiring a forward-adopted legacy child.
     """
+    if (expected_retired_legacy_oid is not None and (
+        type(expected_retired_legacy_oid) is not int or not 0 < expected_retired_legacy_oid <= _MAX_OID
+    )):
+        raise ValueError("cold_identity_invalid_retired_legacy_oid")
     _requires_database(conn, expected_database, cutoff, statement_timeout_ms)
     _require_fence(conn)
     old_oid, new_oid = _oid(conn, SOURCE), _oid(conn, STAGED)
@@ -330,26 +392,7 @@ def swap_identity_suffix(conn, *, expected_database: str, cutoff: date, statemen
         conn.exec_driver_sql(f"LOCK TABLE ONLY {table} IN ACCESS EXCLUSIVE MODE NOWAIT")
     bindings = _fk_bindings(conn, old_oid)
     if _RETAINED_PARENT in bindings:
-        conn.exec_driver_sql(f"LOCK TABLE ONLY {_RETAINED_PARENT} IN ACCESS EXCLUSIVE MODE NOWAIT")
-        empty_parent = conn.scalar(text("""
-            SELECT relkind='p' AND relfilenode=0
-              AND NOT EXISTS (SELECT FROM pg_inherits WHERE inhparent=c.oid OR inhrelid=c.oid)
-            FROM pg_class c WHERE oid='qt_fact_header_cutover_v2.fact_versions'::regclass
-        """))
-        if empty_parent is not True:
-            raise RuntimeError("cold_identity_retained_cutover_parent_not_empty")
-        if conn.scalar(text("""
-            SELECT NOT EXISTS (
-                SELECT FROM pg_trigger
-                WHERE tgrelid='qt_fact_header_cutover_v2.fact_versions'::regclass
-                  AND tgname='trg_retained_source_closed' AND tgenabled='A' AND tgtype=7
-                  AND tgfoid=to_regprocedure('market.reject_immutable_mutation()')
-                  AND tgqual IS NULL AND tgnargs=0
-            )
-        """)):
-            # A partitioned parent with no children cannot accept rows today.
-            # Its retained-source admission guard must also survive a rebind.
-            raise RuntimeError("cold_identity_retained_cutover_parent_guard_missing")
+        _assert_retained_parent(conn, expected_retired_legacy_oid)
     if conn.scalar(text("SELECT EXISTS(SELECT FROM market.fact_versions WHERE storage_day<:cutoff)"),
                    {"cutoff": cutoff}):
         raise RuntimeError("cold_identity_source_header_prefix_still_present")
@@ -392,6 +435,8 @@ def swap_identity_suffix(conn, *, expected_database: str, cutoff: date, statemen
     if (_fk_bindings(conn, new_oid).keys() != bindings.keys() or _verify_guards(conn, new_oid) != guards
             or _index_groups(conn, new_oid, promoted=True) != expected_indexes):
         raise RuntimeError("cold_identity_promoted_contract_mismatch")
+    if _RETAINED_PARENT in bindings:
+        _assert_retained_parent(conn, expected_retired_legacy_oid)
     _source_registry(conn, new_oid)
     _assert_no_external_dependencies(conn, old_oid)
     conn.exec_driver_sql(f"""

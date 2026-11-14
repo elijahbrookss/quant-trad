@@ -1,4 +1,5 @@
 from datetime import date
+import json
 import os
 
 import pytest
@@ -10,6 +11,7 @@ from portal.backend.db.fact_identity_schema import (
     REGISTER_IDENTITY_BODY, REQUIRE_HEADER_BODY, REJECT_IDENTITY_MUTATION_BODY,
 )
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
+from scripts.db import fact_header_v2_online_proof as online
 from scripts.db.canonical_cold_identity_rebuild import (
     PREVIOUS, SOURCE, STAGED, finalize_identity_suffix, prepare_identity_suffix, swap_identity_suffix,
 )
@@ -17,6 +19,7 @@ from scripts.db.canonical_cold_identity_rebuild import (
 
 pytestmark = pytest.mark.db
 DAY = date(2026, 10, 31)
+RETAINED = f"{online.SCHEMA}.fact_versions"
 
 
 @pytest.fixture
@@ -116,6 +119,39 @@ def _fence(conn):
                  {"name": _LIFECYCLE_LOCK_NAME})
 
 
+def _install_forward_retained_proof(conn):
+    relation_oids = conn.execute(text(f"""
+        SELECT 'market.fact_versions_prefix'::regclass::oid, '{RETAINED}'::regclass::oid,
+               'market.fact_versions'::regclass::oid
+    """)).one()
+    original_oid, parent_oid, current_oid = relation_oids
+    assert original_oid != current_oid
+    binding = {
+        "source_oids": {online.headers.SOURCE: original_oid, online.raw.SOURCE: current_oid},
+        "targets": {"fact_versions": online.headers._shape(conn, "fact_versions")},
+    }
+    assert binding["targets"]["fact_versions"][0] == parent_oid
+    bodies = online._bodies(binding)
+    for role in ("header", "truncate"):
+        name = f"{online.SCHEMA}.online_guard_{role}()"
+        conn.execute(text(f"CREATE OR REPLACE FUNCTION {name} RETURNS trigger "
+                          "LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $qt$"
+                          + bodies[role] + "$qt$"))
+        conn.exec_driver_sql(f"REVOKE ALL ON FUNCTION {name} FROM PUBLIC")
+    conn.exec_driver_sql(f"""
+        DROP TRIGGER trg_retained_source_closed ON {RETAINED};
+        CREATE TRIGGER {online.ROW_TRIGGER} BEFORE INSERT OR UPDATE OR DELETE ON {RETAINED}
+          FOR EACH ROW EXECUTE FUNCTION {online.SCHEMA}.online_guard_header();
+        ALTER TABLE {RETAINED} ENABLE ALWAYS TRIGGER {online.ROW_TRIGGER};
+        CREATE TABLE {online.STATE}(id integer PRIMARY KEY CHECK(id=1), binding jsonb NOT NULL,
+                                    leaf_bindings jsonb NOT NULL DEFAULT '{{}}'::jsonb)
+    """)
+    online._install_truncate(conn, RETAINED)
+    conn.execute(text(f"INSERT INTO {online.STATE}(id,binding) VALUES (1,CAST(:binding AS jsonb))"),
+                 {"binding": json.dumps(binding)})
+    return original_oid
+
+
 def test_exact_suffix_rebinds_foreign_keys_and_rollback_restores_oid(identity_database):
     conn, identity = identity_database
     parameters = {"expected_database": identity, "cutoff": DAY}
@@ -156,6 +192,60 @@ def test_exact_suffix_rebinds_foreign_keys_and_rollback_restores_oid(identity_da
     assert conn.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == stage["old_oid"]
     assert conn.scalar(text(f"SELECT '{STAGED}'::regclass::oid")) == stage["new_oid"]
     assert conn.scalar(text(f"SELECT to_regclass('{PREVIOUS}') IS NULL"))
+
+
+def test_forward_retained_guard_remains_bound_after_original_header_drop(identity_database):
+    conn, identity = identity_database
+    original_oid = _install_forward_retained_proof(conn)
+    parameters = {"expected_database": identity, "cutoff": DAY}
+    stage = prepare_identity_suffix(conn, **parameters)
+    conn.exec_driver_sql("DROP TABLE market.fact_versions_prefix")
+    assert not conn.scalar(text("SELECT EXISTS(SELECT FROM pg_class WHERE oid=:oid)"), {"oid": original_oid})
+    _fence(conn)
+    result = swap_identity_suffix(conn, expected_retired_legacy_oid=original_oid, **parameters)
+    assert result["new_oid"] == stage["new_oid"]
+    assert RETAINED in result["rebound_foreign_keys"]
+    with pytest.raises(DBAPIError, match="online_copy_proof_truncate_refused"):
+        with conn.begin_nested():
+            conn.exec_driver_sql(f"TRUNCATE {RETAINED}")
+
+
+@pytest.mark.parametrize(("statement", "reason"), [
+    (f"ALTER TABLE {RETAINED} DISABLE TRIGGER {online.ROW_TRIGGER}", "target_guard_changed"),
+    (f"DROP TRIGGER {online.TRUNCATE_TRIGGER} ON {RETAINED}", "target_guard_changed"),
+    (f"ALTER FUNCTION {online.SCHEMA}.online_guard_header() SECURITY INVOKER", "function_changed: header"),
+    (f"CREATE OR REPLACE FUNCTION {online.SCHEMA}.online_guard_header() RETURNS trigger LANGUAGE plpgsql "
+     "SECURITY DEFINER SET search_path=pg_catalog AS $$ BEGIN RETURN NEW; END; $$", "function_changed: header"),
+    (f"GRANT EXECUTE ON FUNCTION {online.SCHEMA}.online_guard_header() TO PUBLIC", "function_acl_changed: header"),
+    (f"DROP TABLE {online.STATE}", "parent_proof_missing"),
+    (f"UPDATE {online.STATE} SET binding = jsonb_set(binding, '{{targets,fact_versions,0}}', '1')",
+     "parent_proof_mismatch"),
+])
+def test_forward_retained_guard_rejects_drift(identity_database, statement, reason):
+    conn, identity = identity_database
+    original_oid = _install_forward_retained_proof(conn)
+    parameters = {"expected_database": identity, "cutoff": DAY}
+    stage = prepare_identity_suffix(conn, **parameters)
+    conn.exec_driver_sql("DROP TABLE market.fact_versions_prefix")
+    _fence(conn)
+    conn.exec_driver_sql(statement)
+    with pytest.raises(RuntimeError, match=reason):
+        with conn.begin_nested():
+            swap_identity_suffix(conn, expected_retired_legacy_oid=original_oid, **parameters)
+    assert conn.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == stage["old_oid"]
+
+
+def test_forward_retained_guard_requires_audited_original_oid_to_agree(identity_database):
+    conn, identity = identity_database
+    original_oid = _install_forward_retained_proof(conn)
+    parameters = {"expected_database": identity, "cutoff": DAY}
+    stage = prepare_identity_suffix(conn, **parameters)
+    conn.exec_driver_sql("DROP TABLE market.fact_versions_prefix")
+    _fence(conn)
+    with pytest.raises(RuntimeError, match="parent_proof_mismatch"):
+        with conn.begin_nested():
+            swap_identity_suffix(conn, expected_retired_legacy_oid=original_oid + 1, **parameters)
+    assert conn.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == stage["old_oid"]
 
 
 def test_exact_retirement_is_oid_bound_restrict_only_and_idempotent(identity_database):
