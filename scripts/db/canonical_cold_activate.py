@@ -260,6 +260,8 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
             for row in audit["prefix"]["days"]])
     identity_result = swap_identity_suffix(
         conn, expected_database=f"{target.system_identifier}/{target.oid}", cutoff=cutoff,
+        expected_retired_legacy_oid=next((row["child_oid"] for row in audit["prefix"]["days"]
+                                          if row["child"] == "fact_versions_legacy"), None),
         statement_timeout_ms=statement_timeout_ms,
     )
     result = {
