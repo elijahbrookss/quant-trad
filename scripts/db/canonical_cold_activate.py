@@ -329,10 +329,7 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
     return result
 
 
-def read_activation_outcome(conn, *, execution, expected_execution_hash):
-    """Reconcile durable SQL state for this exact operation on the pinned database."""
-    validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
-    expected = execution["target_database"]
+def _read_authority(conn, expected):
     identity = PostgresMigrationSource(conn.engine, expected_system_identifier=expected["system_identifier"])
     if identity.identity(conn) != expected:
         raise RuntimeError("canonical_cold_activation_outcome_wrong_database")
@@ -342,13 +339,33 @@ def read_activation_outcome(conn, *, execution, expected_execution_hash):
     """)).all()
     if len(rows) != 1 or tuple(rows[0][1:3]) != ("ready", True):
         raise RuntimeError("canonical_cold_activation_outcome_uncertain")
-    layout, _, _, evidence = rows[0]
-    if PostgresMarketDataRepository._current_commit_seq_with_session(conn) != execution["source_commit_seq"]:
+    return rows[0][0], rows[0][3], PostgresMarketDataRepository._current_commit_seq_with_session(conn)
+
+
+def _assert_original_inventory(conn, expected_inventory):
+    assert_fact_storage_contract(conn)
+    if _inventory_hash(conn) != expected_inventory:
+        raise RuntimeError("canonical_cold_activation_original_boundary_changed")
+
+
+def read_original_watermark(conn, *, expected, expected_inventory):
+    """Check original SQL authority before a final boundary receipt exists."""
+    layout, _, watermark = _read_authority(conn, expected)
+    if layout != FACT_STORAGE_LAYOUT_VERSION:
+        raise RuntimeError("canonical_cold_transition_old_authority_required")
+    _assert_original_inventory(conn, expected_inventory)
+    return watermark
+
+
+def read_activation_outcome(conn, *, execution, expected_execution_hash):
+    """Reconcile durable SQL state for this exact operation on the pinned database."""
+    validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
+    expected = execution["target_database"]
+    layout, evidence, watermark = _read_authority(conn, expected)
+    if watermark != execution["source_commit_seq"]:
         raise RuntimeError("canonical_cold_activation_outcome_commit_boundary_changed")
     if layout == FACT_STORAGE_LAYOUT_VERSION:
-        assert_fact_storage_contract(conn)
-        if _inventory_hash(conn) != execution["loaded_inventory_hash"]:
-            raise RuntimeError("canonical_cold_activation_original_boundary_changed")
+        _assert_original_inventory(conn, execution["loaded_inventory_hash"])
         return "original"
     if (layout != COLD_HISTORY_LAYOUT_VERSION or not isinstance(evidence, dict)
             or evidence.get("execution_hash") != expected_execution_hash

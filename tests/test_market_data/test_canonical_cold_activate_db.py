@@ -258,11 +258,34 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
     outcome_arguments = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
     if owner_path:
         phases = []
+        events = {}
+        package = {
+            "scope": {key: value for key, value in execution.items() if key not in {
+                "schema", "evidence", "source_commit_seq", "approved_package_hash",
+            }},
+            "source_commit_floor": frozen.max_commit_seq,
+            "artifacts": {key: {"sha256": value} for key, value in execution["evidence"].items()},
+        }
+
+        def record(phase, evidence):
+            phases.append(phase)
+            events[phase] = evidence
 
         def provider_boundary(conn, commit_seq):
             phases.append("provider")
             assert not conn.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
             assert commit_seq == latest_commit
+            return execution["evidence"]["provider_boundary"]
+
+        def recovery_boundary(fence, control, commit_seq, provider, remaining):
+            phases.append("recovery")
+            assert commit_seq == latest_commit and provider == execution["evidence"]["provider_boundary"]
+            assert remaining() > 0
+            with control.begin():
+                assert control.scalar(text("SELECT current_database()")) == "postgres"
+            with fence.connection.begin():
+                fence.assert_quiet(fence.connection)
+            return execution["evidence"]["independent_recovery"]
 
         def verify_candidate(conn, result):
             phases.append("accepted")
@@ -271,31 +294,34 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
             assert conn.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NULL"))
 
         with _fence_connections(storage) as (retained, control):
+            owner = dict(package=package, approved_package_hash=execution["approved_package_hash"],
+                         receipts=receipts, store=new_store, limits=ArchiveVerificationLimits(), timeout_seconds=60,
+                         assert_host_held=lambda: None, host_remaining=lambda: 60,
+                         verify_provider_boundary=provider_boundary, verify_recovery_boundary=recovery_boundary,
+                         record=record, verify_candidate=verify_candidate, candidate_witness=candidate_witness)
+
             def fail_provider_boundary(conn, commit_seq):
                 provider_boundary(conn, commit_seq)
                 raise RuntimeError("fixture provider proof incomplete")
 
             with pytest.raises(ValueError, match="canonical_cold_witness_approved_digest_changed"):
                 run_fenced_transition(
-                    retained, control, **outcome_arguments, receipts=receipts, store=new_store,
-                    limits=ArchiveVerificationLimits(), timeout_seconds=60,
-                    assert_host_held=lambda: None, host_remaining=lambda: 60, verify_provider_boundary=provider_boundary,
-                    record=lambda phase, evidence: phases.append(phase), verify_candidate=verify_candidate,
-                    candidate_witness=candidate_witness + b" ",
+                    retained, control, **{**owner, "candidate_witness": candidate_witness + b" "},
                 )
             assert not phases
 
             with pytest.raises(RuntimeError, match="fixture provider proof incomplete"):
                 run_fenced_transition(
-                    retained, control, **outcome_arguments, receipts=receipts, store=new_store,
-                    limits=ArchiveVerificationLimits(), timeout_seconds=60,
-                    assert_host_held=lambda: None, host_remaining=lambda: 60,
-                    verify_provider_boundary=fail_provider_boundary,
-                    record=lambda phase, evidence: phases.append(phase), verify_candidate=verify_candidate,
-                    candidate_witness=candidate_witness,
+                    retained, control, **{**owner, "verify_provider_boundary": fail_provider_boundary},
                 )
             assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider",
                               "activation_rolled_back", "login_opening", "jobs_restarting", "database_reopened"]
+            phases.clear()
+            with pytest.raises(ValueError, match="canonical_cold_package_final_boundary_missing"):
+                run_fenced_transition(retained, control, **{**owner, "verify_recovery_boundary": lambda *args: None})
+            assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider",
+                              "activation_rolled_back", "login_opening", "jobs_restarting", "database_reopened"]
+            assert events["activation_rolled_back"] == {"execution_hash": None, "source_commit_seq": latest_commit}
             phases.clear()
             limits = ArchiveVerificationLimits()
             with retained.begin():
@@ -304,33 +330,24 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
             changed = {**witness, "cases": [dict(case) for case in witness["cases"]]}
             changed["cases"][1]["expected_hash"] = "f" * 64
             changed_witness = json.dumps(changed).encode()
-            rejected_execution = {**execution, "evidence": {**execution["evidence"],
-                "candidate_transaction_witness": sha256(changed_witness).hexdigest()}}
+            rejected_package = {**package, "artifacts": {**package["artifacts"],
+                "candidate_transaction_witness": {"sha256": sha256(changed_witness).hexdigest()}}}
 
             with pytest.raises(RuntimeError, match="canonical_cold_witness_content_changed: frozen before correction"):
                 run_fenced_transition(
-                    retained, control, execution=rejected_execution, expected_execution_hash=archive_evidence_hash(rejected_execution),
-                    receipts=receipts, store=new_store, limits=limits,
-                    timeout_seconds=60, assert_host_held=lambda: None, host_remaining=lambda: 60,
-                    verify_provider_boundary=provider_boundary, verified_objects=verified,
-                    record=lambda phase, evidence: phases.append(phase), verify_candidate=verify_candidate,
-                    candidate_witness=changed_witness,
+                    retained, control, **{**owner, "package": rejected_package, "candidate_witness": changed_witness},
+                    verified_objects=verified,
                 )
-            assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "activation_committing",
+            assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
                               "activation_rolled_back", "login_opening", "jobs_restarting", "database_reopened"]
             with retained.begin():
                 assert activation.read_activation_outcome(retained, **outcome_arguments) == "original"
                 assert retained.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NOT NULL"))
             phases.clear()
-            run_fenced_transition(
-                retained, control, **outcome_arguments, receipts=receipts, store=new_store,
-                limits=limits, timeout_seconds=60, verified_objects=verified,
-                assert_host_held=lambda: None, host_remaining=lambda: 60, verify_provider_boundary=provider_boundary,
-                record=lambda phase, evidence: phases.append(phase), verify_candidate=verify_candidate,
-                candidate_witness=candidate_witness,
-            )
-        assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "activation_committing",
+            run_fenced_transition(retained, control, **owner, verified_objects=verified)
+        assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
                           "accepted", "activation_verified", "login_opening", "jobs_restarting", "database_reopened"]
+        assert events["activation_committing"]["execution_hash"] == outcome_arguments["expected_execution_hash"]
     else:
         _exercise_fence_failures(storage, new_store, audit, outcome_arguments, receipts,
                                  identity, (legacy_day, daily_day))
