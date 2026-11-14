@@ -21,6 +21,9 @@ from .fact_series_day_schema import (
 )
 from .market_storage_models import MarketFactHotPayloadRecord
 from .market_data_models import MarketFactVersionRecord
+from .cold_history_models import (
+    COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES, assert_cold_history_placement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -435,11 +438,18 @@ def assert_fact_storage_contract(
     assert_fact_identity_references(
         conn, allow_missing_canonical_dependencies=allow_missing_canonical_dependency_tables,
     )
-    ready = conn.execute(text(
-        "SELECT state FROM market.fact_storage_state WHERE layout_version = :version"
-    ), {"version": FACT_STORAGE_LAYOUT_VERSION}).scalar_one_or_none()
-    if ready != "ready":
-        raise RuntimeError(f"Canonical Fact storage cutover is not ready: state={ready!r}. Run {FACT_STORAGE_CUTOVER}")
+    certificates = conn.execute(text(
+        "SELECT layout_version,state FROM market.fact_storage_state ORDER BY layout_version LIMIT 2"
+    )).all()
+    if certificates == [(COLD_HISTORY_LAYOUT_VERSION, "ready")]:
+        for table in COLD_TABLE_NAMES:
+            if not inspector.has_table(table, schema="market"):
+                raise RuntimeError(f"cold_fact_catalog_missing: relation=market.{table}")
+        assert_cold_history_placement(conn)
+        if inspector.has_table("fact_versions_legacy", schema="market"):
+            raise RuntimeError("cold_fact_legacy_header_still_serving")
+    elif certificates != [(FACT_STORAGE_LAYOUT_VERSION, "ready")]:
+        raise RuntimeError(f"Canonical Fact storage cutover is not ready: certificates={certificates!r}")
     kind, key = conn.execute(text(
         "SELECT relkind, pg_get_partkeydef(oid) FROM pg_class WHERE oid = 'market.fact_hot_payloads'::regclass"
     )).one()

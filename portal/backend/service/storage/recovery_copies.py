@@ -23,6 +23,7 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from core.storage_targets import StorageLocation, StorageTarget
+from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
 
 logger = logging.getLogger(__name__)
 _VERSION = "qt.local_recovery_copy.v1"
@@ -81,7 +82,7 @@ def _snapshot_layout(session):
     """)).mappings().all()
     if (len(rows) != 1 or rows[0]["state"] != "ready"
             or rows[0]["layout_version"] not in (
-                "market.fact_storage_tiers.v1", "market.fact_storage_tiers.v2")
+                "market.fact_storage_tiers.v1", "market.fact_storage_tiers.v2", COLD_HISTORY_LAYOUT_VERSION)
             or rows[0]["completed_at"] is None or rows[0]["completed_at"].tzinfo is None
             or not isinstance(rows[0]["evidence"], dict)):
         raise RuntimeError("recovery_storage_layout_not_ready")
@@ -96,7 +97,11 @@ def _snapshot_layout(session):
 
 def _archive_rows(session, *, max_objects, check):
     count = 0
-    for table, kind in _FAMILIES:
+    cold_introduced = session.execute(text(
+        "SELECT to_regclass('market.cold_fact_pages') IS NOT NULL"
+    )).scalar_one()
+    families = (*_FAMILIES, ("cold_fact_pages", None)) if cold_introduced else _FAMILIES
+    for table, kind in families:
         after = ""
         predicate = "" if kind is None else """
             AND NOT EXISTS (
@@ -104,6 +109,14 @@ def _archive_rows(session, *, max_objects, check):
                 WHERE e.action='archive_expire' AND e.event_type='completed'
                   AND e.target_kind=:kind AND e.target_id=m.id)
         """
+        if table == "cold_fact_pages":
+            predicate = """
+                AND NOT EXISTS (
+                    SELECT 1 FROM market.fact_archive_manifests old
+                    WHERE old.object_key=m.object_key
+                      AND old.object_sha256=m.object_sha256 AND old.byte_count=m.byte_count
+                )
+            """
         while True:
             check()
             rows = session.execute(text(f"""

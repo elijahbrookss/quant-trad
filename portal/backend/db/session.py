@@ -36,6 +36,7 @@ from .models import (
     REQUIRED_RESEARCH_LINK_INDEXES,
 )
 from . import execution_control as _execution_control  # noqa: F401 - scoped SQL hooks
+from .cold_history_models import COLD_TABLE_NAMES
 from .fact_storage_schema import (
     FACT_STORAGE_TABLES, FACT_STORAGE_IMMUTABLE_TABLES, FACT_STORAGE_LAYOUT_VERSION,
     assert_fact_storage_contract, ensure_fact_payload_partition, install_fact_storage_functions,
@@ -99,6 +100,7 @@ _CLEAN_BOOTSTRAP_ONLY_TABLES = frozenset(
         ("market", "fact_acquisition_coverage"),
         ("market", "book_operational_rollups"),
         *(("market", name) for name in FACT_STORAGE_TABLES),
+        *(("market", name) for name in COLD_TABLE_NAMES),
     }
 )
 # These additive performance indexes require bounded operator creation on existing
@@ -1565,6 +1567,13 @@ class Database:
         inspector = inspect(conn)
         for table in Base.metadata.sorted_tables:
             schema_name = str(table.schema or "").strip() or None
+            if (
+                schema_name == "market" and table.name in COLD_TABLE_NAMES
+                and not inspector.has_table(table.name, schema=schema_name)
+            ):
+                # Existing v2 installations can be used for rehearsal. The cold
+                # authority certificate requires all of these relations.
+                continue
             expected = {column.name for column in table.columns}
             existing = {col["name"] for col in inspector.get_columns(table.name, schema=schema_name)}
             missing = sorted(expected - existing)
