@@ -437,6 +437,40 @@ def _require_canonical_typed_material_source(
         )
 
 
+def _matched_provider_trade_ids(session, scope, trade_ids):
+    """Find accepted provider trade identities in the exact stream series/source."""
+    product = str(scope["provider_product_id"])
+    series_id, source_id = int(scope["series_id"]), int(scope["source_id"])
+    cold = None
+    found = set()
+    for offset in range(0, len(trade_ids), 256):
+        requested = {f"{product}:{trade_id}": trade_id for trade_id in trade_ids[offset:offset+256]}
+        hot = session.execute(text("""
+            SELECT DISTINCT external_event_key FROM market.fact_versions
+            WHERE series_id=:series AND source_id=:source AND fact_type='market.trade'
+              AND external_event_group_key=:product AND observation_key=ANY(:keys)
+              AND external_event_key=ANY(:trade_ids)
+              AND observation_key=external_event_group_key || ':' || external_event_key
+        """), {"series": series_id, "source": source_id, "product": product,
+               "keys": list(requested), "trade_ids": list(requested.values())}).scalars()
+        found.update(hot)
+        remaining = [key for key, trade_id in requested.items() if trade_id not in found]
+        if not remaining or not _cold_enabled(session):
+            continue
+        if cold is None:
+            cold = canonical_fact_storage_repository.cold_history(session)
+        claims = cold.key_candidates(session, series_id=series_id, keys=remaining, max_candidates=4096)
+        for fact_id, row in cold.read_by_ids(session, list(claims)).items():
+            observation_key = claims[fact_id]
+            if (row["series_id"] != series_id or row["observation_key"] != observation_key
+                    or row["fact_type"] != "market.trade"):
+                raise RuntimeError(f"market_trade_cold_source_mismatch: fact_version_id={fact_id}")
+            if (row["source_id"] == source_id and row["external_event_group_key"] == product
+                    and row["external_event_key"] == requested[observation_key]):
+                found.add(requested[observation_key])
+    return found
+
+
 def _trade_flow_status_rows(session, series_ids):
     aggregates = {}
     def fold(rows):
@@ -4127,12 +4161,12 @@ class PostgresMarketStructureRepository:
         trade_ids = sorted(
             {str(value).strip() for value in provider_trade_ids if str(value).strip()}
         )
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             manifest = session.execute(
                 text(
                     """
                     SELECT manifests.record_count, definitions.source_id,
-                           definitions.provider_product_id
+                           definitions.provider_product_id, definitions.series_id
                     FROM market.raw_archive_manifests AS manifests
                     JOIN market.stream_definitions AS definitions
                       ON definitions.id = manifests.definition_id
@@ -4160,25 +4194,7 @@ class PostgresMarketStructureRepository:
                     {"manifest_id": manifest_id},
                 ).scalar_one()
             )
-            found = set(
-                str(value)
-                for value in session.execute(
-                    text(
-                        """
-                        SELECT provider_trade_id
-                        FROM market.market_trade_identities
-                        WHERE source_id = :source_id
-                          AND provider_product_id = :product_id
-                          AND provider_trade_id = ANY(:trade_ids)
-                        """
-                    ),
-                    {
-                        "source_id": int(manifest["source_id"]),
-                        "product_id": str(provider_product_id),
-                        "trade_ids": trade_ids,
-                    },
-                ).scalars().all()
-            )
+            found = _matched_provider_trade_ids(session, manifest, trade_ids)
         missing = sorted(set(trade_ids) - found)
         return {
             "schema_version": "market.archive_trade_reconciliation.v1",
@@ -4200,11 +4216,11 @@ class PostgresMarketStructureRepository:
         trade_ids = sorted(
             {str(value).strip() for value in provider_trade_ids if str(value).strip()}
         )
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             definition = session.execute(
                 text(
                     """
-                    SELECT source_id, provider_product_id
+                    SELECT source_id, series_id, provider_product_id
                     FROM market.stream_definitions
                     WHERE id = :definition_id
                     """
@@ -4215,25 +4231,7 @@ class PostgresMarketStructureRepository:
                 raise ValueError(
                     f"market_stream_definition_unknown: definition_id={definition_id}"
                 )
-            found = sorted(
-                str(value)
-                for value in session.execute(
-                    text(
-                        """
-                        SELECT provider_trade_id
-                        FROM market.market_trade_identities
-                        WHERE source_id = :source_id
-                          AND provider_product_id = :product_id
-                          AND provider_trade_id = ANY(:trade_ids)
-                        """
-                    ),
-                    {
-                        "source_id": int(definition["source_id"]),
-                        "product_id": str(definition["provider_product_id"]),
-                        "trade_ids": trade_ids,
-                    },
-                ).scalars().all()
-            )
+            found = sorted(_matched_provider_trade_ids(session, definition, trade_ids))
         return {
             "provider_product_id": str(definition["provider_product_id"]),
             "requested_trade_ids": trade_ids,

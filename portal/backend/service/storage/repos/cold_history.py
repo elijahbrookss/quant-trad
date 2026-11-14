@@ -415,6 +415,22 @@ class PostgresColdHistory:
             raise RuntimeError("cold_fact_key_candidate_budget_exceeded")
         return tuple(result)
 
+    def key_candidates(self, session, *, series_id: int, keys: Sequence[str], max_candidates: int):
+        """Resolve a bounded batch of observation keys through the HDD index."""
+        requested = {_key_digest(key): key for key in keys}
+        if not requested:
+            return {}
+        rows = session.execute(
+            select(_locators.c.id, _locators.c.key_digest).join(
+                _pages, _pages.c.id == _locators.c.page_id,
+            ).where(
+                _locators.c.series_id == series_id, _locators.c.key_digest.in_(requested), _PAGE_VISIBILITY,
+            ).limit(max_candidates + 1),
+        ).all()
+        if len(rows) > max_candidates:
+            raise RuntimeError("cold_fact_key_candidate_budget_exceeded")
+        return {fact_id: requested[bytes(digest)] for fact_id, digest in rows}
+
     def commit_candidate_id(self, session, *, series_id: int, commit_seq: int):
         return session.execute(select(_locators.c.id).join(
             _pages, _pages.c.id == _locators.c.page_id,
