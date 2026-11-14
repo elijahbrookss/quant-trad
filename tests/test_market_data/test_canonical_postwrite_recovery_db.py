@@ -1,5 +1,7 @@
 """Restore the activated cold layout at a real committed provider-write boundary."""
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
@@ -10,6 +12,7 @@ import shutil
 from time import monotonic, sleep
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
@@ -32,6 +35,7 @@ from portal.backend.service.storage.repos import market_data, market_lifecycle, 
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.automation.canonical_cold_collector_checks import RECEIPT_VERSION as COLLECTOR_RECEIPT_VERSION
 from scripts.automation.canonical_cold_recovery_checks import PLAN_VERSION, bind_approved_recovery_checks
+from scripts.automation.canonical_cold_named_recovery import NamedRecoverySite, _opened, bind_named_recovery_source, recover_named_site
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, stage_handoff, verify_staged_handoff
 from scripts.automation.storage_host_boundary import load_receipt, save_receipt
 from scripts.automation.verify_encrypted_recovery_handoff import verify_handoff
@@ -488,6 +492,157 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
         check_deployed_source_reader(restored_url, restored_store, frozen.dataset_id, series, original_reader)
     finally:
         restored._reset_engine()
+
+
+def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, monkeypatch):
+    assert os.getenv("QT_STORAGE_DEMO") == "1" and os.getuid() == 70
+    engine = storage.database._engine
+    assert engine.url.host == "timescaledb" and engine.url.database.startswith("qt_migration_")
+    with engine.begin() as conn:
+        identity = _identity(conn)[0]
+        cluster, db_oid = identity.split("/")
+        target = {"system_identifier": cluster, "database_oid": int(db_oid), "database": engine.url.database}
+    objects = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    structures, claim, series = _define_trade_stream(storage, monkeypatch)
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
+    worker = _prepare_native_repository(engine, identity, tmp_path, monkeypatch)
+    _, first_trade = _seal_trade(tmp_path, claim, trade_id="coordinator-before-backup")
+    _native_recover(structures, tmp_path)
+    with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
+        pair = worker.create(snapshot, objects=objects, keep_copies=2)
+    restore_root, receiving, pair_receipt, transfer = _copy_repository(worker, pair)
+    base = restore_root / "prestage-native-base"
+    base.mkdir(mode=0o700)
+    base_native = verify_handoff(repository=receiving, receipt_sha256=transfer["pair_receipt_sha256"], archive_restore=base,
+        pgbackrest=worker.pgbackrest, restic=worker.restic, database_key=worker.config.database_key_path,
+        archive_key=worker.config.archive_key_path, timeout_seconds=30, max_archive_bytes=64 * 1024**2,
+        max_archive_objects=100, wal_segment_bytes=16 * 1024**2, max_wal_segments=16)
+    baseline = prepare_archive_baseline(pair_receipt, base, expected_receipt_sha256=transfer["pair_receipt_sha256"], max_objects=100)
+
+    def private_key(name, secret):
+        path = worker.config.archive_key_path.with_name(name)
+        path.touch(mode=0o600)
+        path.write_text(secret)
+        return path
+
+    source = Ed25519PrivateKey.generate()
+    receiver = Ed25519PrivateKey.generate()
+    source_sign = private_key("source-sign", source.private_bytes_raw().hex())
+    receiver_sign = private_key("receiver-sign", receiver.private_bytes_raw().hex())
+    suffix_key = private_key("named-suffix", secrets.token_hex(32))
+    pending_key = private_key("named-pending", secrets.token_hex(32))
+    site = NamedRecoverySite(receiving=receiving, approved_package_sha256="b" * 64,
+        base_transfer_sha256=transfer["transfer_receipt_sha256"], baseline_verification=base_native,
+        source_public_key=source.public_key().public_bytes_raw().hex(), receiver_public_key=receiver.public_key().public_bytes_raw().hex(),
+        wal=TransferLimits(35, 64 * 1024**2, 16), archive=TransferLimits(40, 64 * 1024**2, 100),
+        pending=TransferLimits(40, 16 * 1024**2, 100), database=TransferLimits(40, 256 * 1024**2, 1, 32 * 1024**2),
+        max_archive_objects=100, max_pending_entries=64)
+    scratch = tmp_path / "source-scratch"
+    pending_root = tmp_path / "source-pending"
+    receipts = tmp_path / "site-receipts"
+    workspace = restore_root / "receiver-workspace"
+    pgdata = workspace / "pgdata"
+    for path in (scratch, pending_root, receipts, workspace, pgdata):
+        path.mkdir(mode=0o700)
+    later_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-at-anchor")
+    scope, records, _ = _pending_level2(storage, structures, pending_root)
+    start = first_trade.received_at - timedelta(seconds=10)
+    end = later_trade.received_at + timedelta(seconds=10)
+    frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(series, start, end)])
+    expected = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series)
+    assert len(expected) == 2
+    source_commit = _admitted_rows(storage.database, series)[0][-1].market_commit_seq
+    source_options = dict(site=site, provider_receipt_root=receipts,
+        database_repository=worker.root, archive_objects=objects.root, scratch=scratch, baseline=baseline,
+        restic=worker.restic, archive_key=suffix_key, pending_key=pending_key, pending_spool=pending_root)
+    with pytest.raises(ValueError, match="signing_key_unapproved"):
+        bind_named_recovery_source(**source_options, signing_key=receiver_sign)
+    recover_source = bind_named_recovery_source(**source_options, signing_key=source_sign)
+
+    @contextmanager
+    def boot_isolated(restored_path, check):
+        assert restored_path == pgdata
+        (restore_root / "pgdata").symlink_to(pgdata)
+        (restore_root / "start").write_text("signed named receiver\n")
+        check()
+        url = engine.url.set(host="restored")
+        _wait_for_restored_cluster(url.set(database="postgres"))
+        check()
+        control_engine = create_engine(url.set(database="postgres"), poolclass=NullPool)
+        target_engine = create_engine(url, poolclass=NullPool)
+        try:
+            yield control_engine, target_engine
+        finally:
+            target_engine.dispose()
+            control_engine.dispose()
+
+    def verify_original(target_engine, base_restore, suffix_restore, pending, check):
+        check()
+        with target_engine.begin() as conn:
+            assert _snapshot_layout(conn) == pair["storage_layout"]
+            assert conn.scalar(text("SELECT current_setting('server_version_num')::int / 10000")) == 15
+        source_prefix = Path(str(objects.root).lstrip("/"))
+        final = receiving / "final-archive" / "complete.json"
+        suffix_prefix = Path(json.loads(final.read_text())["archive"]["archive_source_root"].lstrip("/"))
+        merged = workspace / "runtime-archive"
+        shutil.copytree(base_restore / source_prefix, merged)
+        shutil.copytree(suffix_restore / suffix_prefix, merged, dirs_exist_ok=True)
+        recovered_store = FilesystemRawArchiveObjectStore(merged, writable=False)
+        recovered_db = Database(target_engine.url.render_as_string(hide_password=False))
+        try:
+            assert recovered_db.ensure_schema(), str(recovered_db.last_error)
+            with monkeypatch.context() as patch:
+                patch.setattr(market_data, "db", recovered_db)
+                patch.setattr(market_data, "canonical_fact_storage_repository", PostgresCanonicalFactStorageRepository(
+                    object_store_factory=lambda: recovered_store, read_cache_factory=lambda: None))
+                repo = market_data.PostgresMarketDataRepository()
+                assert repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series) == expected
+            check_deployed_source_reader(target_engine.url, recovered_store, frozen.dataset_id, series, expected)
+        finally:
+            recovered_db._reset_engine()
+        restored_pending = workspace / "inactive-pending" / "spool"
+        exact = [frame for segment in pending["segments"]
+                 for frame in DurableRawSpoolSegment.from_path(restored_pending / segment["path"]).records()]
+        assert exact == records
+        return archive_evidence_hash({"layout": pair["storage_layout"], "frozen": frozen.dataset_id,
+                                      "pending": pending["verification_sha256"]})
+
+    with activation_fixture._fence_connections(storage) as (retained, control):
+        fence = close_database_fence(retained, control, expected_database=target, timeout_seconds=110, record=lambda *_: None)
+        try:
+            with retained.begin():
+                before = measure_pending_spool_before_anchor(source=pending_root, scope=scope, database_identity=identity,
+                    source_commit_seq=source_commit, timeout_seconds=10, max_entries=64, check_held=lambda: fence.assert_quiet(retained))
+            provider = {"schema": COLLECTOR_RECEIPT_VERSION, "phase": "drained",
+                        "evidence": {"source_commit_seq": source_commit, "pending_spool": before}}
+            provider_hash = archive_evidence_hash(provider)
+            save_receipt(receipts / f"collector-drained-{provider_hash}.json", provider | {"sha256": provider_hash}, initial=True)
+            with ThreadPoolExecutor(max_workers=1) as threads, archive_namespace(objects.root, exclusive=True) as check_archive:
+                result = threads.submit(recover_named_site, site=site, signing_key=receiver_sign, pgbackrest=worker.pgbackrest,
+                    restic=worker.restic, database_key=worker.config.database_key_path, base_archive_key=worker.config.archive_key_path,
+                    suffix_key=suffix_key, pending_key=pending_key, workspace=workspace, pgdata=pgdata, tablespaces={},
+                    boot_isolated=boot_isolated, verify_original_runtime=verify_original, timeout_seconds=100)
+                def remaining():
+                    if result.done():
+                        result.result()
+                    return fence.deadline - monotonic()
+
+                report = recover_source(fence, control, source_commit, provider_hash, remaining, check_archive)
+                reply = result.result(timeout=10)
+            assert reply["archive_closure"] == report["archive_closure"]
+            assert report["archive_closure"]["receiver_runtime_sha256"] == reply["runtime_sha256"]
+            assert report["archive_closure"]["coverage"]["final_objects"] == 2
+            assert report["pending_spool_verified"]["pre_anchor_sha256"] == before["source_sha256"]
+            response = load_receipt(receiving / "named-recovery-response.json", max_bytes=1024**2)
+            response["body"]["request_sha256"] = "f" * 64
+            damaged = receipts / "forged-response.json"
+            save_receipt(damaged, response, initial=True)
+            with pytest.raises(ValueError, match="signature_mismatch"):
+                _opened(damaged, site.receiver_public_key)
+            _check_named_receipt_package(tmp_path, target, before, report["pending_spool_source"],
+                                         report["pending_spool_verified"], report["archive_closure"])
+        finally:
+            reopen_database_fence(fence, control, expected_outcome="original", read_outcome=lambda _: "original", record=lambda *_: None)
 
 
 def _prepare_native_repository(engine, identity, tmp_path, monkeypatch):
