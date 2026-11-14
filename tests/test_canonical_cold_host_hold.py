@@ -1,9 +1,12 @@
+from contextlib import contextmanager, nullcontext
 import os
 from pathlib import Path
 from time import time
 
 import pytest
 
+from market_data.archive_verification import ArchiveVerificationLimits
+from scripts.automation import canonical_cold_execute as execute
 from scripts.automation import canonical_cold_host_hold as hold
 from scripts.automation.canonical_cold_release_guard import compatible_release_floor
 from scripts.automation import storage_host_boundary as host
@@ -144,3 +147,155 @@ def test_completion_preserves_terminal_evidence_and_sets_correct_promotion_floor
         assert resume(lambda _: {"ready": True}, verify_before_start=lambda _: {"ready": True}) == {"ready": True}
     assert not os.path.lexists(root / hold.HOLD)
     assert compatible_release_floor(root / hold.COMPLETION) == floor
+
+
+@pytest.mark.parametrize("scenario", ("committed", "original", "uncertain", "missing_tail", "wrong_control", "changed_object"))
+def test_execute_coordinates_one_approved_host_and_database_transition(authorized_hold, monkeypatch, scenario):
+    arguments, stopped = authorized_hold
+    arguments = {key: value for key, value in arguments.items() if key != "outage_deadline"}
+    root = arguments["state_root"]
+    events = []
+    journal = root / hold.HOLD
+
+    class Session:
+        closed = invalidated = False
+
+        def __init__(self):
+            self.transaction = False
+
+        def in_transaction(self):
+            return self.transaction
+
+        def get_execution_options(self):
+            return {}
+
+        @contextmanager
+        def begin(self):
+            self.transaction = True
+            try:
+                yield
+            finally:
+                self.transaction = False
+
+        def exec_driver_sql(self, command):
+            assert self.transaction and command == "SET TRANSACTION READ ONLY" and not stopped
+
+        def scalar(self, query):
+            assert str(query) == "SELECT current_database()"
+            return "postgres" if scenario != "wrong_control" else "qt"
+
+    conn, control = Session(), Session()
+    bound = {"database": "qt"}
+    target = {**bound, "allow_connections": True}
+    scope = {"target_database": bound, "source_database": {}, "audit_set_hash": "a", "loaded_inventory_hash": "b",
+             "identity_registry": {}}
+    approved = {"max_outage_seconds": 1200, "source_commit_floor": 20, "scope": scope}
+    monkeypatch.setattr(execute, "load_approved_package", lambda *a, **kw: approved)
+    monkeypatch.setattr(execute, "read_approved_candidate_witness", lambda *a: b"approved")
+    monkeypatch.setattr(execute, "validate_audit_receipts", lambda *a, **kw: scope)
+    monkeypatch.setattr(execute, "_bounded_step", lambda *_: nullcontext())
+    monkeypatch.setattr(execute, "read_original_watermark", lambda *a, **kw: 20)
+    monkeypatch.setattr(execute, "_database", lambda *a: target)
+    monkeypatch.setattr(execute, "assert_original_identity_registry", lambda *a, **kw: None)
+    monkeypatch.setattr(execute, "raw_index_placement_scope", lambda *a: {})
+    monkeypatch.setattr(execute, "assert_raw_mapping_index_placement", lambda *a, **kw: None)
+    monkeypatch.setattr(hold, "_record_serving_release", lambda *a, **kw: None)
+
+    class Verified:
+        def assert_unchanged(self):
+            self.check_budget()
+            assert not stopped and not journal.exists()
+            events.append("stamps")
+            if scenario == "changed_object":
+                raise RuntimeError(scenario)
+
+    verified = Verified()
+
+    def preflight(session, *, audit, store, limits, check_budget):
+        assert session is conn and session.in_transaction() and not stopped and not journal.exists()
+        check_budget()
+        events.append("checksums")
+        return verified
+
+    monkeypatch.setattr(execute, "verify_mounted_candidate", preflight)
+
+    def capture(remaining):
+        assert remaining() > 0 and not stopped and not journal.exists()
+        events.append("provider_tail")
+        return None if scenario == "missing_tail" else {"spool": 4}
+
+    def drained(session, watermark, tail):
+        assert session is conn and watermark == 24 and tail == {"spool": 4}
+        events.append("provider_drained")
+        return "provider"
+
+    def transition(target_conn, control_conn, *, record, verify_provider_boundary, assert_host_held,
+                   verified_objects, candidate_witness, **kwargs):
+        assert target_conn is conn and control_conn is control
+        assert verified_objects is verified and candidate_witness == b"approved"
+        assert_host_held()
+        assert stopped == list(hold.PAUSE_ORDER)
+        for phase in ("login_closing", "jobs_stopping", "database_fenced"):
+            record(phase, {})
+        assert verify_provider_boundary(conn, 24) == "provider"
+        if scenario == "uncertain":
+            raise RuntimeError(scenario)
+        if scenario == "committed":
+            record("activation_committing", {})
+            record("activation_verified", {})
+        else:
+            record("activation_rolled_back", {})
+        for phase in ("login_opening", "jobs_restarting", "database_reopened"):
+            record(phase, {"outcome": scenario})
+        if scenario == "original":
+            raise RuntimeError(scenario)
+        return {"source_commit_seq": 24}
+
+    monkeypatch.setattr(execute, "run_fenced_transition", transition)
+
+    def restart(*args, **kwargs):
+        assert host.load_receipt(journal)["phase"] == "database_reopened"
+        assert (kwargs["model"] is None) is (scenario == "original")
+        if scenario == "committed":
+            assert kwargs["verify_before_start"]({"before": True}) == {"ready": True}
+        else:
+            assert kwargs["verify_before_start"] is None
+        return kwargs["verify_ready"]({"running": True})
+
+    monkeypatch.setattr(hold, "restart_runtime", restart)
+
+    def application(activation, services):
+        assert activation["source_commit_seq"] == 24
+        events.append("prestart" if "before" in services else "candidate_ready")
+        return {"ready": True}
+
+    def original(services):
+        assert services == {"running": True}
+        events.append("original_ready")
+        return {"ready": True}
+
+    def run():
+        return execute.execute_approved_cutover(
+            conn, control, **arguments, receipts=object(), store=object(), limits=ArchiveVerificationLimits(),
+            preflight_seconds=60, outage_seconds=1200, capture_provider_tail=capture, verify_provider_boundary=drained,
+            verify_recovery_boundary=lambda *a: None, verify_candidate=lambda *a: None,
+            verify_candidate_prestart=application, verify_candidate_ready=application, verify_original_ready=original,
+        )
+
+    if scenario == "committed":
+        assert run() == {"activation": {"source_commit_seq": 24}, "runtime": {"ready": True}}
+        assert events == ["checksums", "stamps", "provider_tail", "provider_drained", "prestart", "candidate_ready"]
+    else:
+        with pytest.raises(RuntimeError, match={"missing_tail": "provider_tail_missing",
+                                               "wrong_control": "control_endpoint_changed"}.get(scenario, scenario)):
+            run()
+    if scenario in {"original", "committed"}:
+        assert not journal.exists()
+        assert host.load_receipt(root / hold.COMPLETION)["runtime_evidence"]["outcome"] == scenario
+        if scenario == "original":
+            assert events[-1] == "original_ready"
+    elif scenario == "uncertain":
+        assert host.load_receipt(journal)["phase"] == "database_fenced"
+        assert events == ["checksums", "stamps", "provider_tail", "provider_drained"]
+    else:
+        assert not stopped and not journal.exists()

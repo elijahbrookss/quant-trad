@@ -39,7 +39,7 @@ def _digest(value):
 
 
 @contextmanager
-def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_hash, outage_deadline):
+def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_hash, outage_deadline, before_pause=None):
     """Hold existing host deployment exclusion for an already approved exact package.
 
     The caller verifies archive and spool custody, recovery and phase-specific
@@ -49,7 +49,8 @@ def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_h
     """
     state_root = Path(state_root)
     remaining = outage_deadline - time() if type(outage_deadline) in (int, float) else 0
-    if not _digest(approved_package_hash) or not isfinite(remaining) or remaining <= 0:
+    if (not _digest(approved_package_hash) or not isfinite(remaining) or remaining <= 0
+            or (before_pause is not None and not callable(before_pause))):
         raise ValueError("canonical_cold_host_hold_invalid_package")
     stop_at = monotonic() + remaining
 
@@ -87,6 +88,9 @@ def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_h
 
         observe(())
         min_shutdown_time = (300 + 30) + (len(pause) - 1) * (60 + 30)
+        if before_pause is not None:
+            before_pause(check_deadline)
+            observe(())
         if check_deadline() < min_shutdown_time + 5:
             raise TimeoutError("canonical_cold_host_hold_insufficient_shutdown_budget")
         host.save_receipt(path, state, initial=True)

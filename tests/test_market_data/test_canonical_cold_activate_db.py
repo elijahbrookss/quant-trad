@@ -27,6 +27,7 @@ from portal.backend.service.storage.repos import market_data
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
 from portal.backend.service.storage.repos.fact_retention import PostgresCanonicalFactRetentionRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+from scripts.automation import canonical_cold_execute
 from scripts.db import canonical_cold_activate as activation
 from scripts.db import canonical_cold_transition as transition_runner
 from scripts.db import fact_header_v2_online_proof as online
@@ -88,6 +89,7 @@ def _stub_raw_index_case(monkeypatch):
     monkeypatch.setattr(activation, "verify_committed_raw_mapping_index", lambda conn, **kwargs: None)
     monkeypatch.setattr(activation, "assert_raw_mapping_index_placement", lambda conn, **kwargs: None)
     monkeypatch.setattr(transition_runner, "assert_raw_mapping_index_placement", lambda conn, **kwargs: None)
+    monkeypatch.setattr(canonical_cold_execute, "assert_raw_mapping_index_placement", lambda conn, **kwargs: None)
     return {"target_id": "fixture-raw-history", "tablespace_oid": 50, "table_oid": 90, "index_oid": 91,
             "max_copy_bytes": 1024**2, "timeout_seconds": 15}
 
@@ -445,7 +447,48 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     assert retained.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["old_oid"]
                     assert inspect_raw_mapping_index_member(retained)["tablespace_oid"] == 1663
                 phases.clear()
-            result = run_fenced_transition(retained, control, **owner, verified_objects=verified)
+            reopened = []
+
+            @contextmanager
+            def disposable_host(*args, before_pause, **kwargs):
+                before_pause(lambda: 60)
+
+                def resume(ready, *, verify_before_start):
+                    for acceptance in (verify_before_start, ready):
+                        assert acceptance({}) == {"ready": True}
+                    reopened.append(True)
+                    return {"ready": True}
+
+                yield package, lambda: None, record, lambda: 60, resume
+
+            def verify_started(activation_result, _services):
+                assert activation_result["source_commit_seq"] == latest_commit
+                with retained.begin():
+                    assert retained.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
+                    assert activation.read_activation_outcome(
+                        retained, **outcome_arguments, require_identity_retired=True,
+                    ) == "committed"
+                return {"ready": True}
+
+            def bound_provider(connection, commit_seq, tail):
+                assert tail == b"fixture pre-stop spool receipt"
+                return provider_boundary(connection, commit_seq)
+
+            package["max_outage_seconds"] = 60
+            with monkeypatch.context() as patch:
+                patch.setattr(canonical_cold_execute, "load_approved_package", lambda *args, **kwargs: package)
+                patch.setattr(canonical_cold_execute, "read_approved_candidate_witness", lambda *args: candidate_witness)
+                patch.setattr(canonical_cold_execute, "hold_cold_cutover", disposable_host)
+                completed = canonical_cold_execute.execute_approved_cutover(
+                    retained, control, state_root=tmp_path, inventory={}, package_path=tmp_path / "fixture.json",
+                    approved_package_hash=execution["approved_package_hash"], receipts=receipts, store=new_store, limits=limits,
+                    preflight_seconds=60, outage_seconds=60, capture_provider_tail=lambda _: b"fixture pre-stop spool receipt",
+                    verify_provider_boundary=bound_provider, verify_recovery_boundary=recovery_boundary,
+                    verify_candidate=verify_candidate, verify_candidate_prestart=verify_started,
+                    verify_candidate_ready=verify_started, verify_original_ready=lambda _: pytest.fail("unexpected rollback"),
+                )
+            assert reopened == [True] and completed["runtime"] == {"ready": True}
+            result = completed["activation"]
         assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
                           "accepted", "activation_verified", "login_opening", "jobs_restarting", "database_reopened"]
         assert events["activation_committing"]["execution_hash"] == outcome_arguments["expected_execution_hash"]
