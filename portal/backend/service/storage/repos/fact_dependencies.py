@@ -596,11 +596,7 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
             "SELECT id,storage_day FROM market.fact_identities WHERE id=ANY(:ids)"
         ), {"ids": batch}).mappings().all()
         location_days = {row["id"]: row["storage_day"] for row in locations}
-        absent = set(batch) - location_days.keys()
-        if len(locations) != len(location_days) or (absent and (handoff is not None or not _cold_enabled(session))):
-            # The deployed physical-reclaim handoff compares an exact set of
-            # SQL-era relations. A cold-only edge requires a new handoff proof
-            # before that destructive path can be used.
+        if len(locations) != len(location_days):
             raise RuntimeError("canonical_source_dependency_missing")
         days = sorted(set(location_days.values()))
         if check_budget is not None:
@@ -619,9 +615,11 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
             WHERE versions.id=ANY(:ids) AND versions.storage_day=ANY(:days)
             ORDER BY versions.id
         """), {"ids": sorted(location_days), "days": days}).mappings().all() if location_days else []
-        if ({item["id"] for item in headers} != location_days.keys()
+        header_ids = {item["id"] for item in headers}
+        if (len(header_ids) != len(headers)
                 or any(item["storage_day"] != location_days[item["id"]] for item in headers)):
             raise RuntimeError("canonical_source_dependency_missing")
+        absent = set(batch) - header_ids
         if absent:
             if cold_catalog is None:
                 if not _cold_enabled(session):
@@ -653,6 +651,8 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
                 for identity, row in verifier.read_by_ids(locations).items():
                     if row["row_hash"] != expected[identity]:
                         raise RuntimeError(f"canonical_source_dependency_hash_mismatch: fact_version_id={identity}")
+            if handoff is not None:
+                handoff.capture_canonical_cold_sources(manifest_id, claims)
         cold = [item["id"] for item in headers if not item["hot_present"]]
         pages = defaultdict(list)
         matches = []

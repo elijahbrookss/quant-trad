@@ -1,7 +1,7 @@
 """Default-disabled, one-partition physical reclamation after cold admission.
 
-The lifecycle executor supplies explicit policy/step bounds. This owner never
-deletes canonical headers, archive bytes, dataset bindings, or dependency pins.
+The lifecycle executor supplies explicit policy and step bounds. Under cold
+authority the handoff publishes cold history and retires both hot relations.
 """
 from __future__ import annotations
 
@@ -15,7 +15,14 @@ from sqlalchemy import text
 
 from core.storage_mounts import require_configured_archive_mount
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+from portal.backend.db.cold_history_models import assert_cold_history_immutability
+from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from portal.backend.db.fact_storage_schema import fact_partition_name
+from .cold_history import cold_layout_active
+from .cold_retirement import (
+    drop_verified_header, lock_header_namespace, require_oldest_header_day,
+    stage_retirement_pages, verify_cold_day_locators, verify_staged_locator_counts,
+)
 from .fact_dependencies import SELF_CONTAINED_FACT_TYPES
 from .fact_handoff import FactHandoffProof
 from .market_lifecycle import _LIFECYCLE_LOCK_NAME, MarketStorageLifecycleBusyError
@@ -248,6 +255,12 @@ class PostgresCanonicalFactReclamationRepository:
         with self.archive.database.session() as session:
             self._timeouts(session)
             partition = self.archive._lock(session, day, statement_timeout_ms=self.limits.statement_timeout_ms)
+            cold_layout = cold_layout_active(session)
+            if cold_layout and session.scalar(text("""
+                SELECT EXISTS (SELECT FROM market.cold_fact_retired_days
+                    WHERE storage_day=:day AND handoff_kind='initial')
+            """), {"day": day}):
+                raise RuntimeError(f"cold_fact_initial_retirement_requires_cutover_receipt: storage_day={day}")
             self._eligibility(session, partition, eligible_before=eligible_before)
             unfinished = session.execute(text(
                 "SELECT id FROM market.fact_archive_preparations "
@@ -259,12 +272,40 @@ class PostgresCanonicalFactReclamationRepository:
                 )
             already_reclaimed = partition["state"] == "reclaimed"
             relation_oid = self._relation(session, day, reclaimed=already_reclaimed)
+            retired = None
+            staged_pages = ()
+            header_oid = None
+            if cold_layout:
+                header_oid = session.scalar(text("SELECT to_regclass(:relation)::oid"), {
+                    "relation": "market." + fact_header_partition_name(day),
+                })
+                retired = session.execute(text("""
+                    SELECT manifest_set_hash,row_count,reclaimed_header_bytes,protected_dataset_ranges
+                    FROM market.cold_fact_retired_days WHERE storage_day=:day
+                """), {"day": day}).mappings().one_or_none()
+                if retired is not None and (
+                    header_oid is not None or not already_reclaimed
+                    or retired["manifest_set_hash"] != partition["manifest_set_hash"]
+                ):
+                    raise RuntimeError(f"cold_fact_retirement_receipt_invalid: storage_day={day}")
+                if not already_reclaimed:
+                    require_oldest_header_day(session, day)
+                    if header_oid is None:
+                        raise RuntimeError(f"cold_fact_retirement_header_missing: storage_day={day}")
+                    if execute:
+                        staged = stage_retirement_pages(session, self.archive, day)
+                        if staged is not None:
+                            return staged
+                if (execute and not already_reclaimed) or retired is not None:
+                    staged_pages = verify_cold_day_locators(session, day, partition["expected_rows"],
+                                                            check_budget=self.archive._check_budget)
+                    verify_staged_locator_counts(session, staged_pages, check_budget=self.archive._check_budget)
             objects = ArchiveVerificationBatch(self.archive.object_store, limits=verification_limits,
                                                check_budget=self.archive.check_budget)
             handoff = FactHandoffProof(check_budget=self.archive._check_budget) if execute and not already_reclaimed else None
             with objects.distinct_references():
                 evidence = self.archive._partition_evidence(session, partition, limits=verification_limits,
-                    objects=objects, handoff=handoff)
+                    objects=objects, handoff=handoff, retired=retired)
             if evidence["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             self._assert_archive_admission(objects)
@@ -279,12 +320,18 @@ class PostgresCanonicalFactReclamationRepository:
                 logger.info("canonical_reclaim_handoff_prepared | storage_day=%s source_rows=%s seconds=%s witness_bytes=%s",
                             day, handoff.source_row_count,
                             perf_counter() - prepared, handoff.retained_bytes)
-            evidence["protected_dataset_ranges"], evidence["pinned_ranges_statement_timeout_ms"] = (
-                self._pinned_ranges(session, day))
+            if retired is None:
+                evidence["protected_dataset_ranges"], evidence["pinned_ranges_statement_timeout_ms"] = (
+                    self._pinned_ranges(session, day))
+            else:
+                evidence["protected_dataset_ranges"] = retired["protected_dataset_ranges"]
             if already_reclaimed:
-                return {**evidence, "status": "already_reclaimed", "reclaimed_bytes": partition["reclaimed_bytes"]}
+                return {**evidence, "status": "already_reclaimed", "reclaimed_bytes": partition["reclaimed_bytes"],
+                        "reclaimed_header_bytes": retired["reclaimed_header_bytes"] if retired else 0}
             if not execute:
                 size = session.execute(text("SELECT pg_total_relation_size(:oid)"), {"oid": relation_oid}).scalar_one()
+                if header_oid is not None:
+                    size += session.scalar(text("SELECT pg_total_relation_size(:oid)"), {"oid": header_oid})
                 return {**evidence, "status": "dry_run", "enabled": self.enabled, "reclaimable_bytes": size}
 
         started = monotonic()
@@ -335,16 +382,29 @@ class PostgresCanonicalFactReclamationRepository:
                 raise RuntimeError(f"canonical_reclaim_relation_changed: storage_day={day}")
             size = session.execute(text("SELECT pg_total_relation_size(:oid)"), {"oid": relation_oid}).scalar_one()
             check_budget()
-            from .cold_history import cold_layout_active
-
-            if cold_layout_active(session):
-                # Do not silently resume building a permanent historical SQL
-                # directory on this layout. The final retirement owner must
-                # publish the cold page and retire both source structures in
-                # one verified operation.
-                raise RuntimeError(f"cold_fact_atomic_retirement_required: storage_day={day}")
+            if cold_layout_active(session) != cold_layout:
+                raise RuntimeError("cold_fact_retirement_layout_changed")
+            header_size = 0
+            if cold_layout:
+                for table in ("cold_fact_pages", "cold_fact_locators", "cold_fact_retired_days"):
+                    session.execute(text(f"LOCK TABLE ONLY market.{table} IN SHARE MODE NOWAIT"))
+                assert_cold_history_immutability(session.connection())
+                final_pages = verify_cold_day_locators(session, day, current["row_count"], check_budget=check_budget)
+                if final_pages != staged_pages:
+                    raise RuntimeError(f"cold_fact_retirement_staged_pages_changed: storage_day={day}")
+                lock_header_namespace(session)
+                require_oldest_header_day(session, day)
             # Exact generated daily relation only; no CASCADE or row DELETE.
             session.execute(text(f'DROP TABLE market."{name}"'))
+            if cold_layout:
+                header_size = drop_verified_header(session, name=fact_header_partition_name(day),
+                                                   oid=header_oid, storage_day=day)
+                session.execute(text("""
+                    INSERT INTO market.cold_fact_retired_days
+                      (storage_day,manifest_set_hash,row_count,reclaimed_header_bytes,protected_dataset_ranges)
+                    VALUES (:storage_day,:manifest_set_hash,:row_count,:header_size,:protected_dataset_ranges)
+                """), {**current, "header_size": header_size})
+                size += header_size
             self._assert_archive_admission(objects)
             check_budget()
             updated = session.execute(text("""
@@ -357,4 +417,5 @@ class PostgresCanonicalFactReclamationRepository:
             check_budget()
         logger.info("canonical_hot_partition_reclaimed | storage_day=%s rows=%s reclaimed_bytes=%s protected_dataset_ranges=%s manifest_set_hash=%s",
                     day, current["row_count"], size, current["protected_dataset_ranges"], current["manifest_set_hash"])
-        return {**current, "status": "partition_reclaimed", "reclaimed_bytes": size}
+        return {**current, "status": "partition_reclaimed", "reclaimed_bytes": size,
+                "reclaimed_header_bytes": header_size}

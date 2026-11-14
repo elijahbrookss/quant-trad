@@ -1774,7 +1774,8 @@ class PostgresCanonicalFactArchiveRepository:
             if expired is not None:
                 raise RuntimeError(f"canonical_archive_dependency_expired: target_id={expired}")
 
-    def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None, handoff=None):
+    def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None,
+                            handoff=None, retired=None):
         """Check bounded catalogs/receipts and exact sealed-source coverage.
 
         Supplying a byte verifier additionally checks every current cold object.
@@ -1894,7 +1895,7 @@ class PostgresCanonicalFactArchiveRepository:
                 raise RuntimeError("canonical_handoff_page_scope_changed")
         if check_budget is not None:
             check_budget()
-        count = session.execute(text(
+        count = retired["row_count"] if retired is not None else session.execute(text(
             "SELECT count(*) FROM market.fact_versions WHERE storage_day=:day"
         ), {"day": day}).scalar_one()
         # Each verified interval equals its complete header range. Nonoverlap

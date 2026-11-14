@@ -249,6 +249,13 @@ def validate_audit_receipts(receipts, *, target_identity=None, source_identity=N
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError("canonical_cold_receipts_invalid_structure") from exc
     inventory = sorted(manifests.items())
+    authorities = {}
+    for day, batches in forward.items():
+        for batch in batches:
+            by_ordinal = {item["ordinal"]: item for item in batch["source_archive_authority_receipts"]}
+            for page in batch["page_receipts"]:
+                if page["reused"]:
+                    authorities[page["manifest_id"]] = (day, by_ordinal[page["ordinal"]]["authority_hash"])
     summary = {"schema": RECEIPT_SET_VERSION, **common, "verified_days": len(days),
                "verified_pages": len(manifests), "verified_rows": sum(item["verified_rows"] for item in days.values()),
                "retired_prefix_max_commit_seq": max((item["last_cursor"][0] for item in days.values()), default=0),
@@ -257,6 +264,8 @@ def validate_audit_receipts(receipts, *, target_identity=None, source_identity=N
                    (identity, day, digest, count) for identity, (day, digest, count) in inventory),
                "loaded_inventory_hash": manifest_inventory_hash(
                    (identity, digest, count) for identity, (_, digest, count) in inventory),
+               "source_authority_inventory_hash": manifest_inventory_hash(
+                   (identity, day, digest) for identity, (day, digest) in sorted(authorities.items())),
                "receipt_hashes": sorted(hashes), "remaining_acceptance": list(GATES)}
     return summary | {"audit_set_hash": archive_evidence_hash(summary)}
 

@@ -12,7 +12,8 @@ COLD_LOCATOR_TABLE_NAMES = (
     "cold_fact_locators", "cold_fact_materials", "cold_fact_normalization_specs",
     "cold_book_session_facts",
 )
-COLD_TABLE_NAMES = ("cold_fact_pages", "cold_fact_page_series", "cold_fact_retired_days", *COLD_LOCATOR_TABLE_NAMES)
+COLD_TABLE_NAMES = ("cold_fact_pages", "cold_fact_page_series", "cold_fact_retired_days",
+                    "cold_fact_pruned_days", *COLD_LOCATOR_TABLE_NAMES)
 COLD_HISTORY_LAYOUT_VERSION = "market.canonical_cold_history.v1"
 COLD_IMMUTABILITY_TRIGGER = "trg_cold_fact_immutable"
 
@@ -95,12 +96,25 @@ class ColdFactRetiredDayRecord(Base):
     """Publish staged pages when their verified source is retired."""
 
     __tablename__ = "cold_fact_retired_days"
-    __table_args__ = {"schema": "market"}
+    __table_args__ = (
+        CheckConstraint("handoff_kind IN ('initial', 'recurring')", name="ck_cold_retired_day_handoff_kind"),
+        {"schema": "market"},
+    )
     storage_day = Column(Date, primary_key=True)
     manifest_set_hash = Column(String(64), nullable=False)
     row_count = Column(BigInteger, nullable=False)
     reclaimed_header_bytes = Column(BigInteger, nullable=False)
     protected_dataset_ranges = Column(BigInteger, nullable=False)
+    handoff_kind = Column(String(16), nullable=False, server_default=text("'recurring'"))
+
+
+class ColdFactPrunedDayRecord(Base):
+    """Record that the retired day's hot registry entries have been released."""
+
+    __tablename__ = "cold_fact_pruned_days"
+    __table_args__ = {"schema": "market"}
+    storage_day = Column(ForeignKey("market.cold_fact_retired_days.storage_day", ondelete="RESTRICT"),
+                         primary_key=True)
 
 
 class ColdFactPageSeriesRecord(Base):

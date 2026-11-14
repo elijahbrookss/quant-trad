@@ -109,6 +109,69 @@ def test_actual_reclamation_keeps_pinned_history_and_returns_space(storage, tmp_
     assert any(record.revision == 3 for record in _read(storage))
 
 
+def test_cold_daily_retirement_publishes_and_prunes_exactly(storage, tmp_path, monkeypatch):
+    from portal.backend.db.cold_history_models import (
+        Base, COLD_HISTORY_LAYOUT_VERSION, COLD_IMMUTABILITY_TRIGGER, COLD_TABLE_NAMES,
+    )
+    from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bindings
+    from portal.backend.service.storage.repos.cold_retirement import prune_oldest_retired_identities
+
+    day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
+    request = DatasetSeriesRequest(storage.series_id, BASE - timedelta(days=1), BASE + timedelta(days=1))
+    frozen = storage.repo.freeze_dataset([request])
+    before = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id)
+    identities = [record.fact_version_id for record in before]
+    with storage.database.session() as session:
+        for table in Base.metadata.sorted_tables:
+            if table.schema != "market" or table.name not in COLD_TABLE_NAMES:
+                continue
+            table.create(session.connection(), checkfirst=True)
+            session.execute(text(f"""
+                CREATE TRIGGER {COLD_IMMUTABILITY_TRIGGER} BEFORE UPDATE OR DELETE OR TRUNCATE ON {table.fullname}
+                FOR EACH STATEMENT EXECUTE FUNCTION market.reject_immutable_mutation()
+            """))
+            session.execute(text(f"ALTER TABLE {table.fullname} ENABLE ALWAYS TRIGGER {COLD_IMMUTABILITY_TRIGGER}"))
+        prepare_cold_dependency_bindings(session.connection())
+        session.execute(text("UPDATE market.fact_storage_state SET layout_version=:layout"),
+                        {"layout": COLD_HISTORY_LAYOUT_VERSION})
+    cold_storage = market_data.canonical_fact_storage_repository
+    assert reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)["status"] == "cold_page_admitted"
+    with storage.database.session() as session:
+        assert not cold_storage.cold_history(session).read_by_ids(session, identities, require_all=False)
+    original_drop = fact_reclamation.drop_verified_header
+
+    def interrupt_after_drop(executor, **scope):
+        original_drop(executor, **scope)
+        raise RuntimeError("test interrupted retirement")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fact_reclamation, "drop_verified_header", interrupt_after_drop)
+        with pytest.raises(RuntimeError, match="test interrupted retirement"):
+            reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert _physical(storage, day)["header_rows"] == len(identities)
+    assert _physical(storage, day)["hot_rows"] == len(identities)
+    assert archive.inspect_partition(day)["state"] == "verified"
+    result = reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert result["status"] == "partition_reclaimed" and result["reclaimed_header_bytes"] > 0
+    assert _physical(storage, day)["header_rows"] == 0
+    assert _physical(storage, day)["hot_rows"] == 0
+    with storage.database.session() as session:
+        assert cold_storage.cold_history(session).read_by_ids(session, identities).keys() == set(identities)
+    repeated = reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert repeated["status"] == "already_reclaimed"
+    assert repeated["protected_dataset_ranges"] == result["protected_dataset_ranges"] == 1
+    _placement(monkeypatch, storage.today)
+    same = next(record.fact for record in before if record.fact.observation_key == "reclaim-0" and record.revision == 2)
+    assert _ingest(storage, same).noop_count == 1
+    _ingest(storage, replace(same, known_at=BASE + timedelta(seconds=2), accepted_at=BASE + timedelta(seconds=2),
+                             payload={**same.payload, "rate": "0.3", "raw_rate": "0.3"}))
+    cleanup = prune_oldest_retired_identities(storage.database, deadline=lambda: None)
+    assert cleanup["day_complete"] and cleanup["rows_removed"] == len(identities)
+    assert prune_oldest_retired_identities(storage.database, deadline=lambda: None) is None
+    assert any(record.revision == 3 for record in _read(storage))
+    assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
+
+
 @pytest.mark.parametrize("page_rows", [1, 16])
 def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_counts(storage, tmp_path, monkeypatch, page_rows):
     day = storage.today - timedelta(days=2)

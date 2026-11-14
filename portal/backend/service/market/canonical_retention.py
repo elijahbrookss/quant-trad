@@ -18,6 +18,7 @@ from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.fact_archive import FactArchiveLimits
+from ..storage.repos.cold_retirement import prune_oldest_retired_identities
 from ..storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
 from ..storage.repos.fact_reclamation import FactReclamationLimits, PostgresCanonicalFactReclamationRepository
 from ..storage.repos.fact_retention import (
@@ -627,6 +628,24 @@ class CanonicalFactRetentionExecutor:
                     "after_storage_day=%s",
                     planning_outcome, planning_elapsed, scans, cursor,
                 )
+            if plan.get("cold_layout") and not explicit_cursor:
+                try:
+                    cleanup = prune_oldest_retired_identities(self.repository.database, deadline=check_budget)
+                except MarketStorageLifecycleBusyError:
+                    cleanup = None
+                    logger.info("canonical_cold_identity_cleanup_deferred | reason=lifecycle_busy")
+                except CanonicalRetentionBudgetExceeded as exc:
+                    stop_reason = exc.stop_reason
+                    break
+                except Exception as exc:
+                    sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
+                    if sqlstate not in {"55P03", "57014"}:
+                        raise
+                    cleanup = None
+                    logger.info("canonical_cold_identity_cleanup_deferred | sqlstate=%s", sqlstate)
+                if cleanup is not None:
+                    outcomes.append({**cleanup, "action": "prune_cold_identities"})
+                    continue
             candidates = [item for item in plan["actions"] if item["eligible"]]
             item = None
             if retry_day is not None and not retry_attempted:
