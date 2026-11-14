@@ -24,7 +24,9 @@ from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
 from scripts.db.canonical_cold_rollback_cohort import inspect_old_cohort, verify_restored_cohort
-from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog, _fence_connections
+from tests.test_market_data.test_canonical_cold_activate_db import (
+    _configure_fixture_catalog, _fence_connections, _stub_raw_index_case,
+)
 from tests.test_market_data.test_fact_reclamation_db import _prepare
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, _ingest, _placement, storage  # noqa: F401
 
@@ -111,6 +113,7 @@ def test_restored_old_cohort_preserves_exact_original_placement_and_cold_page_in
             "source_commit_seq": commit, "loaded_inventory_hash": audit["loaded_inventory_hash"],
             "payload_children": payload_children, "custody_target_id": "activation-fixture",
             "custody_tablespace_oid": custody_tablespace, "custody_relation_oids": custody_oids,
+            "raw_mapping_index": _stub_raw_index_case(monkeypatch),
         }
         outcome = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
         events = []

@@ -28,6 +28,8 @@ Move the complete accepted version to immutable cold pages when its hot lifecycl
 
 The compact PostgreSQL page catalog and its per-series time and commit bounds identify candidates. Exact version, material and key lookups use rebuildable HDD tablespace indexes. Check every selected claim against the decoded exact row. A digest assists lookup. It supplies no independent authority. Store only live admission state and compact page-level metadata on SSD.
 
+The raw archive's all-age identity index belongs with the raw mapping relation on the registered HDD. Keep the unique key and exact mappings across archive compaction. Qualify HDD uniqueness checks and historical lookup under concurrent raw publication. The fenced authority transaction moves the existing index and preserves its PostgreSQL identity. A reverse move records its physical file and restores the original placement for the prior runtime.
+
 Use the per-series owner and shared commit sequence for both cold and hot admission. Write and verify immutable bytes before committing the locator and catalog rows. Uncommitted pages and interrupted files remain invisible. Preserve existing coherent PostgreSQL and external archive recovery with the exact cold inventory, raw and checkpoint holds. Keep newly reacquired provider observations under their own acquisition evidence.
 
 Qualify and use one authority switch. Checkpoint staging and tests run in isolation. Retire the old serving dependencies only after exact inventory, frozen, custody and scope parity, a current independent paired restore, and explicit production approval.

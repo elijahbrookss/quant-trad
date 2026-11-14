@@ -11,9 +11,10 @@ from market_data.archive_namespace import archive_namespace
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from scripts.automation.canonical_cold_package import bind_execution
 from scripts.db.canonical_cold_activate import (
-    activate_cold_storage, read_activation_outcome, read_original_watermark, verify_mounted_candidate,
+    activate_cold_storage, raw_index_placement_scope, read_activation_outcome, read_original_watermark, verify_mounted_candidate,
 )
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
+from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
 from scripts.db.canonical_cold_witness import check_witnesses, load_approved_witnesses
 from scripts.db.fact_header_v2_capture import _bounded_step
@@ -51,6 +52,7 @@ def run_fenced_transition(
         candidate_witness, expected_sha256=package["artifacts"]["candidate_transaction_witness"]["sha256"],
     )
     scope = package["scope"]
+    raw_index_scope = raw_index_placement_scope(scope)
     expected_database = scope["target_database"]
     audit = validate_audit_receipts(
         receipts, target_identity=expected_database, source_identity=scope["source_database"],
@@ -68,6 +70,7 @@ def run_fenced_transition(
 
     def original_outcome(connection):
         commit = current_original_watermark(connection)
+        assert_raw_mapping_index_placement(connection, **raw_index_scope, on_history=False)
         if source_commit is not None and commit != source_commit:
             raise RuntimeError("canonical_cold_transition_original_boundary_changed")
         return "original"
@@ -85,6 +88,7 @@ def run_fenced_transition(
             with _bounded_step(conn, remaining_seconds()):
                 if current_original_watermark(conn) < package["source_commit_floor"]:
                     raise RuntimeError("canonical_cold_transition_source_behind_approved_floor")
+                assert_raw_mapping_index_placement(conn, **raw_index_scope, on_history=False)
                 if verified_objects is None:
                     verified_objects = verify_mounted_candidate(
                         conn, audit=audit, store=store, limits=limits, check_budget=remaining_seconds,
@@ -159,7 +163,9 @@ def run_fenced_transition(
                 fence.assert_quiet(conn)
                 if outcome(conn) != "committed":
                     raise RuntimeError("canonical_cold_transition_commit_unconfirmed")
-        record("activation_verified", {"execution_hash": execution_hash, "witness_hash": witness_hash})
+        raw_index = result["raw_mapping_index"]
+        record("activation_verified", {"execution_hash": execution_hash, "witness_hash": witness_hash,
+                                       "raw_mapping_index_receipt_hash": raw_index and raw_index["receipt_hash"]})
         check_archive()
         assert_host_held()
         reopen_database_fence(fence, control, expected_outcome="committed", read_outcome=outcome, record=record)

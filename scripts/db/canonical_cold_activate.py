@@ -33,14 +33,19 @@ from scripts.db.canonical_cold_database_fence import DatabaseFence
 from scripts.db.canonical_cold_identity_rebuild import swap_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase
 from scripts.db.canonical_cold_migration import PREPARED_CATALOG_TABLES, PostgresMigrationSource
+from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement, move_raw_mapping_index
 from scripts.db.canonical_cold_receipts import manifest_inventory_hash, validate_audit_receipts
 
-ACTIVATION_VERSION = "qt.canonical_cold_activate.v4"
+ACTIVATION_VERSION = "qt.canonical_cold_activate.v5"
 _PHYSICAL_GATES = {
     "independent_recovery", "provider_boundary", "replay_equivalence",
     "candidate_transaction_witness",
     "legacy_reference_review", "physical_capacity", "rollback_rehearsal",
     "representative_performance", "candidate_release", "custody_catalog_placement",
+}
+_EXECUTION_SCOPE = {
+    "source_database", "target_database", "audit_set_hash", "loaded_inventory_hash", "payload_children",
+    "custody_target_id", "custody_tablespace_oid", "custody_relation_oids", "raw_mapping_index",
 }
 
 
@@ -48,17 +53,41 @@ def _valid_digest(value):
     return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
+def _valid_raw_index_scope(scope):
+    return (isinstance(scope, dict) and scope.keys() == {
+                "target_id", "tablespace_oid", "table_oid", "index_oid", "max_copy_bytes", "timeout_seconds",
+            }
+            and isinstance(scope["target_id"], str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", scope["target_id"])
+            and all(type(scope[key]) is int and 0 < scope[key] <= 2**32 - 1
+                    for key in ("table_oid", "index_oid", "tablespace_oid"))
+            and scope["tablespace_oid"] not in (1663, 1664)
+            and scope["table_oid"] != scope["index_oid"]
+            and type(scope["max_copy_bytes"]) is int and 0 < scope["max_copy_bytes"] <= 2**63 - 1
+            and type(scope["timeout_seconds"]) is int and 1 <= scope["timeout_seconds"] <= MAX_MIGRATION_SECONDS)
+
+
+def raw_index_placement_scope(execution):
+    approved = execution.get("raw_mapping_index")
+    if not _valid_raw_index_scope(approved):
+        raise ValueError("canonical_cold_activation_raw_index_scope_invalid")
+    identity = execution["target_database"]
+    return {
+        "expected_database": f"{identity['system_identifier']}/{identity['database_oid']}",
+        "target_id": approved["target_id"], "expected_tablespace_oid": approved["tablespace_oid"],
+        "expected_table_oid": approved["table_oid"], "expected_index_oid": approved["index_oid"],
+    }
+
+
 def validate_execution_record(execution, *, expected_execution_hash):
     """Pin the exact approved record separately from component audit receipts."""
     if not _valid_digest(expected_execution_hash) or archive_evidence_hash(execution) != expected_execution_hash:
         raise ValueError("canonical_cold_activation_execution_hash_mismatch")
+    if not isinstance(execution, dict) or execution.get("schema") != ACTIVATION_VERSION:
+        raise ValueError("canonical_cold_activation_incomplete_execution_record")
+    if not _valid_raw_index_scope(execution.get("raw_mapping_index")):
+        raise ValueError("canonical_cold_activation_raw_index_scope_invalid")
     if (
-        not isinstance(execution, dict) or execution.get("schema") != ACTIVATION_VERSION
-        or execution.keys() != {
-            "schema", "approved_package_hash", "evidence", "source_database", "target_database",
-            "audit_set_hash", "loaded_inventory_hash", "source_commit_seq", "payload_children",
-            "custody_target_id", "custody_tablespace_oid", "custody_relation_oids",
-        }
+        execution.keys() != _EXECUTION_SCOPE | {"schema", "approved_package_hash", "evidence", "source_commit_seq"}
         or not isinstance(execution.get("evidence"), dict)
         or not _valid_digest(execution.get("approved_package_hash"))
         or set(execution["evidence"]) != _PHYSICAL_GATES
@@ -281,6 +310,11 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
           WHERE storage_day<:cutoff AND state IN ('building','ready'))
     """), {"cutoff": cutoff}):
         raise RuntimeError("canonical_cold_activation_unfinished_archive_preparations")
+    approved_move = execution["raw_mapping_index"]
+    raw_index = move_raw_mapping_index(
+        conn, fence=database_fence, **raw_index_placement_scope(execution), max_copy_bytes=approved_move["max_copy_bytes"],
+        timeout_seconds=approved_move["timeout_seconds"],
+    )
     prepare_cold_dependency_bindings(conn)
 
     header_bytes = {}
@@ -324,6 +358,7 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         "retired_payload_bytes": sum(payload_bytes.values()), "identity": identity_result,
         "custody": {"target_id": execution["custody_target_id"], "tablespace_oid": execution["custody_tablespace_oid"],
                     "relation_oids": execution["custody_relation_oids"]},
+        "raw_mapping_index": raw_index,
         "evidence": execution["evidence"],
     }
     written = conn.execute(text("""
@@ -361,6 +396,19 @@ def _assert_original_inventory(conn, expected_inventory):
         raise RuntimeError("canonical_cold_activation_original_boundary_changed")
 
 
+def verify_committed_raw_mapping_index(conn, *, scope, receipt):
+    placement = assert_raw_mapping_index_placement(conn, **scope, on_history=True)
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("after"), dict):
+        raise RuntimeError("canonical_cold_activation_raw_index_outcome_changed")
+    recorded = {key: value for key, value in receipt["after"].items() if key != "forks"}
+    observed = {key: value for key, value in placement["member"].items() if key != "forks"}
+    signed = {key: value for key, value in receipt.items() if key != "receipt_hash"}
+    if (receipt.get("receipt_hash") != archive_evidence_hash(signed)
+            or receipt.get("database_identity") != placement["database_identity"]
+            or receipt.get("target") != placement["target"] or recorded != observed):
+        raise RuntimeError("canonical_cold_activation_raw_index_outcome_changed")
+
+
 def read_original_watermark(conn, *, expected, expected_inventory):
     """Check original SQL authority before a final boundary receipt exists."""
     layout, _, watermark = _read_authority(conn, expected)
@@ -374,11 +422,13 @@ def read_activation_outcome(conn, *, execution, expected_execution_hash):
     """Reconcile durable SQL state for this exact operation on the pinned database."""
     validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
     expected = execution["target_database"]
+    raw_index_scope = raw_index_placement_scope(execution)
     layout, evidence, watermark = _read_authority(conn, expected)
     if watermark != execution["source_commit_seq"]:
         raise RuntimeError("canonical_cold_activation_outcome_commit_boundary_changed")
     if layout == FACT_STORAGE_LAYOUT_VERSION:
         _assert_original_inventory(conn, execution["loaded_inventory_hash"])
+        assert_raw_mapping_index_placement(conn, **raw_index_scope, on_history=False)
         return "original"
     if (layout != COLD_HISTORY_LAYOUT_VERSION or not isinstance(evidence, dict)
             or evidence.get("execution_hash") != expected_execution_hash
@@ -389,6 +439,7 @@ def read_activation_outcome(conn, *, execution, expected_execution_hash):
             or evidence.get("source_commit_seq") != execution["source_commit_seq"]):
         raise RuntimeError("canonical_cold_activation_outcome_uncertain")
     assert_fact_storage_contract(conn)
+    verify_committed_raw_mapping_index(conn, scope=raw_index_scope, receipt=evidence.get("raw_mapping_index"))
     return "committed"
 
 

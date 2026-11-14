@@ -12,20 +12,18 @@ import stat
 from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.fact_archive import archive_evidence_hash
 from scripts.automation import storage_host_boundary as host
-from scripts.db.canonical_cold_activate import ACTIVATION_VERSION, _PHYSICAL_GATES, validate_execution_record
+from scripts.db.canonical_cold_activate import (
+    ACTIVATION_VERSION, _EXECUTION_SCOPE, _PHYSICAL_GATES, validate_execution_record,
+)
 from scripts.db.canonical_cold_witness import MAX_WITNESS_BYTES, load_approved_witnesses
 
 
-VERSION = "qt.canonical_cold_approval_package.v3"
+VERSION = "qt.canonical_cold_approval_package.v4"
 _ARTIFACT_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _MAX_ARTIFACT_BYTES = 128 * 1024**2
 _MAX_RUNTIME_BYTES = 524_288
 _PARSED_ARTIFACT_LIMITS = {"host_inventory": 65_536, "candidate_transaction_witness": MAX_WITNESS_BYTES}
-_SCOPE = {
-    "source_database", "target_database", "audit_set_hash", "loaded_inventory_hash", "payload_children",
-    "custody_target_id", "custody_tablespace_oid", "custody_relation_oids",
-}
 
 
 def _hash_file(path, *, json_limit=0):
@@ -87,7 +85,7 @@ def load_approved_package(path, *, approved_package_hash, inventory):
             or type(package["max_outage_seconds"]) is not int
             or not 1 <= package["max_outage_seconds"] <= MAX_MIGRATION_SECONDS
             or not _pin(package["runtime_model_hash"])
-            or not isinstance(package["scope"], dict) or package["scope"].keys() != _SCOPE
+            or not isinstance(package["scope"], dict) or package["scope"].keys() != _EXECUTION_SCOPE
             or not isinstance(package["artifacts"], dict)
             or package["artifacts"].keys() != _PHYSICAL_GATES | {"command_sheet", "host_inventory", "runtime_model"}):
         raise ValueError("canonical_cold_package_invalid_structure")
@@ -109,6 +107,9 @@ def load_approved_package(path, *, approved_package_hash, inventory):
             load_approved_witnesses(bytes(content), expected_sha256=digest)
     if _hash_file(path, json_limit=65_536)[0] != approved_package_hash:
         raise RuntimeError("canonical_cold_package_approval_changed")
+    bind_execution(package, approved_package_hash=approved_package_hash, source_commit_seq=package["source_commit_floor"],
+                   provider_boundary=package["artifacts"]["provider_boundary"]["sha256"],
+                   independent_recovery=package["artifacts"]["independent_recovery"]["sha256"])
     return package
 
 

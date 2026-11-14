@@ -3,6 +3,8 @@ from dataclasses import replace
 from datetime import timedelta
 from hashlib import sha256
 import json
+import os
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -26,12 +28,14 @@ from portal.backend.service.storage.repos.fact_archival import PostgresCanonical
 from portal.backend.service.storage.repos.fact_retention import PostgresCanonicalFactRetentionRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.db import canonical_cold_activate as activation
+from scripts.db import canonical_cold_transition as transition_runner
 from scripts.db import fact_header_v2_online_proof as online
 from scripts.db.canonical_cold_audit import audit_candidate
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, prepare_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
+from scripts.db.canonical_cold_raw_index import TABLE, inspect_raw_mapping_index_member
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
 from scripts.db.canonical_cold_transition import run_fenced_transition
 from scripts.db.canonical_cold_witness import measure_witnesses
@@ -76,6 +80,58 @@ def _configure_fixture_catalog(conn, database_identity, root):
             ON market.{table} FOR EACH STATEMENT EXECUTE FUNCTION market.reject_immutable_mutation()
         """))
         conn.execute(text(f"ALTER TABLE market.{table} ENABLE ALWAYS TRIGGER {COLD_IMMUTABILITY_TRIGGER}"))
+
+
+def _stub_raw_index_case(monkeypatch):
+    # Single-tablespace Fact parity fixtures exercise the rest of the handoff.
+    monkeypatch.setattr(activation, "move_raw_mapping_index", lambda conn, **kwargs: None)
+    monkeypatch.setattr(activation, "verify_committed_raw_mapping_index", lambda conn, **kwargs: None)
+    monkeypatch.setattr(activation, "assert_raw_mapping_index_placement", lambda conn, **kwargs: None)
+    monkeypatch.setattr(transition_runner, "assert_raw_mapping_index_placement", lambda conn, **kwargs: None)
+    return {"target_id": "fixture-raw-history", "tablespace_oid": 50, "table_oid": 90, "index_oid": 91,
+            "max_copy_bytes": 1024**2, "timeout_seconds": 15}
+
+
+@pytest.fixture
+def native_raw_index_target(storage):
+    path = os.environ.get("QT_TRANSITION_RAW_INDEX_TABLESPACE_DIRECTORY")
+    if not path:
+        pytest.skip("requires the native raw index tablespace fixture directory")
+    engine = storage.database._engine
+    name = "qt_transition_raw_" + uuid4().hex[:12]
+    admin = create_engine(engine.url.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f"CREATE TABLESPACE {name} LOCATION :path"), {"path": path})
+        with engine.begin() as conn:
+            # Reproduce the deployed split with the raw heap already on HDD.
+            conn.exec_driver_sql(f"ALTER TABLE {TABLE} SET TABLESPACE {name}")
+            member = inspect_raw_mapping_index_member(conn)
+            conn.execute(text("""
+                INSERT INTO public.portal_storage_targets(id,label,filesystem_uuid,root,medium,roles)
+                VALUES ('fixture-raw-history','Raw history fixture','fixture-raw-device',:root,'hdd','["history"]')
+            """), {"root": path})
+            conn.execute(text("""
+                INSERT INTO public.portal_storage_header_tablespaces (database_identity,target_id,tablespace_oid,binding)
+                SELECT control.system_identifier::text || '/' || db.oid::text,'fixture-raw-history',:space,'{}'
+                FROM pg_control_system() control CROSS JOIN pg_database db WHERE db.datname=current_database()
+            """), {"space": member["table_tablespace_oid"]})
+        yield {"target_id": "fixture-raw-history", "tablespace_oid": member["table_tablespace_oid"],
+               "table_oid": member["table_oid"], "index_oid": member["index_oid"],
+               "max_copy_bytes": 1024**2, "timeout_seconds": 15}
+    finally:
+        try:
+            with engine.begin() as conn:
+                observed = inspect_raw_mapping_index_member(conn)
+                if observed["tablespace_oid"] != 1663:
+                    conn.exec_driver_sql("ALTER INDEX market.pk_market_raw_archive_record_mapping SET TABLESPACE pg_default")
+                if observed["table_tablespace_oid"] != 1663:
+                    conn.exec_driver_sql(f"ALTER TABLE {TABLE} SET TABLESPACE pg_default")
+            engine.dispose()
+            with admin.connect() as conn:
+                conn.exec_driver_sql(f"DROP TABLESPACE IF EXISTS {name}")
+        finally:
+            admin.dispose()
 
 
 def _attach_legacy_child(conn, legacy_day, end_day):
@@ -153,6 +209,16 @@ def _create_retained_parent(conn):
 def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_reads(
     storage, tmp_path, monkeypatch, owner_path,
 ):
+    _exercise_exact_activation(storage, tmp_path, monkeypatch, owner_path=owner_path)
+
+
+def test_fenced_activation_moves_native_raw_index(storage, tmp_path, monkeypatch, native_raw_index_target):
+    _exercise_exact_activation(storage, tmp_path, monkeypatch, owner_path=True, native_raw_index=native_raw_index_target)
+
+
+def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, native_raw_index=None):
+    native = native_raw_index is not None
+    raw_scope = native_raw_index if native else _stub_raw_index_case(monkeypatch)
     engine = storage.database._engine
     legacy_day, daily_day = storage.today - timedelta(days=2), storage.today - timedelta(days=1)
     with storage.database.session() as session:
@@ -252,6 +318,7 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
         "payload_children": payload_children,
         "custody_target_id": "activation-fixture", "custody_tablespace_oid": custody_tablespace,
         "custody_relation_oids": custody_oids,
+        "raw_mapping_index": raw_scope,
     }
     if owner_path:
         execution["evidence"]["candidate_transaction_witness"] = sha256(candidate_witness).hexdigest()
@@ -293,6 +360,12 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
             assert activation.read_activation_outcome(conn, **outcome_arguments) == "committed"
             assert result["source_commit_seq"] == latest_commit
             assert conn.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NULL"))
+            if native:
+                raw = result["raw_mapping_index"]
+                assert raw["copy_bytes"] > 0
+                assert raw["before"]["tablespace_oid"] == 1663
+                assert raw["after"]["tablespace_oid"] == raw_scope["tablespace_oid"]
+                assert raw["after"]["index_oid"] == raw_scope["index_oid"]
 
         with _fence_connections(storage) as (retained, control):
             owner = dict(package=package, approved_package_hash=execution["approved_package_hash"],
@@ -349,11 +422,17 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
             with retained.begin():
                 assert activation.read_activation_outcome(retained, **outcome_arguments) == "original"
                 assert retained.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NOT NULL"))
+                if native:
+                    assert inspect_raw_mapping_index_member(retained)["tablespace_oid"] == 1663
             phases.clear()
             run_fenced_transition(retained, control, **owner, verified_objects=verified)
         assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
                           "accepted", "activation_verified", "login_opening", "jobs_restarting", "database_reopened"]
         assert events["activation_committing"]["execution_hash"] == outcome_arguments["expected_execution_hash"]
+        if native:
+            with engine.begin() as conn:
+                receipt_hash = conn.scalar(text("SELECT evidence->'raw_mapping_index'->>'receipt_hash' FROM market.fact_storage_state"))
+            assert events["activation_verified"]["raw_mapping_index_receipt_hash"] == receipt_hash
     else:
         _exercise_fence_failures(storage, new_store, audit, outcome_arguments, receipts,
                                  identity, (legacy_day, daily_day))
