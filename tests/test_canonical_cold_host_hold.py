@@ -129,6 +129,7 @@ def test_completion_preserves_terminal_evidence_and_sets_correct_promotion_floor
 
     def restart(*args, **kwargs):
         assert isinstance(kwargs["model"], dict) is (outcome == "committed")
+        assert kwargs["verify_before_start"]({}) == {"ready": True}
         kwargs["record"]("runtime_verified", {"acceptance": {"ready": True}})
         return kwargs["verify_ready"]({})
 
@@ -140,6 +141,6 @@ def test_completion_preserves_terminal_evidence_and_sets_correct_promotion_floor
         record("login_opening", {})
         record("jobs_restarting", {})
         record("database_reopened", {"outcome": outcome})
-        assert resume(lambda _: {"ready": True}) == {"ready": True}
+        assert resume(lambda _: {"ready": True}, verify_before_start=lambda _: {"ready": True}) == {"ready": True}
     assert not os.path.lexists(root / hold.HOLD)
     assert compatible_release_floor(root / hold.COMPLETION) == floor

@@ -206,7 +206,8 @@ def _candidate_observation(model, admission, source, name, row):
         admit_candidate_privileges(details, model["services"][name])
 
 
-def restart_runtime(state_root, *, source, model, admission, stopped_services, remaining, record, verify_ready):
+def restart_runtime(state_root, *, source, model, admission, stopped_services, remaining, record,
+                    verify_ready, verify_before_start=None):
     """Run the exact prepared candidate recipe while the host owner remains held.
 
     The caller verifies persisted SQL and current recovery/acceptance first.
@@ -219,7 +220,8 @@ def restart_runtime(state_root, *, source, model, admission, stopped_services, r
     completed = []
     stable_source = inventory.stable_host_inventory(source)
     replacing = model is not None
-    if replacing != (admission is not None) or not stopped <= inventory.STOPPABLE_SERVICES:
+    if (replacing != (admission is not None) or not stopped <= inventory.STOPPABLE_SERVICES
+            or not callable(verify_ready) or (replacing and not callable(verify_before_start))):
         raise ValueError("canonical_cold_runtime_invalid_restart_scope")
     if replacing and host.digest(model) != admission["wire_model_hash"]:
         raise RuntimeError("canonical_cold_runtime_prepared_recipe_changed")
@@ -306,6 +308,12 @@ def restart_runtime(state_root, *, source, model, admission, stopped_services, r
         finish(action)
         stopped.discard(name)
         # Hold all remaining candidates down until the ordered start phase.
+
+    if replacing:
+        evidence = verify_before_start(observe())
+        if not isinstance(evidence, dict) or evidence.get("ready") is not True:
+            raise RuntimeError("canonical_cold_runtime_prestart_acceptance_not_verified")
+        record("runtime_prestart_verified", {"candidate_ids": dict(candidate_ids), "acceptance": evidence})
 
     for name in (*REPLACE, "grafana", "pgadmin"):
         if name != "initialize" and not source["services"][name]["running"]:

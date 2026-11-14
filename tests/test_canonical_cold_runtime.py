@@ -65,6 +65,7 @@ def runtime_scope(host_scope, monkeypatch):
         "state_root": root, "source": old, "model": wire, "admission": admission, "stopped_services": stopped,
         "remaining": lambda: 30, "record": lambda phase, evidence: journal.append((phase, evidence)),
         "verify_ready": lambda services: {"ready": services["market-data-collector"]["running"]},
+        "verify_before_start": lambda services: {"ready": all(not services[name]["running"] for name in runtime.REPLACE)},
     }
     return arguments, calls, journal, fault
 
@@ -76,6 +77,7 @@ def test_replacement_never_restarts_postgres_and_reconciles_lost_start_reply(run
     assert calls.count(("start", "market-data-collector")) == 1
     assert all(name != "tsdb" for _, name in calls)
     assert [name for action, name in calls if action == "start"] == [*runtime.REPLACE, "grafana", "pgadmin"]
+    assert sum(phase == "runtime_prestart_verified" for phase, _ in journal) == 1
     assert journal[-1][0] == "runtime_verified"
 
 
@@ -87,6 +89,14 @@ def test_failed_candidate_start_leaves_journal_and_does_not_start_collectors(run
     assert journal[-1][0] == "runtime_dispatching"
     assert calls[-1] == ("start", "backend")
     assert ("start", "market-data-collector") not in calls
+
+
+def test_failed_read_acceptance_leaves_all_candidate_services_stopped(runtime_scope):
+    arguments, calls, journal, _ = runtime_scope
+    with pytest.raises(RuntimeError, match="canonical_cold_runtime_prestart_acceptance_not_verified"):
+        runtime.restart_runtime(**{**arguments, "verify_before_start": lambda _: {"ready": False}})
+    assert all(action != "start" for action, _ in calls)
+    assert journal[-1][0] == "runtime_action_confirmed"
 
 
 def test_original_outcome_restarts_only_same_containers(runtime_scope):

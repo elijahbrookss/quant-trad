@@ -122,19 +122,22 @@ def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_h
             state["database_evidence"] = state.get("database_evidence", {}) | {phase: evidence}
             host.save_receipt(path, state, initial=False)
 
-        def resume(verify_ready):
+        def resume(verify_ready, *, verify_before_start=None):
             if not callable(verify_ready):
                 raise ValueError("canonical_cold_host_hold_acceptance_required")
             assert_held()
             outcome = state.get("database_evidence", {}).get("database_reopened", {}).get("outcome")
             if state["phase"] != "database_reopened" or outcome not in ("original", "committed"):
                 raise RuntimeError("canonical_cold_host_hold_database_outcome_unverified")
+
             def record_runtime(phase, evidence):
                 if host.load_receipt(path) != state:
                     raise RuntimeError("canonical_cold_host_hold_changed")
                 check_deadline()
                 if phase == "runtime_action_confirmed":
                     state["runtime_progress"] = evidence
+                if phase == "runtime_prestart_verified":
+                    state["runtime_prestart"] = evidence
                 state["phase"] = phase
                 state["runtime_evidence"] = evidence
                 host.save_receipt(path, state, initial=False)
@@ -143,7 +146,7 @@ def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_h
                 state_root, source=inventory, model=runtime_model if outcome == "committed" else None,
                 admission=runtime_admission if outcome == "committed" else None,
                 stopped_services=state["stopped_services"], remaining=check_deadline,
-                record=record_runtime, verify_ready=verify_ready,
+                record=record_runtime, verify_ready=verify_ready, verify_before_start=verify_before_start,
             )
             if outcome == "committed":
                 _record_serving_release(
