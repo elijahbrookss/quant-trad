@@ -25,6 +25,7 @@ from ..storage.repos.fact_retention import (
     archive_admission_blockers, canonical_fact_retention_repository, require_hot_window_elapsed,
 )
 from ..storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
+from ..storage.cold_stage_pressure import ColdStagePressure
 from ..storage.history_policy import saved_canonical_policy, require_saved_history_policy
 
 logger = logging.getLogger(__name__)
@@ -60,9 +61,11 @@ class CanonicalRetentionStopRequested(CanonicalRetentionBudgetExceeded):
 
 
 class CanonicalFactRetentionExecutor:
-    def __init__(self, *, repository=canonical_fact_retention_repository, use_saved_history_policy=False):
+    def __init__(self, *, repository=canonical_fact_retention_repository, use_saved_history_policy=False,
+                 cold_stage_admission=None):
         self.repository = repository
         self.use_saved_history_policy = use_saved_history_policy
+        self.cold_stage_admission = cold_stage_admission
         self._cursor = None
         self._retry_states = {}
         self._run_lock = Lock()
@@ -298,6 +301,7 @@ class CanonicalFactRetentionExecutor:
         if action == "restart_verification":
             return archive.restart_partition_verification(day)
         if action == "reclaim_partition":
+            stage_options = {"cold_stage_admission": self.cold_stage_admission} if self.cold_stage_admission else {}
             reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True,
                 limits=FactReclamationLimits(
                     statement_timeout_ms=min(1000, timeout),
@@ -305,7 +309,7 @@ class CanonicalFactRetentionExecutor:
                         policy.pinned_ranges_statement_timeout_ms, timeout),
                     max_handoff_seconds=policy.max_handoff_seconds,
                     count_statement_timeout_ms=_COUNT_STATEMENT_TIMEOUT_MS,
-                ), remaining_run_seconds=current_remaining_seconds)
+                ), remaining_run_seconds=current_remaining_seconds, **stage_options)
             return reclaimer.reclaim_partition(day, eligible_before=date.fromisoformat(item["eligible_before"]),
                                                 execute=True, verification_limits=verification)
         raise ValueError(f"canonical_retention_action_invalid: action={action}")
@@ -773,7 +777,8 @@ class CanonicalFactRetentionExecutor:
                      "status": "deferred", "reason": str(exc)}
                 ))
                 self._schedule_retry(
-                    day=day, reason="lifecycle_busy", policy=policy, now=monotonic(),
+                    day=day, reason=("cold_stage_pressure" if isinstance(exc, ColdStagePressure) else "lifecycle_busy"),
+                    policy=policy, now=monotonic(),
                 )
                 if day == retry_day:
                     retry_followthrough = False

@@ -31,7 +31,7 @@ def require_oldest_header_day(session, day):
         raise RuntimeError(f"cold_fact_retirement_requires_oldest_day: storage_day={day}")
 
 
-def stage_retirement_pages(session, archive, day):
+def stage_retirement_pages(session, archive, day, *, admission=None):
     """Admit a bounded slice of pages while SQL authority stays live."""
     sources = session.execute(text("""
         SELECT old.* FROM market.fact_archive_manifests AS old
@@ -42,6 +42,7 @@ def stage_retirement_pages(session, archive, day):
     """), {"day": day}).mappings().all()
     if not sources:
         return None
+    check_resources = admission(session) if admission is not None else (lambda: None)
     repository = PostgresColdHistory(ColdHistoryReader(
         archive.object_store, limits=archive.limits,
         ensure_contracts=lambda pairs: ensure_payload_contracts(session, pairs),
@@ -52,6 +53,7 @@ def stage_retirement_pages(session, archive, day):
         page = _catalog_manifest(source)
         repository.admit(session, page, staged_storage_day=day)
         rows += page.row_count
+        check_resources()
     archive._check_budget()
     return {"status": "cold_page_admitted", "storage_day": day,
             "manifest_id": page.manifest_id, "page_count": len(sources), "row_count": rows}

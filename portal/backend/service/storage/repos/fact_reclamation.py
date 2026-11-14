@@ -18,6 +18,7 @@ from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVe
 from portal.backend.db.cold_history_models import assert_cold_history_immutability, guard_cold_runtime_placement
 from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from portal.backend.db.fact_storage_schema import fact_partition_name
+from ..cold_stage_pressure import ColdStagePressure
 from .cold_history import cold_layout_active
 from .cold_retirement import (
     drop_verified_header, lock_header_namespace, require_oldest_header_day,
@@ -131,7 +132,7 @@ class FactReclamationLimits:
 class PostgresCanonicalFactReclamationRepository:
     def __init__(self, *, archive_repository, enabled: bool = False,
                  limits: FactReclamationLimits = FactReclamationLimits(),
-                 remaining_run_seconds=None):
+                 remaining_run_seconds=None, cold_stage_admission=None):
         if type(enabled) is not bool:
             raise ValueError("canonical_reclaim_enabled_must_be_boolean")
         if remaining_run_seconds is not None and not callable(remaining_run_seconds):
@@ -140,6 +141,7 @@ class PostgresCanonicalFactReclamationRepository:
         self.enabled = enabled
         self.limits = limits
         self.remaining_run_seconds = remaining_run_seconds
+        self.cold_stage_admission = cold_stage_admission
 
     def _timeouts(self, session):
         session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
@@ -251,6 +253,8 @@ class PostgresCanonicalFactReclamationRepository:
         try:
             return self._reclaim_partition(day, eligible_before=eligible_before, execute=execute,
                                            verification_limits=verification_limits)
+        except ColdStagePressure:
+            raise
         except Exception:
             logger.exception("canonical_hot_partition_reclaim_failed | storage_day=%s execute=%s", day, execute)
             raise
@@ -299,7 +303,7 @@ class PostgresCanonicalFactReclamationRepository:
                         raise RuntimeError(f"cold_fact_retirement_header_missing: storage_day={day}")
                     if execute:
                         guard_cold_runtime_placement(session, locators=True, archive_evidence=True)
-                        staged = stage_retirement_pages(session, self.archive, day)
+                        staged = stage_retirement_pages(session, self.archive, day, admission=self.cold_stage_admission)
                         if staged is not None:
                             return staged
                 if (execute and not already_reclaimed) or retired is not None:

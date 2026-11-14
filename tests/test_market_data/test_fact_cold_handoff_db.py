@@ -9,6 +9,7 @@ from market_data.contracts import DatasetSeriesRequest
 from market_data.normalization import NormalizationInput, NormalizationSpec, evaluate_normalization
 from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
 from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bindings
+from portal.backend.service.storage.cold_stage_pressure import ColdStagePressure
 from portal.backend.service.storage.repos import market_data, normalization
 from portal.backend.service.storage.repos.cold_retirement import prune_oldest_retired_identities
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
@@ -42,7 +43,18 @@ def test_recurring_handoff_requires_an_unchanged_cold_only_dependency(storage, t
     archive = PostgresCanonicalFactArchiveRepository(
         database=storage.database, object_store=store, temporary_directory=tmp_path / "staging",
     )
-    reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    checks = []
+    deny_stage = True
+
+    def stage_admission(_session):
+        def check():
+            checks.append("page")
+            if deny_stage:
+                raise ColdStagePressure("test pressure after staged page write")
+        return check
+
+    reclaimer = PostgresCanonicalFactReclamationRepository(
+        archive_repository=archive, enabled=True, cold_stage_admission=stage_admission)
     _archive_day(archive, source_day)
     with storage.database.session() as session:
         identity = session.scalar(text("""
@@ -58,8 +70,18 @@ def test_recurring_handoff_requires_an_unchanged_cold_only_dependency(storage, t
     def reclaim(day):
         return reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)["status"]
 
+    with pytest.raises(ColdStagePressure, match="pressure after staged page write"):
+        reclaim(source_day)
+    with storage.database.session() as session:
+        assert session.scalar(text("SELECT count(*) FROM market.cold_fact_pages")) == 0
+    assert _physical(storage, source_day)["header_rows"] == 1
+    deny_stage = False
     assert reclaim(source_day) == "cold_page_admitted"
+    deny_stage = True
+    # Final retirement releases storage without a staging resource check.
     assert reclaim(source_day) == "partition_reclaimed"
+    assert checks == ["page", "page"]
+    deny_stage = False
     assert prune_oldest_retired_identities(storage.database, deadline=lambda: None)["day_complete"]
     with storage.database.session() as session:
         assert not session.scalar(text("SELECT EXISTS (SELECT FROM market.fact_identities WHERE id=:id)"),

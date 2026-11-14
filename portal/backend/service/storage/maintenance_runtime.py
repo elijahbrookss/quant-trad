@@ -66,11 +66,20 @@ def storage_maintenance_runners(database, *, storage_root, limits_path=None, req
         raise ValueError("storage_maintenance_incremental_configuration_required")
     # The existing lifecycle service owns payload archival; bind it to the
     # same saved policy as header movement without adding a second scheduler.
+    from ..market.canonical_retention import CanonicalFactRetentionExecutor
     from ..market.market_storage_lifecycle import MarketStorageLifecycleService
+    from .cold_stage_pressure import admit_cold_stage_pressure
     from .repos.fact_retention import PostgresCanonicalFactRetentionRepository
+    repository = PostgresCanonicalFactRetentionRepository(database=database)
     return {
         "service": MarketStorageLifecycleService(
-            canonical_repository=PostgresCanonicalFactRetentionRepository(database=database),
+            canonical_repository=repository,
+            canonical_executor=CanonicalFactRetentionExecutor(
+                repository=repository, use_saved_history_policy=True,
+                cold_stage_admission=partial(admit_cold_stage_pressure,
+                    pg_controldata=_PG15/"pg_controldata",
+                    temporary_bytes=history["temporary_bytes"], wal_bytes=history["wal_bytes"]),
+            ),
             use_saved_history_policy=True),
         "history_runner": partial(run_history_maintenance, database,
             pg_controldata=_PG15/"pg_controldata", resource_limits=history),
