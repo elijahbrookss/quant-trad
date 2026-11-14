@@ -71,3 +71,19 @@ def test_cli_refuses_changed_or_discontinuous_reviewed_batch_before_admission(mo
         with pytest.raises(SystemExit) as error:
             cli.main(arguments + ["--verification-batch-sha256", digest])
         assert error.value.code == 2
+
+
+def test_prepared_batch_scope_refuses_another_day_before_runtime(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "get_settings", lambda: pytest.fail("unexpected runtime admission"))
+    path = tmp_path / "batch.json"
+    payload = {"schema_version": cli.PREPARED_BATCH_VERSION, "storage_day": "2026-09-24",
+               "verifier_version": cli.FACT_ARCHIVE_VERIFIER_VERSION, "source": {},
+               "pages": [{"page_ordinal": ordinal, "manifest_id": "cfa_" + str(ordinal) * 64,
+                          "manifest_hash": "a" * 64, "generation": 0} for ordinal in (2, 3)]}
+    data = json.dumps(payload).encode()
+    path.write_bytes(data)
+    with pytest.raises(SystemExit) as error:
+        cli.main(["--storage-day", "2026-09-25", "--expected-action", "verify_page",
+                  "--verification-batch", str(path), "--receipt", str(tmp_path / "unused"),
+                  "--verification-batch-sha256", hashlib.sha256(data).hexdigest()])
+    assert error.value.code == 2

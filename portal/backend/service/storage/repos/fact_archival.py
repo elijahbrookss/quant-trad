@@ -142,7 +142,7 @@ _ARCHIVE_UNVERIFIED_PAGE_QUERY = text("""
       ON proof.manifest_id=pages.id AND proof.verifier_version=:version
     LEFT JOIN market.fact_archive_active_generations AS active ON active.manifest_id=pages.id
     WHERE pages.storage_day=:day AND proof.manifest_id IS NULL
-    ORDER BY pages.page_ordinal LIMIT 1
+    ORDER BY pages.page_ordinal LIMIT :limit
 """)
 
 
@@ -181,7 +181,7 @@ def validate_selected_verification_batch(pages):
 
 def _unverified_page(session, day, expected=None):
     page = session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
-        "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION,
+        "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION, "limit": 1,
     }).mappings().one_or_none()
     if expected is not None and (page is None or _page_pin(page) != expected):
         raise RuntimeError(f"canonical_archive_selected_page_changed: storage_day={day}")
@@ -192,6 +192,19 @@ def _page_pin(page):
     return SelectedVerificationPage(page["page_ordinal"], page["id"], page["manifest_hash"],
                                     page["selected_generation"] or 0, page["selected_preparation_id"],
                                     page["selected_catalog_commitment"])
+
+
+def prepare_selected_verification_batch(session, day, *, first_page_ordinal, page_count):
+    """Read only the exact next bounded contiguous archive cursor."""
+    if (type(first_page_ordinal) is not int or not 0 <= first_page_ordinal <= 2**31 - 1
+            or type(page_count) is not int or not 2 <= page_count <= 128):
+        raise ValueError("canonical_archive_selected_batch_invalid")
+    pages = tuple(_page_pin(row) for row in session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
+        "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION, "limit": page_count,
+    }).mappings())
+    if len(pages) != page_count or pages[0].page_ordinal != first_page_ordinal:
+        raise RuntimeError(f"canonical_archive_selected_batch_changed: storage_day={day}")
+    return validate_selected_verification_batch(pages)
 
 
 def _unverified_batch_suffix(session, day, expected):

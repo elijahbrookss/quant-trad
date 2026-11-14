@@ -31,6 +31,9 @@ from portal.backend.service.storage.repos.fact_archival import (  # noqa: E402
     SelectedVerificationPage, validate_selected_verification_batch,
 )
 from portal.backend.service.storage.repos.query_diagnostic import write_receipt  # noqa: E402
+from scripts.db.canonical_cold_prepare_verification import (  # noqa: E402
+    FACT_ARCHIVE_VERIFIER_VERSION, VERSION as PREPARED_BATCH_VERSION, require_prepared_source,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        storage_day = date.fromisoformat(args.storage_day)
+    except ValueError as exc:
+        raise SystemExit("--storage-day must be YYYY-MM-DD") from exc
     if args.verification_pages is not None and (
         args.expected_action not in {"verify_partition", "reclaim_partition"}
         or not 1 <= args.verification_pages <= 100_000
@@ -85,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--manifest-set-hash must be a lowercase SHA-256.")
     page_fields = (args.page_ordinal, args.manifest_id, args.manifest_hash, args.generation,
                    args.preparation_id, args.catalog_commitment)
-    page = batch = None
+    page = batch = prepared_source = None
     if (args.verification_batch is None) != (args.verification_batch_sha256 is None):
         parser.error("A verification batch requires its exact SHA-256.")
     if args.expected_action == "verify_page":
@@ -95,11 +102,21 @@ def main(argv: list[str] | None = None) -> int:
             elif any(value is not None for value in page_fields):
                 parser.error("A verification batch cannot be combined with single-page pins.")
             else:
+                if args.verification_batch.expanduser().resolve() == Path(args.receipt).expanduser().resolve():
+                    parser.error("Verification and preparation require separate receipt paths.")
                 with args.verification_batch.open("rb") as handle:
                     data = handle.read(65_537)
                 if len(data) > 65_536 or hashlib.sha256(data).hexdigest() != args.verification_batch_sha256:
                     raise ValueError("canonical_archive_selected_batch_hash_or_size_invalid")
                 payload = json.loads(data)
+                if isinstance(payload, dict):
+                    if (payload.get("schema_version") != PREPARED_BATCH_VERSION
+                            or payload.get("storage_day") != storage_day.isoformat()
+                            or payload.get("verifier_version") != FACT_ARCHIVE_VERIFIER_VERSION
+                            or not isinstance(payload.get("source"), dict)):
+                        raise ValueError("canonical_archive_prepared_batch_scope_changed")
+                    prepared_source = payload["source"]
+                    payload = payload.get("pages")
                 if not isinstance(payload, list) or not 2 <= len(payload) <= 128:
                     raise ValueError("canonical_archive_selected_batch_invalid")
                 batch = validate_selected_verification_batch(tuple(SelectedVerificationPage(**row) for row in payload))
@@ -107,10 +124,6 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
     elif args.verification_batch is not None or any(value is not None for value in page_fields):
         parser.error("Exact page pins require verify_page.")
-    try:
-        storage_day = date.fromisoformat(args.storage_day)
-    except ValueError as exc:
-        raise SystemExit("--storage-day must be YYYY-MM-DD") from exc
     settings = get_settings()
     if os.geteuid() != 70:
         raise PermissionError("canonical_retention_action_database_user_required")
@@ -118,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("canonical_retention_action_dedicated_owner_required")
     if settings.storage.archive_shared_group_id is None:
         raise ValueError("canonical_retention_action_shared_archive_required")
+    if prepared_source is not None:
+        require_prepared_source(prepared_source)
     require_configured_archive_mount()
     require_configured_working_mount()
     FilesystemRawArchiveObjectStore(DEFAULT_STORAGE_ROOT / "objects")

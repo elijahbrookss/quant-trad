@@ -19,8 +19,11 @@ pytestmark = pytest.mark.db
 
 
 def test_reviewed_verification_batch_resumes_exact_receipts_and_stops_at_last_pin(storage, tmp_path, monkeypatch):
+    import json
+
     from portal.backend.service.market.canonical_retention import CanonicalFactRetentionExecutor
     from portal.backend.service.storage.repos.fact_archival import SelectedVerificationPage
+    from scripts.db import canonical_cold_prepare_verification as prepare
 
     day = storage.today - timedelta(days=31)
     _placement(monkeypatch, day)
@@ -39,7 +42,28 @@ def test_reviewed_verification_batch_resumes_exact_receipts_and_stops_at_last_pi
             FROM market.fact_archive_manifests p JOIN market.fact_archive_active_generations g ON g.manifest_id=p.id
             WHERE p.storage_day=:day ORDER BY p.page_ordinal
         """), {"day": day}).all()
-    pins = tuple(SelectedVerificationPage(*row[:6]) for row in manifests[:3])
+        identity = dict(session.execute(text("""
+            SELECT system_identifier::text AS system_identifier,current_database() AS database,
+                   d.oid::bigint AS database_oid,'market.fact_versions'::regclass::oid::bigint AS header_oid
+            FROM pg_catalog.pg_control_system() CROSS JOIN pg_catalog.pg_database d WHERE d.datname=current_database()
+        """)).mappings().one())
+    monkeypatch.setenv("PG_DSN", storage.dsn)
+    prepared = tmp_path / "prepare.json"
+    arguments = ["--storage-day", day.isoformat(), "--first-page-ordinal", str(manifests[0].page_ordinal),
+                 "--page-count", "3", "--receipt", str(prepared)]
+    for key, value in identity.items():
+        arguments += ["--" + key.replace("_", "-"), str(value)]
+    with pytest.raises(SystemExit, match="prepare_day_coverage_changed"):
+        prepare.main(arguments + ["--day-page-count", "3"])
+    assert not prepared.exists()
+    assert prepare.main(arguments + ["--day-page-count", "4"]) == 0
+    receipt = json.loads(prepared.read_text())
+    assert receipt["source"] == identity and receipt["day_expected_rows"] == 4
+    pins = tuple(SelectedVerificationPage(**page) for page in receipt["pages"])
+    assert pins == tuple(SelectedVerificationPage(*row[:6]) for row in manifests[:3])
+    prepare.require_prepared_source(identity)
+    with pytest.raises(RuntimeError, match="prepare_source_changed"):
+        prepare.require_prepared_source(identity | {"header_oid": identity["header_oid"] + 1})
     options = dict(policy=policy, storage_root=tmp_path, storage_day=day, expected_action="verify_page")
 
     def proof_ordinals():
