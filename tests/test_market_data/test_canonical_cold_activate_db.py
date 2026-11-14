@@ -206,6 +206,7 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
 
     with engine.begin() as conn:
         switched = activation.activate_cold_storage(conn, verified_objects=verified, **transition)
+        assert switched["cold_before_day"] == storage.today.isoformat()
         assert switched["verified_rows"] == 2
         assert switched["retired_header_bytes"] > 0 and switched["retired_payload_bytes"] > 0
         assert conn.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["new_oid"]
@@ -231,6 +232,11 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
         assert reader.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
         assert reader.read_facts(series_id=storage.series_id, start=start, end=end)[0].fact.payload["raw_rate"] == "0.2"
         assert reader.read_facts(series_id=retained_series, start=start, end=end)[0].fact == storage.fact
+        from portal.backend.service.storage.history_maintenance import _prepare as prepare_header_move
+
+        assert prepare_header_move(restarted, pg_controldata=None, limits={}, cancelled=None) == {
+            "state": "disabled", "reason": "canonical_cold_authority",
+        }
         retention = PostgresCanonicalFactRetentionRepository(database=restarted).plan(
             policy=CanonicalFactRetentionPolicy(), storage_root=new_store.root,
         )

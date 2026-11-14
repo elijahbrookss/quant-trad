@@ -202,6 +202,14 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         conn.execute(text(f'LOCK TABLE market."{table}" IN SHARE ROW EXCLUSIVE MODE NOWAIT'))
     if conn.scalar(text("SELECT EXISTS (SELECT FROM market.cold_fact_retired_days)")):
         raise RuntimeError("canonical_cold_activation_retirement_receipts_already_exist")
+    conn.execute(text("LOCK TABLE public.portal_storage_plans IN SHARE ROW EXCLUSIVE MODE NOWAIT"))
+    if conn.scalar(text("""
+        SELECT EXISTS (
+            SELECT FROM public.portal_storage_plans
+            WHERE state IN ('queued','running','blocked') AND progress->>'operation'='qt.automatic_header_history.v1'
+        )
+    """)):
+        raise RuntimeError("canonical_cold_activation_pending_legacy_header_move")
 
     identity = execution["target_database"]
     target = TargetDatabase(identity["system_identifier"], identity["database"], identity["database_oid"])
@@ -257,6 +265,7 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
     result = {
         "execution_hash": expected_execution_hash, "audit_set_hash": audit["audit_set_hash"],
         "database": identity, "source_commit_seq": execution["source_commit_seq"],
+        "cold_before_day": cutoff.isoformat(),
         "verified_rows": audit["verified_rows"], "verified_pages": audit["verified_pages"],
         "retired_header_bytes": retired_header_bytes,
         "retired_payload_bytes": sum(payload_bytes.values()), "identity": identity_result,
