@@ -3,19 +3,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date
+from hashlib import sha256
+from time import monotonic
 from typing import Mapping
 
 from sqlalchemy import insert, text
 
+from market_data.archive_namespace import archive_namespace
 from market_data.cold_history import ColdHistoryReader
 from market_data.fact_archive import FactArchiveManifest, archive_evidence_hash
+from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
 from portal.backend.db.fact_identity_schema import _assert_header_partition, _partition_bound
-from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION, assert_fact_storage_contract, fact_partition_name
+from portal.backend.db.fact_storage_schema import (
+    FACT_STORAGE_LAYOUT_VERSION, assert_fact_storage_contract, ensure_fact_payload_partition, fact_partition_name,
+)
 from portal.backend.db.market_data_models import MarketFactVersionRecord
 from portal.backend.db.market_storage_models import MarketFactHotPayloadRecord
+from portal.backend.service.storage.repos.cold_history import _manifest
 from portal.backend.service.storage.repos.fact_storage import CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, ensure_payload_contracts
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
+from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
+from scripts.db.canonical_cold_audit import _locators
 from scripts.db.canonical_cold_migration import PostgresMigrationSource
+from scripts.db.canonical_cold_restore_references import _require_disposable_fence
+from scripts.db.fact_header_v2_capture import _bounded_step
 
 
 VERSION = "qt.canonical_cold_reverse_projection_fixture.v1"
@@ -37,7 +48,7 @@ class ReversePage:
             "original_storage_days": {key: day.isoformat() for key, day in days.items()} if days is not None else None})
 
 
-def _layout_guard(conn, plan, timeout_ms):
+def _layout_guard(conn, plan, timeout_ms, *, layout=FACT_STORAGE_LAYOUT_VERSION):
     if (not conn.in_transaction() or conn.get_isolation_level() != "READ COMMITTED"
             or conn.get_execution_options().get("isolation_level") == "AUTOCOMMIT"
             or type(timeout_ms) is not int or not 1 <= timeout_ms <= 120_000):
@@ -64,8 +75,8 @@ def _layout_guard(conn, plan, timeout_ms):
     conn.exec_driver_sql("LOCK TABLE market.fact_storage_state IN SHARE MODE NOWAIT")
     state = conn.execute(text("""SELECT layout_version,state,completed_at IS NOT NULL
         FROM market.fact_storage_state ORDER BY layout_version LIMIT 2""")).all()
-    if state != [(FACT_STORAGE_LAYOUT_VERSION, "ready", True)]:
-        raise RuntimeError("reverse projection requires the ready original v2 layout")
+    if state != [(layout, "ready", True)]:
+        raise RuntimeError("reverse projection layout differs from plan")
     assert_fact_storage_contract(conn)
 
 
@@ -118,16 +129,30 @@ def rematerialize_page(conn, *, plan: ReversePage, reader: ColdHistoryReader,
     if plan.plan_hash != expected_plan_hash:
         raise RuntimeError("reverse projection plan hash differs")
     _layout_guard(conn, plan, timeout_ms)
-    # Bind archived contracts to the destination's schema owners; use the
-    # actual bounded codec and bypass the optional read-copy cache.
+    verified = _verified_page(conn, reader, manifest)
+    if placement is not None and {row["id"] for row in verified} != placement.keys():
+        raise RuntimeError("reverse projection original placement witness set differs")
+    rows = [(placement[row["id"]] if placement is not None else row["accepted_at"].astimezone(UTC).date(), row)
+            for row in verified]
+    inserted = _write_exact_page(conn, rows)
+    receipt = {"version": VERSION, "plan_hash": expected_plan_hash, "manifest_hash": manifest.manifest_hash,
+               "inserted": inserted, "verified": len(rows), "last_cursor": list(manifest.last_cursor),
+               "placement_mode": "original_storage_day" if placement is not None else "candidate_acceptance_utc_day",
+               "stored_rows_sha256": archive_evidence_hash({"ordered_rows": [[day.isoformat(), row] for day, row in rows]})}
+    return receipt | {"receipt_sha256": archive_evidence_hash(receipt)}
+
+
+def _verified_page(conn, reader, manifest):
     verified = ColdHistoryReader(reader.object_store, limits=reader.limits,
         ensure_contracts=lambda contracts: ensure_payload_contracts(conn, contracts)).read_page(manifest)
     ids = {row["id"] for row in verified}
     commits = {row["market_commit_seq"] for row in verified}
-    if len(ids) != len(verified) or len(commits) != len(verified) or (placement is not None and ids != placement.keys()):
-        raise RuntimeError("reverse projection identity or original placement witness set differs")
-    rows = [(placement[row["id"]] if placement is not None else row["accepted_at"].astimezone(UTC).date(), row)
-            for row in verified]
+    if len(ids) != len(verified) or len(commits) != len(verified):
+        raise RuntimeError("reverse projection page contains duplicate identities or commits")
+    return verified
+
+
+def _write_exact_page(conn, rows):
     for day in sorted({day for day, _ in rows}):
         _existing_destination_day(conn, day)
 
@@ -150,8 +175,75 @@ def rematerialize_page(conn, *, plan: ReversePage, reader: ColdHistoryReader,
         for day, row in rows:
             _assert_exact(conn, day=day, row=row)
         conn.exec_driver_sql("SET CONSTRAINTS market.trg_require_fact_identity_header, market.trg_require_fact_hot_payload DEFERRED")
-    receipt = {"version": VERSION, "plan_hash": expected_plan_hash, "manifest_hash": manifest.manifest_hash,
-               "inserted": inserted, "verified": len(rows), "last_cursor": list(manifest.last_cursor),
-               "placement_mode": "original_storage_day" if placement is not None else "candidate_acceptance_utc_day",
-               "stored_rows_sha256": archive_evidence_hash({"ordered_rows": [[day.isoformat(), row] for day, row in rows]})}
-    return receipt | {"receipt_sha256": archive_evidence_hash(receipt)}
+    return inserted
+
+
+def restore_candidate_only_pages(conn, *, fence, expected_database, expected_execution_hash,
+                                 expected_source_commit, reader, max_pages, max_bytes, timeout_seconds=120):
+    """Project every post-switch direct-cold page back to SQL before reattaching legacy.
+
+    Use only on the fenced latest rollback clone. SQL and cold placement can
+    coexist while isolated. Keep the writer fence and do not reopen until the
+    old catalog and authority are completely restored.
+    """
+    _require_disposable_fence(conn, fence)
+    if (type(expected_source_commit) is not int or expected_source_commit < 1
+            or type(max_pages) is not int or not 1 <= max_pages <= 16_384
+            or type(max_bytes) is not int or not 1 <= max_bytes <= 128 * 1024**3
+            or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120):
+        raise ValueError("reverse projection candidate page budget invalid")
+
+    with archive_namespace(reader.object_store.root, exclusive=True) as check_archive, _bounded_step(conn, timeout_seconds) as bound:
+        bound(max(0, fence.deadline - monotonic()))
+        fence.assert_quiet(conn)
+        _layout_guard(conn, ReversePage("", "", expected_source_commit, expected_database), timeout_seconds * 1000,
+                      layout=COLD_HISTORY_LAYOUT_VERSION)
+        certificate = conn.scalar(text("SELECT evidence FROM market.fact_storage_state"))
+        initial = certificate.get("source_commit_seq") if isinstance(certificate, dict) else None
+        if (not isinstance(certificate, dict) or certificate.get("execution_hash") != expected_execution_hash
+                or type(initial) is not int or not 0 < initial <= expected_source_commit
+                or PostgresMarketDataRepository._current_commit_seq_with_session(conn) != expected_source_commit):
+            raise RuntimeError("reverse projection candidate authority changed")
+        pages = conn.execute(text("""
+            SELECT * FROM market.cold_fact_pages WHERE staged_storage_day IS NULL AND last_commit_seq>:initial
+            ORDER BY first_commit_seq,id COLLATE "C" LIMIT :limit
+        """), {"initial": initial, "limit": max_pages + 1}).mappings().all()
+        if len(pages) > max_pages or sum(page["byte_count"] for page in pages) > max_bytes:
+            raise RuntimeError("reverse projection candidate page budget exceeded")
+
+        digest = archive_evidence_hash({"schema": VERSION, "source_commit": expected_source_commit})
+        prior_commit, inserted, verified = initial, 0, 0
+        for page in pages:
+            fence.check_clock()
+            check_archive()
+            manifest = _manifest(page)
+            if not prior_commit < manifest.first_cursor[0] <= manifest.last_cursor[0] <= expected_source_commit:
+                raise RuntimeError("reverse projection candidate page commit range changed")
+            rows = _verified_page(conn, reader, manifest)
+            _assert_candidate_locators(conn, rows, manifest)
+            dated = [(row["accepted_at"].astimezone(UTC).date(), row) for row in rows]
+            for day in sorted({day for day, _ in dated}):
+                ensure_fact_payload_partition(conn, day)
+            inserted += _write_exact_page(conn, dated)
+            verified += len(dated)
+            prior_commit = manifest.last_cursor[0]
+            digest = archive_evidence_hash({"prior": digest, "manifest": manifest.manifest_hash,
+                                            "placement": [[day.isoformat(), row["id"]] for day, row in dated]})
+        check_archive()
+        fence.assert_quiet(conn)
+    receipt = {"schema": VERSION, "target_database": expected_database, "source_commit": expected_source_commit,
+               "execution_hash": expected_execution_hash, "page_count": len(pages), "row_count": verified,
+               "ordered_content_hash": digest}
+    return receipt | {"receipt_sha256": archive_evidence_hash(receipt), "inserted": inserted}
+
+
+def _assert_candidate_locators(conn, rows, manifest):
+    locators = _locators(conn, manifest)
+    if len(locators) != len(rows):
+        raise RuntimeError("reverse projection candidate locator count differs")
+    for ordinal, (row, locator) in enumerate(zip(rows, locators, strict=True)):
+        if (locator["id"], locator["ordinal"], locator["series_id"], locator["revision"], locator["market_commit_seq"],
+                bytes(locator["key_digest"]), bytes(locator["row_hash"])) != (
+                row["id"], ordinal, row["series_id"], row["revision"], row["market_commit_seq"],
+                sha256(row["observation_key"].encode()).digest(), bytes.fromhex(row["row_hash"])):
+            raise RuntimeError(f"reverse projection candidate locator differs: {row['id']}")

@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.cold_history import ColdHistoryReader, publish_cold_page
 from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, CandleFact, SourceIdentity
 from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
+from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bindings
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION, ensure_fact_payload_partition
 from portal.backend.db.market_data_models import MarketDataIngestionRunRecord
 from portal.backend.db.session import Database
@@ -20,7 +22,7 @@ from portal.backend.service.storage.repos.fact_storage import CANONICAL_ROW_COLU
 from scripts.db.canonical_cold_database_fence import close_database_fence
 from scripts.db.canonical_cold_migration import PostgresMigrationSource
 from scripts.db.canonical_cold_reverse_allocator import capture_allocator, synchronize_allocator
-from scripts.db.canonical_cold_reverse_projection import ReversePage, rematerialize_page
+from scripts.db.canonical_cold_reverse_projection import ReversePage, rematerialize_page, restore_candidate_only_pages
 from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog, _fence_connections
 from tests.test_market_data.test_fact_storage_tiers_db import _placement, storage  # noqa: F401
 
@@ -77,7 +79,11 @@ def test_reverse_projection_rehydrates_verified_old_and_candidate_only_rows_unde
             record, = conn.execute(text(f"SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM} WHERE versions.series_id=:series"),
                                    {"series": series}).mappings().all()
             original_page = publish_cold_page([record], object_store=store, temporary_directory=tmp_path)
-            conn.execute(text("UPDATE market.fact_storage_state SET layout_version=:layout"), {"layout": COLD_HISTORY_LAYOUT_VERSION})
+            prepare_cold_dependency_bindings(conn)
+            conn.execute(text("UPDATE market.fact_storage_state SET layout_version=:layout,evidence=CAST(:evidence AS jsonb)"), {
+                "layout": COLD_HISTORY_LAYOUT_VERSION,
+                "evidence": json.dumps({"execution_hash": "a" * 64, "source_commit_seq": original_outcome.max_commit_seq}),
+            })
         correction = replace(original, close=104, received_at=accepted+timedelta(minutes=1),
                              accepted_at=accepted+timedelta(minutes=1), known_at=accepted+timedelta(minutes=1))
         # A correction with a hot head remains hot. Pick an independent old
@@ -118,6 +124,16 @@ def test_reverse_projection_rehydrates_verified_old_and_candidate_only_rows_unde
                 boundary = capture_allocator(conn, fence=source_fence, layout=COLD_HISTORY_LAYOUT_VERSION)
                 assert (boundary.visible_commit, boundary.last_value, boundary.is_called) == (outcome.max_commit_seq, burned, True)
                 assert boundary.next_value == burned + 1 > boundary.visible_commit + 1
+                reverse = {"fence": source_fence, "expected_database": source_identity, "expected_execution_hash": "a" * 64,
+                           "expected_source_commit": boundary.visible_commit, "reader": reader, "max_pages": 4,
+                           "max_bytes": candidate_page.byte_count}
+                with pytest.raises(RuntimeError, match="candidate page budget exceeded"):
+                    restore_candidate_only_pages(conn, **{**reverse, "max_bytes": candidate_page.byte_count - 1})
+                first = restore_candidate_only_pages(conn, **reverse)
+                repeat = restore_candidate_only_pages(conn, **reverse)
+                assert (first["page_count"], first["row_count"], first["inserted"], repeat["inserted"]) == (1, 1, 1, 0)
+                assert first["receipt_sha256"] == repeat["receipt_sha256"]
+                assert capture_allocator(conn, fence=source_fence, layout=COLD_HISTORY_LAYOUT_VERSION) == boundary
         original_plan = ReversePage(original_page.manifest_hash, original_page.object_sha256, outcome.max_commit_seq,
                                     identity, {expected[0].fact_version_id: old_day})
         candidate_plan = ReversePage(candidate_page.manifest_hash, candidate_page.object_sha256, outcome.max_commit_seq, identity)
