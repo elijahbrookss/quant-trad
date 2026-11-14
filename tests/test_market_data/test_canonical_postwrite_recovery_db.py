@@ -36,6 +36,7 @@ from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalF
 from scripts.automation.canonical_cold_collector_checks import RECEIPT_VERSION as COLLECTOR_RECEIPT_VERSION
 from scripts.automation.canonical_cold_recovery_checks import PLAN_VERSION, bind_approved_recovery_checks
 from scripts.automation.canonical_cold_named_recovery import NamedRecoverySite, _opened, bind_named_recovery_source, recover_named_site
+from scripts.automation import canonical_cold_recovery_preflight as preflight
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, stage_handoff, verify_staged_handoff
 from scripts.automation.storage_host_boundary import load_receipt, save_receipt
 from scripts.automation.verify_encrypted_recovery_handoff import verify_handoff
@@ -595,6 +596,40 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     assert history.stat().st_dev != signed_named_tablespace.stat().st_dev
     alias = history / "aliased-space"
     alias.symlink_to(history_path)
+    device = receiving.stat().st_dev
+    receiver_uuid = "postwrite-independent-fixture"
+    udev = Path(os.environ["QT_STORAGE_UDEV_ROOT"])
+    (udev / f"b{os.major(device)}:{os.minor(device)}").write_text(f"E:ID_FS_UUID={receiver_uuid}\n")
+    # This disposable server pair shares a single kernel. The independent host
+    # pins are fixture inputs. Capacity and native metadata are measured for real.
+    monkeypatch.setattr(preflight, "receiver_host_sha256", lambda: "c" * 64)
+    mount = lambda path: preflight.ReceiverPath(path, receiver_uuid)
+    preflight_options = dict(site=site, receiver_signing_key=receiver_sign, expected_host_sha256="c" * 64,
+        source_host_sha256="d" * 64, source_filesystem_uuids=(pair["filesystem_uuid"],), receiving=mount(receiving),
+        workspace=mount(workspace), pgdata=mount(pgdata), tablespaces={"signed_history_fixture": mount(history_path)},
+        pgbackrest=worker.pgbackrest, restic=worker.restic, database_key=worker.config.database_key_path,
+        archive_key=worker.config.archive_key_path, pending_expected=True, runtime_bytes=16 * 1024**2,
+        runtime_entries=128, max_manifest_entries=10_000, timeout_seconds=25)
+    with pytest.raises(ValueError, match="host_not_independent"):
+        preflight.measure_receiver_preflight(**(preflight_options | {"source_host_sha256": "c" * 64}))
+    with pytest.raises(RuntimeError, match="mount_identity_mismatch"):
+        preflight.measure_receiver_preflight(**(preflight_options | {"receiving": preflight.ReceiverPath(receiving, "wrong-uuid")}))
+    with pytest.raises(ValueError, match="tablespace_allowlist_changed"):
+        preflight.measure_receiver_preflight(**(preflight_options | {"tablespaces": {}}))
+    with pytest.raises(RuntimeError, match="capacity_insufficient"):
+        preflight.measure_receiver_preflight(**(preflight_options | {"runtime_bytes": 2 * 1024**3}))
+    measured = preflight.measure_receiver_preflight(**preflight_options)
+    sizing = measured["body"]
+    assert sizing["database_targets"]["tablespace:signed_history_fixture"]["logical_bytes"] > 0
+    assert sizing["archive_restore_files"] >= pair["archive_objects"]
+    assert len(sizing["capacity_by_device"]) == 1
+    capacity, = sizing["capacity_by_device"].values()
+    assert capacity["required_bytes"] > sum(item["logical_bytes"] for item in sizing["database_targets"].values())
+    receiver.public_key().verify(bytes.fromhex(measured["signature"]),
+        json.dumps(sizing, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
+    assert not any(pgdata.iterdir()) and not any(history_path.iterdir())
+    print(f"QT_RECEIVER_PREFLIGHT database={sizing['database_targets']} archive={sizing['archive_restore_bytes']} "
+          f"workspace_required={capacity['required_bytes']} entries={capacity['required_entries']}")
     later_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-at-anchor")
     scope, records, _ = _pending_level2(storage, structures, pending_root)
     start = first_trade.received_at - timedelta(seconds=10)
@@ -835,8 +870,13 @@ def _copy_repository(worker, selected):
     with worker.lock():
         with pytest.raises(RuntimeError, match="source_writer_busy"):
             stage_handoff(**options)
+        with pytest.raises(RuntimeError, match="source_writer_busy"):
+            preflight.measure_source_prestage(**{key: value for key, value in options.items() if key != "receiving"})
+    measured = preflight.measure_source_prestage(**{key: value for key, value in options.items() if key != "receiving"})
     transfer = stage_handoff(**options)
     assert transfer["encrypted_files"] > 0 and transfer["encrypted_bytes"] > 0
+    assert transfer["encrypted_bytes"] >= measured["encrypted_bytes"]
+    assert (copied / "encrypted-copy.jsonl").stat().st_size >= measured["manifest_bytes"]
     assert verify_staged_handoff(receiving=copied, transfer_receipt_sha256=transfer["transfer_receipt_sha256"],
                                  limits=limits) == transfer
     metadata = copied / "database" / "backup" / "qt" / "backup.info"

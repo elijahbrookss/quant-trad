@@ -418,7 +418,8 @@ def recover_named_site(*, site, signing_key, pgbackrest, restic, database_key, b
             archive_restore=base_restore, pgbackrest=pgbackrest, restic=restic, database_key=database_key, archive_key=base_archive_key,
             timeout_seconds=check(), max_archive_bytes=site.archive.bytes, max_archive_objects=site.max_archive_objects,
             wal_segment_bytes=site.baseline_verification["wal_segment_bytes"], max_wal_segments=site.baseline_verification["wal_segments"] + site.wal.files,
-            reserve_bytes=site.archive.reserve_bytes, anchor=anchor_path, anchor_sha256=request["anchor_sha256"], isolated_pgdata=pgdata)
+            reserve_bytes=site.archive.reserve_bytes, anchor=anchor_path, anchor_sha256=request["anchor_sha256"],
+            isolated_pgdata=pgdata, native_workspace=workspace)
         baseline = prepare_archive_baseline(root / "complete.json", base_restore,
             expected_receipt_sha256=native["pair_receipt_sha256"], max_objects=site.max_archive_objects, check=check)
         pending_verified = None

@@ -165,6 +165,31 @@ def _manifest_entry(key, evidence):
     return _encode({"path": key, **evidence})
 
 
+def _source_generation(source, device, generation, receipt_sha256):
+    if not isinstance(generation, str) or not _NAME.fullmatch(generation):
+        raise ValueError("recovery_transfer_source_generation_invalid")
+    directory, generation_id = _private_root(source / generation)
+    if generation_id[0] != device:
+        raise ValueError("recovery_transfer_source_generation_wrong_device")
+    pair = directory / "complete.json"
+    pair_info = _safe_member(pair, device)
+    if not stat.S_ISREG(pair_info.st_mode) or not 1 <= pair_info.st_size <= 65536:
+        raise ValueError("recovery_transfer_source_receipt_invalid")
+    receipt = _bound_json(pair, receipt_sha256)
+    if not isinstance(receipt, dict):
+        raise ValueError("recovery_transfer_source_receipt_invalid")
+    owned = {"schema_version": "qt.encrypted_recovery_pair.v1", "name": generation,
+             "database_identity": receipt["database_identity"], "filesystem_uuid": receipt["filesystem_uuid"]}
+    owner_path = directory / "owner.json"
+    if not stat.S_ISREG(_safe_member(owner_path, device).st_mode):
+        raise ValueError("recovery_transfer_source_generation_owner_invalid")
+    with os.fdopen(os.open(owner_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as marker:
+        owner = json.loads(marker.read(4097), object_pairs_hook=_unique_fields)
+    if owner != owned or any(receipt.get(key) != value for key, value in owned.items()):
+        raise ValueError("recovery_transfer_source_generation_owner_invalid")
+    return pair, pair_info, receipt
+
+
 def stage_handoff(*, source, receiving, generation, receipt_sha256, limits):
     """Publish a ciphertext manifest last. An interrupted receiving directory remains unpublished."""
     started = monotonic()
@@ -183,21 +208,7 @@ def stage_handoff(*, source, receiving, generation, receipt_sha256, limits):
             raise RuntimeError("recovery_transfer_receiving_reserve_exhausted")
 
     with _source_hold(source):
-        directory, generation_id = _private_root(source / generation)
-        if generation_id[0] != source_id[0]:
-            raise ValueError("recovery_transfer_source_generation_wrong_device")
-        receipt = _bound_json(directory / "complete.json", receipt_sha256)
-        if not isinstance(receipt, dict):
-            raise ValueError("recovery_transfer_source_receipt_invalid")
-        owned = {"schema_version": "qt.encrypted_recovery_pair.v1", "name": generation,
-                 "database_identity": receipt["database_identity"], "filesystem_uuid": receipt["filesystem_uuid"]}
-        owner_path = directory / "owner.json"
-        if not stat.S_ISREG(_safe_member(owner_path, source_id[0]).st_mode):
-            raise ValueError("recovery_transfer_source_generation_owner_invalid")
-        with os.fdopen(os.open(owner_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as marker:
-            owner = json.loads(marker.read(4097), object_pairs_hook=_unique_fields)
-        if owner != owned or any(receipt.get(key) != value for key, value in owned.items()):
-            raise ValueError("recovery_transfer_source_generation_owner_invalid")
+        pair, pair_info, _ = _source_generation(source, source_id[0], generation, receipt_sha256)
         before = _inventory(source, source_id[0], limits, check, source=True)
         directories, files, total = before
         manifest_ceiling = sum(len(_manifest_entry(key, {"bytes": expected[2], "sha256": "0" * 64}))
@@ -222,10 +233,6 @@ def stage_handoff(*, source, receiving, generation, receipt_sha256, limits):
             manifest.flush()
             os.fsync(manifest.fileno())
         _append_only_wal(before, _inventory(source, source_id[0], limits, check, source=True))
-        pair = directory / "complete.json"
-        pair_info = _safe_member(pair, source_id[0])
-        if not stat.S_ISREG(pair_info.st_mode) or not 1 <= pair_info.st_size <= 65536:
-            raise ValueError("recovery_transfer_source_receipt_invalid")
         pair_stamp = _stamp(pair_info)
         with (receiving / "complete.json").open("xb") as copy:
             os.fchmod(copy.fileno(), 0o600)

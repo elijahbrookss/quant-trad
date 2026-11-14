@@ -168,7 +168,7 @@ def _snapshot_owner(run, command, receipt):
 def verify_handoff(*, repository, receipt_sha256, archive_restore, pgbackrest, restic,
                    database_key, archive_key, timeout_seconds, max_archive_bytes, max_archive_objects,
                    wal_segment_bytes, max_wal_segments, reserve_bytes=0, anchor=None,
-                   anchor_sha256=None, isolated_pgdata=None):
+                   anchor_sha256=None, isolated_pgdata=None, native_workspace=None):
     """Read an immutable receiving copy; restore only archives into the empty supplied directory."""
     if (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400
             or type(max_archive_objects) is not int or not 1 <= max_archive_objects <= MAX_RECOVERY_OBJECTS
@@ -181,6 +181,12 @@ def verify_handoff(*, repository, receipt_sha256, archive_restore, pgbackrest, r
         raise ValueError("recovery_handoff_limits_or_anchor_invalid")
     repository, archive_restore = map(_directory, (repository, archive_restore))
     database_repo, archive_repo = map(_directory, (repository / "database", repository / "archives"))
+    if native_workspace is not None:
+        native_workspace = _directory(native_workspace)
+        if (native_workspace.is_relative_to(repository) or repository.is_relative_to(native_workspace)
+                or native_workspace.is_relative_to(archive_restore) or native_workspace.stat().st_uid != os.getuid()
+                or native_workspace.stat().st_mode & 0o077):
+            raise ValueError("recovery_handoff_private_native_workspace_required")
     if (repository.is_relative_to(archive_restore) or archive_restore.is_relative_to(repository)
             or archive_restore.stat().st_uid != os.getuid() or archive_restore.stat().st_mode & 0o077
             or any(archive_restore.iterdir())):
@@ -215,7 +221,7 @@ def verify_handoff(*, repository, receipt_sha256, archive_restore, pgbackrest, r
         if max(0, free - remaining) > max_archive_bytes:
             raise RuntimeError("recovery_handoff_archive_restore_byte_budget_exceeded")
 
-    with TemporaryDirectory(prefix="qt-recovery-verification-") as work:
+    with TemporaryDirectory(prefix="qt-recovery-verification-", dir=native_workspace) as work:
         env = {"PATH": os.defpath, "LC_ALL": "C", "HOME": work, "TMPDIR": work,
                "PGBACKREST_REPO1_CIPHER_PASS": pg_secret, "RESTIC_PASSWORD": restic_secret}
         run = partial(_run_native, cwd=work, env=env, deadline=deadline, check=check)
