@@ -157,7 +157,7 @@ class SelectedVerificationPage:
 
     def __post_init__(self):
         if (type(self.page_ordinal) is not int or not 0 <= self.page_ordinal <= 2**31 - 1
-                or type(self.generation) is not int or not 0 <= self.generation <= 2**31 - 1
+                or type(self.generation) is not int or not 0 <= self.generation <= 2**63 - 1
                 or not isinstance(self.manifest_id, str) or re.fullmatch(r"cfa_[0-9a-f]{64}", self.manifest_id) is None
                 or not isinstance(self.manifest_hash, str) or re.fullmatch(r"[0-9a-f]{64}", self.manifest_hash) is None):
             raise ValueError("canonical_archive_selected_page_invalid")

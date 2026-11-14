@@ -95,14 +95,18 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=settings.workers.collectors.db_wait_timeout_seconds,
             poll_interval_seconds=0.5):
         raise RuntimeError("canonical_retention_action_database_timeout")
+    verification = {}
+    if args.verification_pages is not None:
+        verification["verification_pages"] = args.verification_pages
+    if page is not None:
+        verification["verification_page"] = page
     result = runners["service"].run_canonical_action(
         policy=settings.market_data_lifecycle,
         storage_day=storage_day,
         expected_action=args.expected_action,
         storage_root=DEFAULT_STORAGE_ROOT,
         execute=args.execute,
-        verification_pages=args.verification_pages,
-        **({"verification_page": page} if page is not None else {}),
+        **verification,
     )
     write_receipt(Path(args.receipt), result)
     print(json.dumps(result, sort_keys=True, default=str))

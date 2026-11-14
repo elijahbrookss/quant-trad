@@ -40,3 +40,14 @@ def test_cli_rejects_out_of_scope_count_before_runtime_admission(monkeypatch, tm
         cli.main(["--storage-day", "2026-09-24", "--expected-action", action,
                   "--verification-pages", pages, "--receipt", str(tmp_path / "unused")])
     assert error.value.code == 2
+
+
+def test_cli_requires_complete_exact_page_pin_before_runtime_admission(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "get_settings", lambda: pytest.fail("unexpected runtime admission"))
+    common = ["--storage-day", "2026-09-24", "--receipt", str(tmp_path / "unused")]
+    page = ["--page-ordinal", "631", "--manifest-id", "cfa_" + "a" * 64,
+            "--manifest-hash", "b" * 64, "--generation", "1"]
+    for args in (["--expected-action", "verify_page", *page], ["--expected-action", "stage_page", *page]):
+        with pytest.raises(SystemExit) as error:
+            cli.main(common + args)
+        assert error.value.code == 2
