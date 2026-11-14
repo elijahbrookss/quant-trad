@@ -1,0 +1,15 @@
+# Reverse-projection fixture milestone
+
+`rematerialize_page()` demonstrates one exact step for returning accepted cold facts to a disposable original v2 layout. It consumes a bounded lossless Parquet page whose manifest and object checksums are pinned in a `ReversePage` plan. The destination's exact PostgreSQL system, database, and serving header identity also form part of the plan. The destination must already have original v2 startup contracts, the replicated source/series/schema/ingestion-run rows, and registered open daily header and payload children. The caller supplies the transaction and continues owning all writer and filesystem fences.
+
+For a previously placed page, pass independently verified fact IDs and their original UTC storage days. For a candidate-only page, the fixture uses each row's actual accepted UTC day as its v2 placement. That does not change its provider time, accepted time, known-at, original version ID, commit, revision, document hashes or lineage. Candidate-only placement is an explicit scenario choice. The caller must distinguish candidate-only pages from initially migrated pages using the reviewed inventory.
+
+The primitive writes immutable header and payload values with PostgreSQL's normal foreign keys, identity registration, series/day directory maintenance, payload validation, and deferred checks enabled. It checks exact persisted row and registry equality inside a savepoint. An identical retry verifies existing rows, while a conflicting immutable identity fails instead of overwriting accepted evidence. It preserves explicit accepted commit sequence numbers. The owner of a complete reverse conversion needs the source's full allocated sequence state and can advance it only after reconciling the whole fenced endpoint.
+
+The paired fixture admits a synthetic candlestick through the candidate's native historical-gap publication path, confirms that it exists only in cold storage, and loads it into a cloned v2 layout alongside a verified historical row with a different original storage-day witness. Run the focused test in the disposable database lane.
+
+```sh
+pytest -q tests/test_market_data/test_canonical_cold_reverse_projection_db.py
+```
+
+This milestone assumes an existing valid v2 destination. It does not rebuild dropped legacy or daily partitions, restore sealed history in place, rebind the four archive reference FKs, or recover arbitrary operational and intervening non-collector writes. It requires further proof of complete frozen and raw/book custody, sequence and object namespaces, live-writer exclusion, exact original application image startup, restore endpoint publication and physical time/capacity. There is no production reverse command in this milestone.
