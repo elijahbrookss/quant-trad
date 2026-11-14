@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import timedelta
+import os
 import shutil
 from types import SimpleNamespace
 from uuid import uuid4
@@ -23,10 +24,11 @@ from scripts.db.canonical_cold_database_fence import close_database_fence, reope
 from scripts.db.canonical_cold_identity_rebuild import prepare_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
+from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index_member
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
 from scripts.db.canonical_cold_restore_legacy import measure_legacy_donor, restore_legacy_headers
 from tests.test_market_data.test_canonical_cold_activate_db import (
-    _attach_legacy_child, _configure_fixture_catalog, _create_retained_parent, _fence_connections,
+    _attach_legacy_child, _configure_fixture_catalog, _create_retained_parent, _fence_connections, _stub_raw_index_case,
 )
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, _ingest, _placement, storage
 
@@ -36,8 +38,16 @@ pytestmark = pytest.mark.db
 
 @pytest.fixture
 def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
-    state = getattr(request, "param", "verified")
+    case = getattr(request, "param", "verified")
+    native_raw_index = case == "verified-native-raw-index"
+    state = "verified" if native_raw_index else case
+    tablespace_path = os.environ.get("QT_ROLLBACK_RAW_INDEX_TABLESPACE_DIRECTORY") if native_raw_index else None
+    if native_raw_index and not tablespace_path:
+        pytest.skip("set QT_ROLLBACK_RAW_INDEX_TABLESPACE_DIRECTORY to an empty fixture PostgreSQL server directory")
     engine = storage.database._engine
+    if native_raw_index and (engine.url.host not in (None, "127.0.0.1", "::1", "timescaledb")
+                             or ("host" in engine.url.query and not str(engine.url.query["host"]).startswith("/"))):
+        raise ValueError("native rollback raw index test requires a local PostgreSQL fixture")
     day = storage.today - timedelta(days=2)
     end = day + timedelta(days=1)
     _placement(monkeypatch, day)
@@ -77,13 +87,34 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
     donor_store = FilesystemRawArchiveObjectStore(donor_root, writable=False)
     candidate_store = FilesystemRawArchiveObjectStore(tmp_path / "candidate-archive" / "objects")
     token = f"{cluster}/{target_identity['database_oid']}"
+    raw_tablespace = f"qt_rollback_raw_{uuid4().hex[:12]}" if native_raw_index else None
     try:
+        raw_scope = None
+        if native_raw_index:
+            with admin.connect() as conn:
+                conn.execute(text(f"CREATE TABLESPACE {raw_tablespace} LOCATION :path"), {"path": tablespace_path})
+            with engine.begin() as conn:
+                conn.exec_driver_sql(f"ALTER TABLE market.raw_archive_record_mappings SET TABLESPACE {raw_tablespace}")
+                member = inspect_raw_mapping_index_member(conn)
+                raw_scope = {"target_id": "rollback-fixture-history", "tablespace_oid": member["table_tablespace_oid"],
+                             "table_oid": member["table_oid"], "index_oid": member["index_oid"],
+                             "max_copy_bytes": 2 * 1024**2, "timeout_seconds": 15}
         engine.dispose()
         with admin.connect() as conn:
             template = conn.dialect.identifier_preparer.quote_identifier(target_identity["database"])
             conn.exec_driver_sql(f"CREATE DATABASE {donor_name} TEMPLATE {template}")
         with engine.begin() as conn:
             _configure_fixture_catalog(conn, token, candidate_store.root)
+            if raw_scope is not None:
+                conn.execute(text("""
+                    INSERT INTO public.portal_storage_targets(id,label,filesystem_uuid,root,medium,roles)
+                    VALUES ('rollback-fixture-history','Rollback fixture history','rollback-fixture-device',
+                            :root,'hdd','["history"]')
+                """), {"root": tablespace_path})
+                conn.execute(text("""
+                    INSERT INTO public.portal_storage_header_tablespaces(database_identity,target_id,tablespace_oid,binding)
+                    VALUES (:identity,'rollback-fixture-history',:oid,'{}')
+                """), {"identity": token, "oid": raw_scope["tablespace_oid"]})
             custody_tablespace = conn.scalar(text("SELECT dattablespace::bigint FROM pg_database WHERE datname=current_database()"))
             custody_oids = {table: conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
                 {"name": f"market.{table}"}) for table in COLD_CUSTODY_TABLE_NAMES}
@@ -115,6 +146,7 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
                      "source_commit_seq": source_commit, "loaded_inventory_hash": audit["loaded_inventory_hash"],
                      "payload_children": payload_children, "custody_target_id": "activation-fixture",
                      "custody_tablespace_oid": custody_tablespace, "custody_relation_oids": custody_oids}
+        execution["raw_mapping_index"] = raw_scope if native_raw_index else _stub_raw_index_case(monkeypatch)
         outcome = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
         with _fence_connections(storage) as (conn, control):
             with conn.begin():
@@ -136,8 +168,14 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
         )
     finally:
         donor_engine.dispose()
+        if raw_tablespace is not None:
+            with engine.begin() as conn:
+                conn.exec_driver_sql("ALTER TABLE market.raw_archive_record_mappings SET TABLESPACE pg_default")
+                conn.exec_driver_sql("ALTER INDEX market.pk_market_raw_archive_record_mapping SET TABLESPACE pg_default")
         with admin.connect() as conn:
             conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {donor_name} WITH (FORCE)")
+            if raw_tablespace is not None:
+                conn.exec_driver_sql(f"DROP TABLESPACE IF EXISTS {raw_tablespace}")
         admin.dispose()
 
 

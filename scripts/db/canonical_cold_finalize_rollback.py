@@ -17,6 +17,7 @@ from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION, assert_fact_storage_contract, fact_partition_name
 from portal.backend.service.storage.recovery_copies import _snapshot_layout
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
+from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index_member, restore_raw_mapping_index
 from scripts.db.canonical_cold_restore_references import _database_identity, _require_disposable_fence, restore_original_reference_bindings
 from scripts.db.canonical_cold_reverse_allocator import capture_allocator
 from scripts.db.canonical_cold_reverse_projection import verify_candidate_only_pages
@@ -26,18 +27,47 @@ from scripts.db.fact_header_v2_capture import _bounded_step
 
 
 VERSION = "qt.canonical_cold_finalize_rollback_fixture.v1"
+_RAW_ORIGINAL_FIELDS = ("table_oid", "index_oid", "constraint_oid", "tablespace_oid", "table_tablespace_oid",
+                        "catalog_version", "definition", "constraint_definition")
 
 
 def _receipt_digest(receipt):
     return archive_evidence_hash({key: value for key, value in receipt.items() if key != "receipt_sha256"})
 
 
+def _assert_original_raw_index(observed, original):
+    if any(observed.get(key) != original.get(key) for key in _RAW_ORIGINAL_FIELDS):
+        raise RuntimeError("canonical_cold_finalize_rollback_original_raw_index_changed")
+
+
+def _restore_raw_index(conn, *, fence, identity, original, activation, max_copy_bytes, timeout_seconds):
+    forward = activation.get("raw_mapping_index")
+    if forward is None:
+        _assert_original_raw_index(inspect_raw_mapping_index_member(conn), original)
+        return None
+    if max_copy_bytes is None:
+        raise ValueError("canonical_cold_finalize_rollback_raw_index_copy_budget_required")
+    if (not isinstance(forward, dict) or not isinstance(forward.get("before"), dict)
+            or not isinstance(forward.get("target"), dict) or not isinstance(forward.get("receipt_hash"), str)):
+        raise ValueError("canonical_cold_finalize_rollback_raw_index_receipt_invalid")
+    _assert_original_raw_index(forward["before"], original)
+    return restore_raw_mapping_index(
+        conn, fence=fence, expected_database=f"{identity['system_identifier']}/{identity['database_oid']}",
+        target_id=forward["target"].get("target_id"), expected_tablespace_oid=original["table_tablespace_oid"],
+        expected_table_oid=original["table_oid"], expected_index_oid=original["index_oid"],
+        max_copy_bytes=max_copy_bytes, timeout_seconds=timeout_seconds, forward_receipt=forward,
+        expected_forward_hash=forward["receipt_hash"],
+    )
+
+
 def finalize_rollback_layout(conn, donor, *, fence, allocator, original, original_hash, legacy, payloads,
-                             direct_cold, witness, witness_hash, store, dated=(), recurring=(), timeout_seconds=120):
+                             direct_cold, witness, witness_hash, store, dated=(), recurring=(),
+                             raw_index_max_copy_bytes=None, timeout_seconds=120):
     """Restore the original read authority after exact data and retention reconstruction.
 
     The clone writer and archive fences stay held through certificate
-    publication and read acceptance. The caller owns restart and all
+    publication and read acceptance. An activated raw index move requires a
+    fresh byte limit for the live index copy. The caller owns restart and all
     host-level decisions.
     """
     _require_disposable_fence(conn, fence)
@@ -48,6 +78,7 @@ def finalize_rollback_layout(conn, donor, *, fence, allocator, original, origina
     assert_fact_storage_contract(donor)
     donor_legacy_end = assert_fact_header_legacy_contract(donor)
     original_certificate = _snapshot_layout(donor)
+    original_raw_index = inspect_raw_mapping_index_member(donor)
     if original_certificate["layout_version"] != FACT_STORAGE_LAYOUT_VERSION or archive_evidence_hash(witness) != witness_hash:
         raise RuntimeError("canonical_cold_finalize_rollback_original_evidence_changed")
 
@@ -143,6 +174,9 @@ def finalize_rollback_layout(conn, donor, *, fence, allocator, original, origina
             raise RuntimeError("canonical_cold_finalize_rollback_candidate_allocator_changed")
         verify_candidate_only_pages(conn, reader=ColdHistoryReader(store), receipt=direct_cold,
                                     initial=cold.evidence["source_commit_seq"], check=lambda: (fence.check_clock(), check_archive()))
+        raw_index = _restore_raw_index(conn, fence=fence, identity=identity, original=original_raw_index,
+                                       activation=cold.evidence, max_copy_bytes=raw_index_max_copy_bytes,
+                                       timeout_seconds=timeout_seconds)
         references = restore_original_reference_bindings(conn, fence=fence, original=original, donor=donor,
                                                          expected_hash=original_hash, timeout_seconds=timeout_seconds)
         evidence = {
@@ -154,6 +188,8 @@ def finalize_rollback_layout(conn, donor, *, fence, allocator, original, origina
                 if legacy is not None else None,
             "source_commit": allocator.visible_commit, "next_commit": allocator.next_value, "witness_hash": witness_hash,
         }
+        if raw_index is not None:
+            evidence["restored_raw_mapping_index"] = raw_index
         written = conn.execute(text("""
             UPDATE market.fact_storage_state SET layout_version=:layout,completed_at=clock_timestamp(),
                 evidence=CAST(:evidence AS jsonb) WHERE layout_version=:prior
@@ -162,6 +198,10 @@ def finalize_rollback_layout(conn, donor, *, fence, allocator, original, origina
         if written != 1:
             raise RuntimeError("canonical_cold_finalize_rollback_layout_changed")
         assert_fact_storage_contract(conn)
+        final_raw_index = inspect_raw_mapping_index_member(conn)
+        _assert_original_raw_index(final_raw_index, original_raw_index)
+        if raw_index is not None and final_raw_index != raw_index["after"]:
+            raise RuntimeError("canonical_cold_finalize_rollback_raw_index_restore_changed")
         if (check_witnesses(conn, witness, store=store, timeout_seconds=timeout_seconds) != witness_hash
                 or PostgresMarketDataRepository._current_commit_seq_with_session(conn) != allocator.visible_commit):
             raise RuntimeError("canonical_cold_finalize_rollback_content_changed")

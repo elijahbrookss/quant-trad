@@ -19,8 +19,10 @@ from portal.backend.service.storage.repos.cold_retirement import prune_oldest_re
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
 from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+from scripts.db import canonical_cold_finalize_rollback as rollback_finalizer
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_finalize_rollback import finalize_rollback_layout
+from scripts.db.canonical_cold_raw_index import RECENT_TABLESPACE_OID, inspect_raw_mapping_index_member
 from scripts.db.canonical_cold_restore_initial_dated import restore_initial_dated_day
 from scripts.db.canonical_cold_restore_legacy import restore_legacy_headers
 from scripts.db.canonical_cold_restore_legacy_payload import capture_original_payload_day, restore_legacy_payload_day
@@ -110,7 +112,15 @@ def _later_retirement(scope, root, monkeypatch):
 
 @pytest.mark.parametrize("rollback_clone", ["legacy_rollback_clone", "initially_dated_rollback_clone"])
 def test_reverse_layout_keeps_post_cutover_cold_candle_and_native_trade(rollback_clone, request, monkeypatch):
-    scope = request.getfixturevalue(rollback_clone)
+    _exercise_reverse_layout(request.getfixturevalue(rollback_clone), monkeypatch)
+
+
+@pytest.mark.parametrize("legacy_rollback_clone", ["verified-native-raw-index"], indirect=True)
+def test_reverse_layout_inverts_native_raw_index_after_new_writes(legacy_rollback_clone, monkeypatch):
+    _exercise_reverse_layout(legacy_rollback_clone, monkeypatch, raw_index_move=legacy_rollback_clone.certificate["raw_mapping_index"])
+
+
+def _exercise_reverse_layout(scope, monkeypatch, *, raw_index_move=None):
     legacy_days = getattr(scope, "legacy_days", ())
     store = scope.candidate_store
     root = store.root.parent
@@ -190,7 +200,35 @@ def test_reverse_layout_keeps_post_cutover_cold_candle_and_native_trade(rollback
             with pytest.raises(RuntimeError, match="candidate page budget exceeded"):
                 finalize_rollback_layout(conn, donor, **{**args, "direct_cold": omitted})
             assert conn.scalar(text("SELECT layout_version FROM market.fact_storage_state")) == COLD_HISTORY_LAYOUT_VERSION
+            if raw_index_move is not None:
+                raw_before = inspect_raw_mapping_index_member(conn)
+                assert raw_before["tablespace_oid"] == raw_index_move["after"]["tablespace_oid"]
+                with pytest.raises(ValueError, match="raw_index_copy_budget_required"):
+                    finalize_rollback_layout(conn, donor, **args)
+                with pytest.raises(RuntimeError, match="raw_index_copy_budget_exceeded"):
+                    finalize_rollback_layout(conn, donor, **args, raw_index_max_copy_bytes=0)
+                with pytest.raises(RuntimeError, match="original_raw_index_changed"), conn.begin_nested():
+                    conn.exec_driver_sql("UPDATE market.fact_storage_state SET evidence=evidence - 'raw_mapping_index'")
+                    finalize_rollback_layout(conn, donor, **args)
+                args["raw_index_max_copy_bytes"] = 2 * 1024**2
+                with monkeypatch.context() as patch:
+                    def fail_reader(*args, **kwargs):
+                        assert inspect_raw_mapping_index_member(conn)["tablespace_oid"] == RECENT_TABLESPACE_OID
+                        raise RuntimeError("injected restored reader failure")
+
+                    patch.setattr(rollback_finalizer, "check_witnesses", fail_reader)
+                    with pytest.raises(RuntimeError, match="injected restored reader failure"):
+                        finalize_rollback_layout(conn, donor, **args)
+                assert inspect_raw_mapping_index_member(conn) == raw_before
+                assert conn.scalar(text("SELECT layout_version FROM market.fact_storage_state")) == COLD_HISTORY_LAYOUT_VERSION
             result = finalize_rollback_layout(conn, donor, **args)
+            if raw_index_move is not None:
+                inverse = result["restored_raw_mapping_index"]
+                assert inverse["forward_receipt_hash"] == raw_index_move["receipt_hash"]
+                assert inverse["before"] == raw_before
+                assert inverse["after"] == inspect_raw_mapping_index_member(conn)
+                assert inverse["after"]["tablespace_oid"] == RECENT_TABLESPACE_OID
+                assert inverse["after"]["index_oid"] == raw_index_move["before"]["index_oid"]
             if legacy_days:
                 assert result["legacy_relation_mapping"]["original_oid"] != result["legacy_relation_mapping"]["restored_oid"]
             else:
@@ -205,6 +243,8 @@ def test_reverse_layout_keeps_post_cutover_cold_candle_and_native_trade(rollback
             persisted = check.scalar(text("SELECT evidence FROM market.fact_storage_state"))
             assert archive_evidence_hash(persisted) == result["receipt_sha256"]
             assert check.exec_driver_sql("SELECT last_value,is_called FROM market.fact_commit_seq").one() == (gap, True)
+            if raw_index_move is not None:
+                assert inspect_raw_mapping_index_member(check) == persisted["restored_raw_mapping_index"]["after"]
             return "original"
 
         reopen_database_fence(fence, control, expected_outcome="original", read_outcome=original_outcome, record=lambda *_: None)
