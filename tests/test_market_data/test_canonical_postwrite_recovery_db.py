@@ -2,6 +2,7 @@
 
 from datetime import timedelta
 import hashlib
+import json
 import os
 from pathlib import Path
 import secrets
@@ -15,6 +16,7 @@ from sqlalchemy.pool import NullPool
 
 from core.storage_targets import StorageTarget
 from market_data.archive import FilesystemRawArchiveObjectStore, read_raw_archive_parquet
+from market_data.archive_namespace import archive_namespace
 from market_data.contracts import DatasetSeriesRequest
 from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION
@@ -28,6 +30,9 @@ from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalF
 from scripts.automation.verify_canonical_recovery_archive import verify_archive
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
+from scripts.db.canonical_cold_recovery_suffix import (
+    capture_final_archive_suffix, prepare_archive_baseline, verify_final_archive_suffix,
+)
 from tests.test_market_data import test_canonical_cold_activate_db as activation_fixture
 from tests.test_market_data.test_canonical_recovery_spool_db import (
     _admitted_rows, _define_trade_stream, _native_recover, _seal_trade,
@@ -147,22 +152,38 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     structures, claim, series = _define_trade_stream(storage, monkeypatch)
     monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
     worker = _prepare_native_repository(engine, identity, tmp_path, monkeypatch)
+    _, baseline_raw = _seal_trade(tmp_path, claim, trade_id="original-before-baseline")
+    _native_recover(structures, tmp_path)
     with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
         baseline = worker.create(snapshot, objects=objects, keep_copies=2)
     assert baseline["storage_layout"]["layout_version"] == FACT_STORAGE_LAYOUT_VERSION
-    assert baseline["archive_objects"] == 0 and _admitted_rows(storage.database, series) == ([], [])
+    assert baseline["archive_objects"] == 1
+    _, baseline_refs = _admitted_rows(storage.database, series)
+    assert baseline_refs[0].raw_record_id == baseline_raw.raw_record_id
+    original_receipt = worker.root / baseline["name"] / "complete.json"
+    receipt_hash = hashlib.sha256(original_receipt.read_bytes()).hexdigest()
+    prestaged = tmp_path / "baseline-restic"
+    worker._run(worker._rs("restore", baseline["archive_snapshot"], "--target", str(prestaged)))
+    baseline_inventory = prepare_archive_baseline(
+        original_receipt, prestaged, expected_receipt_sha256=receipt_hash, max_objects=100,
+    )
+    suffix_repo = tmp_path / "suffix-restic"
+
+    def restic_suffix(*args):
+        return worker._run([str(worker.restic), "--repo", str(suffix_repo), "--no-cache", "--json", *args])
+
+    restic_suffix("init")
 
     # Provider intake and its archive are newer than the prestaged baseline.
-    _, record = _seal_trade(tmp_path, claim, trade_id="original-at-anchor")
-    _native_recover(structures, tmp_path)
+    record = _later_trade(structures, tmp_path, claim, baseline_raw, trade_id="original-at-anchor")
     expected = _admitted_rows(storage.database, series)
-    assert len(expected[0]) == len(expected[1]) == 1
-    raw_id, _, key, digest = expected[1][0]
-    assert raw_id == record.raw_record_id
-    start, end = record.received_at - timedelta(seconds=10), record.received_at + timedelta(seconds=10)
+    assert len(expected[0]) == len(expected[1]) == 2
+    raw_id, _, key, _ = next(row for row in expected[1] if row.raw_record_id == record.raw_record_id)
+    assert raw_id != baseline_raw.raw_record_id
+    start, end = baseline_raw.received_at - timedelta(seconds=10), record.received_at + timedelta(seconds=10)
     frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(series, start, end)])
     original_reader = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series)
-    assert len(original_reader) == 1
+    assert len(original_reader) == 2
     target = {"system_identifier": system_identifier, "database_oid": int(database_oid),
               "database": engine.url.database}
 
@@ -181,20 +202,33 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
                 assert retained.scalar(text("SELECT market.fact_header_legacy_end_day()")) == legacy_end
                 with pytest.raises(RuntimeError, match="original_authority_changed"):
                     create_original_recovery_anchor(
-                        fence, control, expected_source_commit_seq=expected[0][0].market_commit_seq + 1,
+                        fence, control, expected_source_commit_seq=expected[0][-1].market_commit_seq + 1,
                     )
                 anchor = create_original_recovery_anchor(
-                    fence, control, expected_source_commit_seq=expected[0][0].market_commit_seq,
+                    fence, control, expected_source_commit_seq=expected[0][-1].market_commit_seq,
                 )
                 assert anchor["database"]["allow_connections"] is False
                 assert anchor["storage_layout"] == baseline["storage_layout"]
-                # This fixture admits one exact post-baseline raw object. It
-                # has no full production archive-inventory/delta implication.
-                escrow = tmp_path / "archive-suffix"
-                copied_object = escrow / key
-                copied_object.parent.mkdir(parents=True)
-                shutil.copy2(objects.local_path(key), copied_object)
-                assert hashlib.sha256(copied_object.read_bytes()).hexdigest() == digest
+                stage = tmp_path / "archive-suffix"
+                stage.mkdir(mode=0o700)
+                with archive_namespace(objects.root, exclusive=True) as check_archive:
+                    with pytest.raises(RuntimeError, match="suffix_budget_exceeded"):
+                        capture_final_archive_suffix(
+                            fence, anchor, baseline_inventory, source_root=objects.root, stage=stage,
+                            max_objects=100, max_suffix_bytes=0, check_archive=check_archive,
+                        )
+                    evidence = capture_final_archive_suffix(
+                        fence, anchor, baseline_inventory, source_root=objects.root, stage=stage,
+                        max_objects=100, max_suffix_bytes=16*1024**2, check_archive=check_archive,
+                    )
+                assert evidence["archive_objects"] == 1
+                summaries = [entry for line in restic_suffix(
+                    "--quiet", "backup", "--files-from-raw", str(stage / "files.list"),
+                ).splitlines() if (entry := json.loads(line))["message_type"] == "summary"]
+                assert len(summaries) == 1
+                suffix_snapshot = summaries[0]["snapshot_id"]
+                evidence["archive_snapshot"] = suffix_snapshot
+                stage.rename(tmp_path / "unavailable-suffix")
                 fence.assert_quiet(retained)
         finally:
             reopen_database_fence(fence, control, expected_outcome="original",
@@ -205,7 +239,7 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
                           "login_opening", "jobs_restarting", "database_reopened"]
 
     _later_trade(structures, tmp_path, claim, record)
-    assert len(_admitted_rows(storage.database, series)[0]) == 2
+    assert len(_admitted_rows(storage.database, series)[0]) == 3
     wal_name = anchor["wal_segment"]
     deadline = monotonic() + 25
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
@@ -225,9 +259,16 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
                  "--lock-path=" + str(copied.parent),
                  "--log-level-file=off", "archive-get", wal_name, str(anchor_file)])
     assert anchor_file.stat().st_size == 16 * 1024**2
-    assert verify_archive(receipt, _restore_archive_snapshot(worker, copied, baseline, tmp_path))[
-        "verified_archive_objects"
-    ] == 0
+    baseline_restore = _restore_archive_snapshot(worker, copied, baseline, tmp_path)
+    restored_baseline = prepare_archive_baseline(
+        receipt, baseline_restore, expected_receipt_sha256=receipt_hash, max_objects=100,
+    )
+    suffix_restore = tmp_path / "suffix-restored"
+    restored_suffix_repo = tmp_path / "suffix-repository-independent"
+    shutil.copytree(suffix_repo, restored_suffix_repo)
+    suffix_repo.rename(tmp_path / "suffix-repository-unavailable")
+    suffix_repo = restored_suffix_repo
+    restic_suffix("restore", suffix_snapshot, "--target", str(suffix_restore))
     _restore_database(worker, copied, baseline, "--type=name", "--target=" + anchor["restore_name"],
                       "--target-timeline=" + str(anchor["timeline"]))
     objects.root.rename(tmp_path / "original-objects")
@@ -259,9 +300,31 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
         with restored.session() as session:
             assert _snapshot_layout(session) == baseline["storage_layout"]
             assert session.scalar(text("SELECT market.fact_header_legacy_end_day()")) == legacy_end
+            options = dict(max_objects=100, suffix_snapshot_id=suffix_snapshot)
+            with pytest.raises(RuntimeError, match="suffix_binding_mismatch"):
+                verify_final_archive_suffix(
+                    session, anchor, restored_baseline, evidence, suffix_restore,
+                    max_objects=100, suffix_snapshot_id="a" * 64,
+                )
+            archive = suffix_restore / evidence["archive_source_root"].lstrip("/")
+            relocated = archive / key
+            payload = relocated.read_bytes()
+            relocated.unlink()
+            with pytest.raises(FileNotFoundError):
+                verify_final_archive_suffix(session, anchor, restored_baseline, evidence, suffix_restore, **options)
+            relocated.write_bytes(b"x" * len(payload))
+            with pytest.raises(ValueError, match="archive object failed size or hash"):
+                verify_final_archive_suffix(session, anchor, restored_baseline, evidence, suffix_restore, **options)
+            relocated.write_bytes(payload)
+            coverage = verify_final_archive_suffix(session, anchor, restored_baseline, evidence, suffix_restore, **options)
+            assert coverage["final_objects"] == 2
+            assert coverage["baseline_objects_used"] == coverage["verified_suffix_objects"] == 1
         assert _admitted_rows(restored, series) == expected
         monkeypatch.setattr(market_data, "db", restored)
-        restored_store = FilesystemRawArchiveObjectStore(escrow, writable=False)
+        merged = tmp_path / "restored-merged-objects"
+        shutil.copytree(baseline_restore / str(objects.root).lstrip("/"), merged)
+        shutil.copytree(suffix_restore / evidence["archive_source_root"].lstrip("/"), merged, dirs_exist_ok=True)
+        restored_store = FilesystemRawArchiveObjectStore(merged, writable=False)
         monkeypatch.setattr(market_data, "canonical_fact_storage_repository", PostgresCanonicalFactStorageRepository(
             object_store_factory=lambda: restored_store, read_cache_factory=lambda: None,
         ))
@@ -308,14 +371,15 @@ def _prepare_native_repository(engine, identity, tmp_path, monkeypatch):
     return EncryptedRecoveryCopies(incremental=config, connection_url=engine.url, **limits)
 
 
-def _later_trade(structures, root, claim, record):
+def _later_trade(structures, root, claim, record, *, trade_id="after-physical-endpoint"):
     late = structures.claim_stream(definition_id=claim.definition_id, owner_id="post-point-fixture",
                                    lease_seconds=60, bounded=True)
     structures.append_session_event(late, event_ordinal=0, connection_epoch=0, event_type="session_started",
                                     occurred_at=record.received_at)
     structures.release(late)
-    _seal_trade(root, late, trade_id="after-physical-endpoint")
+    _, accepted = _seal_trade(root, late, trade_id=trade_id)
     _native_recover(structures, root)
+    return accepted
 
 
 def _copy_repository(worker, selected):

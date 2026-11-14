@@ -31,7 +31,7 @@ def _path(root: Path, value: object, *, absolute: bool) -> Path:
     return candidate
 
 
-def _sha_file(path: Path, *, required_prefix: bytes = b"") -> tuple[str, int]:
+def _sha_file(path: Path, *, required_prefix: bytes = b"", check=lambda: None) -> tuple[str, int]:
     digest = hashlib.sha256()
     before_open = path.lstat()
     if not stat.S_ISREG(before_open.st_mode):
@@ -46,6 +46,7 @@ def _sha_file(path: Path, *, required_prefix: bytes = b"") -> tuple[str, int]:
                 raise ValueError("logical-copy database file is not a PostgreSQL custom-format dump")
             digest.update(prefix)
         while chunk := stream.read(1024 * 1024):
+            check()
             digest.update(chunk)
         after = os.fstat(stream.fileno())
     if len({(s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
@@ -56,6 +57,16 @@ def _sha_file(path: Path, *, required_prefix: bytes = b"") -> tuple[str, int]:
 
 def verify_archive(receipt_path: Path, restore_target: Path) -> dict:
     """Bind the restored inventory and all listed files to the completion receipt."""
+    receipt = _encrypted_receipt(receipt_path)
+    root = _restore_root(restore_target)
+    return {
+        "database_label": receipt["database_label"],
+        "archive_snapshot": receipt["archive_snapshot"],
+        **_verify_encrypted_inventory(receipt, root),
+    }
+
+
+def _encrypted_receipt(receipt_path: Path) -> dict:
     with receipt_path.open("rb") as stream:
         encoded_receipt = stream.read(65537)
     if len(encoded_receipt) > 65536:
@@ -67,18 +78,24 @@ def verify_archive(receipt_path: Path, restore_target: Path) -> dict:
         raise ValueError("paired database restore identity is missing")
     if not _sha256(receipt.get("archive_snapshot")) or not _sha256(receipt.get("inventory_sha256")):
         raise ValueError("paired archive identity or inventory hash is invalid")
+    return receipt
+
+
+def _restore_root(restore_target: Path) -> Path:
     root = restore_target.resolve(strict=True)
     if root.parent == root:
         raise ValueError("an isolated restore directory is required")
+    return root
+
+
+def _verify_encrypted_inventory(receipt, root, *, record=None, check=lambda: None):
     inventory = _path(root, receipt["inventory_snapshot_path"], absolute=True)
-    return {
-        "database_label": receipt["database_label"],
-        "archive_snapshot": receipt["archive_snapshot"],
-        **_verify_inventory(root, receipt, inventory, receipt.get("archive_source_root"), absolute=True),
-    }
+    return _verify_inventory(root, receipt, inventory, receipt.get("archive_source_root"), absolute=True,
+                             record=record, check=check)
 
 
-def _verify_inventory(root: Path, receipt: dict, inventory: Path, archive_path: object, *, absolute: bool) -> dict:
+def _verify_inventory(root: Path, receipt: dict, inventory: Path, archive_path: object, *, absolute: bool,
+                      record=None, check=lambda: None) -> dict:
     expected_count, expected_bytes = receipt.get("archive_objects"), receipt.get("archive_bytes")
     if type(expected_count) is not int or type(expected_bytes) is not int or min(expected_count, expected_bytes) < 0:
         raise ValueError("paired archive count or byte total is invalid")
@@ -94,6 +111,7 @@ def _verify_inventory(root: Path, receipt: dict, inventory: Path, archive_path: 
     total = 0
     with inventory.open("rb") as stream:
         while line := stream.readline(65537):
+            check()
             if len(line) > 65536 or len(seen) >= expected_count or not line.endswith(b"\n"):
                 raise ValueError("unexpected inventory row count or line length")
             digest.update(line)
@@ -104,10 +122,12 @@ def _verify_inventory(root: Path, receipt: dict, inventory: Path, archive_path: 
             if key in seen:
                 raise ValueError(f"duplicate restored archive object: {key}")
             object_path = _path(archive, key, absolute=False)
-            actual_digest, actual_size = _sha_file(object_path)
+            actual_digest, actual_size = _sha_file(object_path, check=check)
             if actual_size != size or actual_digest != sha256:
                 raise ValueError(f"restored archive object failed size or hash check: {key}")
             seen.add(key)
+            if record is not None:
+                record(key, sha256, size)
             total += size
     if len(seen) != expected_count or total != expected_bytes or digest.hexdigest() != receipt["inventory_sha256"]:
         raise ValueError("archive inventory digest, object count, or byte total does not match the pair")

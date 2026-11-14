@@ -1392,11 +1392,28 @@ control connection reopens it. The old layout and legacy partition, canonical
 ID and clocks, frozen read, and the exact raw record match. The selected
 endpoint excludes an additional trade written and archived after the anchor.
 
-The baseline pair in this fixture has an empty archive inventory. It verifies
-one post-baseline raw archive file by digest and reads it with the recovered
-catalog. A production anchor still needs complete and independently durable
-archive reachability at its database watermark, including all intervening
-archives, preserved frozen dependencies, and any pending spool required by
-the provider boundary. This also requires measured end-to-end transfer and
-restore on the intended storage. Publishing a PostgreSQL restore point alone
-does not establish the paired recovery endpoint.
+The baseline contains one raw object. The encrypted suffix contains the
+newly needed object and a hash-bound file inventory. The fixture restores
+copies of both repositories and verifies that each object named by the
+catalog at the restored WAL point is reachable with its original size and
+digest. It rejects a different suffix snapshot, a missing or corrupt object,
+and a suffix larger than the configured budget. It reads both raw objects
+through the recovered catalog.
+
+Use the [archive suffix primitives](../../scripts/db/canonical_cold_recovery_suffix.py)
+to verify the copied baseline's paired receipt and Restic bytes before the
+writer fence. Under the live fence, enumerate the final archive descriptors
+and copy only the difference into a private stage. Encrypt the returned
+NUL-delimited file list into a separately managed Restic repository. Routine
+QT recovery pruning owns its original repository, including snapshot tags.
+Pin the exact suffix snapshot ID with the archive evidence. After restoring
+the named WAL endpoint and decrypting both archive snapshots into isolated
+directories, verify the final catalog against their combined inventory.
+Retained baseline objects no longer referenced by the final catalog are
+permitted. A reused object key must keep its exact bytes, and the suffix must
+contain exactly the objects needed beyond the baseline.
+
+This rehearsal measures a fixture and assumes quiescent isolated restore
+directories. Production still needs measured traversal and transfer of the
+full catalog, a complete off-host WAL chain, and provider spool coverage at
+the same boundary. It also needs a second, tested capacity domain for restore.
