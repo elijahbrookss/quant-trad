@@ -1,0 +1,44 @@
+# Overlay for the incremental-recovery fixture. The restore writer has no
+# source mounts and no network, even though PostgreSQL sees the same path.
+services:
+  restore-writer:
+    image: qt-incremental-test-postgres:${SOURCE_REVISION:?required}
+    user: "70:70"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mkdir /qt-history/raw-index
+        printf '%s\n' restore > /qt-history/restore-volume
+        while [ ! -f /qt-restore/restore-request ]; do sleep 1; done
+        test ! -e /qt-history/source-volume
+        test -z "$$(ls -A /qt-history/raw-index)"
+        label="$$(cat /qt-restore/restore-request)"
+        if pgbackrest --config=/qt-restore/recovered-access/pgbackrest.conf --stanza=qt \
+             --set="$$label" --tablespace-map-all=/qt-history/raw-index \
+             --type=immediate --target-action=promote --archive-mode=off \
+             '--recovery-option=restore_command=/usr/local/bin/pgbackrest --config=/qt-restore/recovered-access/pgbackrest.conf --stanza=qt archive-get %f "%p"' \
+             restore; then
+          touch /qt-restore/restore-complete
+        else
+          touch /qt-restore/restore-failed
+          exit 1
+        fi
+    volumes:
+      - incremental-restore:/qt-restore
+      - incremental-restore-history:/qt-history
+  restored:
+    volumes:
+      - incremental-restore-history:/qt-history
+  test:
+    environment:
+      QT_SAME_PATH_RECOVERY_TEST: "1"
+    depends_on:
+      restore-writer:
+        condition: service_started
+    volumes:
+      - incremental-restore-history:/qt-restored-history:ro
+volumes:
+  incremental-restore-history:
+    driver: local
+    driver_opts: {type: tmpfs, device: tmpfs, o: "size=134217728,uid=70,gid=70,mode=0700"}

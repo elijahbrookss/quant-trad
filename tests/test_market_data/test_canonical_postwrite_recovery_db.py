@@ -29,6 +29,8 @@ from portal.backend.service.storage.repos import market_data, market_lifecycle, 
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.automation.verify_canonical_recovery_archive import verify_archive
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
+from scripts.db.canonical_cold_identity_rebuild import PREVIOUS
+from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
 from scripts.db.canonical_cold_recovery_suffix import (
     capture_final_archive_suffix, prepare_archive_baseline, verify_final_archive_suffix,
@@ -49,11 +51,15 @@ pytestmark = [
 
 
 def test_postwrite_pair_restores_exact_canonical_row_and_raw_archive(storage, tmp_path, monkeypatch):
+    _exercise_postwrite_pair(storage, tmp_path, monkeypatch)
+
+
+def _exercise_postwrite_pair(storage, tmp_path, monkeypatch, *, raw_scope=None, restore_database=None):
     assert os.getuid() == 70 and os.getenv("QT_STORAGE_DEMO") == "1"
     engine = storage.database._engine
     assert engine.url.host == "timescaledb" and engine.url.database.startswith("qt_migration_")
-    activation_fixture.test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_reads(
-        storage, tmp_path, monkeypatch, owner_path=False,
+    activation_fixture._exercise_exact_activation(
+        storage, tmp_path, monkeypatch, owner_path=raw_scope is not None, native_raw_index=raw_scope,
     )
     monkeypatch.setattr(market_data, "db", storage.database)
     root = tmp_path
@@ -82,6 +88,11 @@ def test_postwrite_pair_restores_exact_canonical_row_and_raw_archive(storage, tm
         older_datasets = conn.execute(text("""
             SELECT dataset_id,series_id FROM market.dataset_series WHERE series_id<>:series
         """), {"series": series}).all()
+        raw_index = (inspect_raw_mapping_index(conn, expected_database=identity, target_id=raw_scope["target_id"])
+                     if raw_scope is not None else None)
+        if raw_index is not None:
+            assert raw_index["member"]["tablespace_oid"] == raw_scope["tablespace_oid"]
+            assert conn.scalar(text("SELECT to_regclass(:previous) IS NULL"), {"previous": PREVIOUS})
     assert older_datasets
     older_frozen = {
         (dataset, older_series): storage.repo.read_dataset_fact_revisions(dataset_id=dataset, series_id=older_series)
@@ -102,7 +113,7 @@ def test_postwrite_pair_restores_exact_canonical_row_and_raw_archive(storage, tm
     restore_root, copied, receipt = _copy_repository(worker, selected)
     # Hold the original plaintext archive objects out of the runtime reader's path.
     objects.root.rename(root / "original-objects")
-    _restore_database(worker, copied, selected, "--type=immediate")
+    (_restore_database if restore_database is None else restore_database)(worker, copied, selected, "--type=immediate")
     restored_store = _restore_archives(worker, copied, selected, receipt, objects, tmp_path)
     for key in archive_keys:
         assert restored_store.local_path(key).is_file()
@@ -129,6 +140,10 @@ def test_postwrite_pair_restores_exact_canonical_row_and_raw_archive(storage, tm
         with restored.session() as session:
             assert _snapshot_layout(session) == selected["storage_layout"]
             assert session.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NULL"))
+            if raw_index is not None:
+                assert inspect_raw_mapping_index(session, expected_database=identity,
+                                                 target_id=raw_scope["target_id"]) == raw_index
+                assert session.scalar(text("SELECT to_regclass(:previous) IS NULL"), {"previous": PREVIOUS})
         raw_id, _, key, digest = expected[1][0]
         path = restored_store.local_path(key)
         assert raw_id == record.raw_record_id
@@ -396,7 +411,7 @@ def _copy_repository(worker, selected):
     return restore_root, copied, receipt
 
 
-def _restore_database(worker, copied, selected, *recovery_target):
+def _restored_access(worker, copied):
     # The postmaster runs in a separate container without the client's
     # pgBackRest environment. Supply the restored repository's key separately.
     access = copied.parent / "recovered-access"
@@ -409,6 +424,11 @@ def _restore_database(worker, copied, selected, *recovery_target):
         f"repo1-cipher-pass={key}\nlock-path={access}\nlog-level-file=off\n"
         "[qt]\npg1-path=/qt-restore/pgdata\n"
     )
+    return settings
+
+
+def _restore_database(worker, copied, selected, *recovery_target):
+    settings = _restored_access(worker, copied)
     worker._run(worker._br("--repo1-path=" + str(copied / "database"), "--pg1-path=/qt-restore/pgdata",
                 "--tablespace-map-all=/qt-restore/history", "--set=" + selected["database_label"],
                 f'--recovery-option=restore_command=/usr/local/bin/pgbackrest --config={settings} --stanza=qt archive-get %f "%p"',
