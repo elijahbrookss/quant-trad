@@ -1417,3 +1417,13 @@ This rehearsal measures a fixture and assumes quiescent isolated restore
 directories. Production still needs measured traversal and transfer of the
 full catalog, a complete off-host WAL chain, and provider spool coverage at
 the same boundary. It also needs a second, tested capacity domain for restore.
+
+The named restore also passed startup and frozen-read parity using the
+exact `afafda39` Python source from a Git archive mounted read-only. The
+source check compares the extracted runtime tree with the Git revision and
+then runs the old application's database startup and ordinary frozen reader
+in that tree. The reconstructed original layout kept the additive cold page
+tables. The old application accepted those tables alongside its unchanged
+v2 certificate, views, references and legacy partition. This covered the old
+Python source and matching dependency lock. A full deployment rehearsal
+still needs to qualify the exact old image and service startup.
