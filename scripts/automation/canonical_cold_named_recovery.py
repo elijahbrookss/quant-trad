@@ -32,7 +32,7 @@ from scripts.automation.canonical_cold_receiver_ready import (
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, _identity, _private_root
 from scripts.automation.storage_host_boundary import load_receipt
 from scripts.automation.verify_canonical_recovery_archive import _sha256
-from scripts.automation.verify_encrypted_recovery_handoff import _bound_json, _selected_backup, verify_handoff
+from scripts.automation.verify_encrypted_recovery_handoff import _bound_json, _selected_backup_manifest, verify_handoff
 from scripts.db.canonical_cold_database_fence import DatabaseFence
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
 from scripts.db.canonical_cold_recovery_archive_transport import (
@@ -455,9 +455,9 @@ def _native_restore(*, root, workspace, pgdata, tablespaces, pgbackrest, databas
         version = _run_native([str(binary), "version"], cwd=workspace, env=env, deadline=restore_deadline, check=check_restore)
         if version.strip() != b"pgBackRest 2.59.1":
             raise RuntimeError("canonical_named_recovery_pgbackrest_unqualified")
-        selection = [str(binary), f"--config={settings}", "--stanza=qt", f"--set={pair['database_label']}"]
-        meta = _run_native([*selection, "--output=json", "info"], cwd=workspace, env=env, deadline=restore_deadline, check=check_restore)
-        selected, _, _ = _selected_backup(meta, pair)
+        native = partial(_run_native, cwd=workspace, env=env, deadline=restore_deadline, check=check_restore)
+        command_prefix = [str(binary), f"--config={settings}", "--stanza=qt"]
+        selected, _, _ = _selected_backup_manifest(native, command_prefix, pair)
         stored_spaces = selected.get("tablespace") or []
         if (selected.get("link") or len(stored_spaces) != len(tablespaces)
                 or {space["name"] for space in stored_spaces} != set(tablespaces)
@@ -467,7 +467,7 @@ def _native_restore(*, root, workspace, pgdata, tablespaces, pgbackrest, databas
         if (type(physical_bytes) is not int or not 0 < physical_bytes <= budget.bytes
                 or sum(max(0, free - budget.reserve_bytes) for free in starting.values()) < physical_bytes):
             raise RuntimeError("canonical_named_recovery_database_restore_budget_exceeded")
-        command = [*selection, "--type=name",
+        command = [*command_prefix, f"--set={pair['database_label']}", "--type=name",
                    f"--target={unarmed}", f"--target-timeline={int(selected['archive']['stop'][:8], 16)}", "--target-action=shutdown",
                    "--archive-mode=off", f'--recovery-option=restore_command={binary} --config={settings} --stanza=qt archive-get %f "%p"']
         command.extend(f"--tablespace-map={name}={path}" for name, path in sorted(tablespaces.items()))

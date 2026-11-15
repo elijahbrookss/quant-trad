@@ -28,7 +28,7 @@ from scripts.automation.canonical_cold_named_recovery import _TABLESPACE_NAME
 from scripts.automation.canonical_cold_recovery_preflight import ReceiverPath, _manifest_requirements, _observe
 from scripts.automation.stage_encrypted_recovery_handoff import _identity, _source_generation
 from scripts.automation.verify_canonical_recovery_archive import _sha256
-from scripts.automation.verify_encrypted_recovery_handoff import _directory, _selected_backup, _snapshot_owner
+from scripts.automation.verify_encrypted_recovery_handoff import _directory, _selected_backup_manifest, _snapshot_owner
 
 def _require_isolated_mounts(repository, scratch, device_id):
     # Compare backing roots as well as container paths. A writable bind can
@@ -142,8 +142,7 @@ def _measure(args):
         br = [str(pgbackrest), "--no-config", "--stanza=qt", "--repo1-cipher-type=aes-256-cbc",
               f"--repo1-path={database_repo}", f"--lock-path={work}", "--log-level-file=off", "--log-level-console=off"]
         rs = [str(restic), "--repo", str(archive_repo), "--no-lock", "--no-cache", "--json", "--quiet"]
-        info = [*br, f"--set={pair['database_label']}", "--output=json", "info"]
-        selected, database_id, chain = _selected_backup(run(info), pair)
+        selected, database_id, chain = _selected_backup_manifest(run, br, pair)
         spaces = selected.get("tablespace") or []
         if (selected.get("link") or len(spaces) != len(args.tablespace)
                 or {space["name"] for space in spaces} != set(args.tablespace)
@@ -167,7 +166,7 @@ def _measure(args):
         if (snapshot.get("snapshots_count") != 1 or type(archive_bytes) is not int or archive_bytes < pair["archive_bytes"]
                 or type(archive_entries) is not int or not pair["archive_objects"] <= archive_entries <= args.max_metadata_entries):
             raise RuntimeError("same_hdd_rehearsal_archive_snapshot_stat_invalid")
-        if _selected_backup(run(info), pair) != (selected, database_id, chain):
+        if _selected_backup_manifest(run, br, pair) != (selected, database_id, chain):
             raise RuntimeError("same_hdd_rehearsal_native_backup_changed")
 
     check()

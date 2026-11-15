@@ -555,7 +555,12 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     _, first_trade = _seal_trade(tmp_path, claim, trade_id="coordinator-before-backup")
     _native_recover(structures, tmp_path)
     with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
+        full = worker.create(snapshot, objects=objects, keep_copies=2)
+    assert full["database_type"] == "full"
+    with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
         pair = worker.create(snapshot, objects=objects, keep_copies=2)
+    assert pair["database_type"] == "incr"
+    assert pair["database_label"].startswith(full["database_label"] + "_")
     restore_root, receiving, pair_receipt, transfer = _copy_repository(worker, pair)
     base = restore_root / "prestage-native-base"
     base.mkdir(mode=0o700)

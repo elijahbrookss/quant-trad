@@ -21,7 +21,7 @@ from scripts.automation.canonical_cold_named_recovery import RecoverySitePolicy,
 from scripts.automation.stage_encrypted_recovery_handoff import (
     TransferLimits, _append_only_wal, _identity, _inventory, _manifest_entry, _private_root, _source_generation, _source_hold,
 )
-from scripts.automation.verify_encrypted_recovery_handoff import _selected_backup, _snapshot_owner
+from scripts.automation.verify_encrypted_recovery_handoff import _selected_backup_manifest, _snapshot_owner
 from scripts.db.canonical_cold_recovery_wal_transfer import _baseline
 
 
@@ -197,8 +197,7 @@ def measure_receiver_preflight(*, site, receiver_signing_key, expected_host_sha2
                   "--log-level-file=off", "--log-level-console=off"]
         if run([str(br), "version"]).strip() != b"pgBackRest 2.59.1" or not run([str(rs), "version"]).startswith(b"restic 0.19.1 "):
             raise ValueError("canonical_recovery_preflight_native_tools_unqualified")
-        info = run([*br_cmd, f"--lock-path={scratch}", f"--set={pair['database_label']}", "--output=json", "info"])
-        selected, _, _ = _selected_backup(info, pair)
+        selected, _, _ = _selected_backup_manifest(run, [*br_cmd, f"--lock-path={scratch}"], pair)
         selected_spaces = selected.get("tablespace") or []
         if (selected.get("link") or len(selected_spaces) != len(tablespaces)
                 or {space["name"] for space in selected_spaces} != set(tablespaces)):

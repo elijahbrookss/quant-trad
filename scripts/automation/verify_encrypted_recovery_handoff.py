@@ -47,7 +47,7 @@ def _directory(path):
     return path
 
 
-def _selected_backup(output, receipt):
+def _backup_catalog(output, receipt):
     def require(valid):
         if not valid:
             raise RuntimeError("recovery_handoff_pgbackrest_backup_mismatch")
@@ -61,15 +61,40 @@ def _selected_backup(output, receipt):
     require(str(database["system-id"]) == receipt["database_identity"].split("/")[0]
             and str(database["version"]) == "15" and type(database["id"]) is int and database["id"] > 0)
     backups = {row["label"]: row for row in stanza["backup"]}
+    require(len(backups) == len(stanza["backup"]))
+    return backups, database["id"]
+
+
+def _selected_backup(output, receipt):
+    backups, database_id = _backup_catalog(output, receipt)
     label = receipt["database_label"]
     selected = backups.get(label, {})
-    require(len(backups) == len(stanza["backup"]) and selected.get("type") == receipt["database_type"]
-            and selected.get("annotation", {}).get("qt-generation") == receipt["name"])
+    if (selected.get("type") != receipt["database_type"]
+            or selected.get("annotation", {}).get("qt-generation") != receipt["name"]):
+        raise RuntimeError("recovery_handoff_pgbackrest_backup_mismatch")
     chain = {label, _root_label(label), *(selected.get("reference") or ())}
-    require(all(_root_label(item) == _root_label(label) and item in backups
-                and backups[item].get("error") is False and backups[item]["database"]["id"] == database["id"]
-                for item in chain))
-    return selected, database["id"], sorted(chain)
+    if not all(_root_label(item) == _root_label(label) and item in backups
+               and backups[item].get("error") is False and backups[item]["database"]["id"] == database_id
+               for item in chain):
+        raise RuntimeError("recovery_handoff_pgbackrest_backup_mismatch")
+    return selected, database_id, sorted(chain)
+
+
+def _selected_backup_manifest(run, command, receipt):
+    """Check the complete backup chain and the same selected label's manifest details."""
+    selected, database_id, chain = _selected_backup(run([*command, "--output=json", "info"]), receipt)
+    label = selected["label"]
+    details, detailed_database_id = _backup_catalog(
+        run([*command, f"--set={label}", "--output=json", "info"]), receipt,
+    )
+    if set(details) != {label} or detailed_database_id != database_id:
+        raise RuntimeError("recovery_handoff_pgbackrest_manifest_mismatch")
+    detail = details[label]
+    manifest_fields = {"database-ref", "link", "tablespace"}
+    if ("database-ref" not in detail
+            or {key: value for key, value in detail.items() if key not in manifest_fields} != selected):
+        raise RuntimeError("recovery_handoff_pgbackrest_manifest_mismatch")
+    return detail, database_id, chain
 
 
 def _verified_backup(output, label, database_id, expected_wal):
