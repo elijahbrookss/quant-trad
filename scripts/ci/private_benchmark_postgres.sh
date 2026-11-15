@@ -31,6 +31,7 @@ port=${QT_CLONE_PORT:?}
 benchmark=${QT_CLONE_BENCHMARK_DATABASE:?}
 hook=${QT_CLONE_RESTORE_HOOK:-/qt-verify-wal}
 startup_seconds=${QT_CLONE_STARTUP_SECONDS:-7200}
+timescale_workers=${QT_CLONE_TIMESCALE_WORKERS-}
 
 fail() { printf 'qt_private_benchmark_postgres: %s\n' "$1" >&2; exit 1; }
 matches() { printf '%s\n' "$1" | grep -Eq "$2"; }
@@ -48,6 +49,10 @@ matches "$watermark" '^(0|[1-9][0-9]{0,18})$' && matches "$startup_seconds" '^[1
 for lsn in "$target" "$replay"; do matches "$lsn" '^[0-9A-F]{1,8}/[0-9A-F]{1,8}$' || fail "invalid WAL LSN"; done
 for segment in "$wal_first" "$wal_last"; do matches "$segment" '^00000001[0-9A-F]{16}$' || fail "invalid WAL segment"; done
 matches "$control_sha" '^[a-f0-9]{64}$' && matches "$terminal_sha" '^[a-f0-9]{40}$' || fail "invalid native digest"
+if [ -n "$timescale_workers" ]; then
+    matches "$timescale_workers" '^(0|[1-9][0-9]{0,2})$' && test "$timescale_workers" -le 128 \
+        || fail "invalid private Timescale worker limit"
+fi
 for path in "$work" "$receipts" "$hook"; do
     matches "$path" '^/[A-Za-z0-9_./-]+$' && test "$(readlink -f "$path")" = "$path" || fail "noncanonical private path"
 done
@@ -78,10 +83,20 @@ HAVING inet_server_addr() IS NULL
    AND current_setting('listen_addresses')=''
    AND current_setting('archive_mode')='off'
    AND current_setting('primary_conninfo')=''
+   AND current_setting('timescaledb.restoring')='off'
    AND pg_tablespace_location($tablespace_oid)='$history'
    AND (SELECT spcname FROM pg_tablespace WHERE oid=$tablespace_oid)='$tablespace'
    AND (SELECT count(*) FROM pg_tablespace WHERE spcname NOT IN ('pg_default','pg_global'))=1
    AND NOT EXISTS (SELECT 1 FROM pg_stat_wal_receiver)"
+if [ -n "$timescale_workers" ]; then
+    snapshot_body="$snapshot_body
+   AND current_setting('timescaledb.max_background_workers')='$timescale_workers'"
+fi
+if [ "$timescale_workers" = 0 ]; then
+    snapshot_body="$snapshot_body
+   AND NOT EXISTS (SELECT 1 FROM pg_stat_activity
+       WHERE backend_type LIKE 'TimescaleDB Background Worker %')"
+fi
 pause_query="$snapshot_body
    AND pg_is_in_recovery() AND pg_get_wal_replay_pause_state()='paused'
    AND (SELECT timeline_id FROM pg_control_checkpoint())=1
@@ -137,10 +152,14 @@ full_page_writes = on
 synchronous_commit = on
 shared_preload_libraries = 'timescaledb,pg_stat_statements'
 timescaledb.telemetry_level = 'off'
+timescaledb.restoring = off
 default_transaction_read_only = on
 shared_buffers = '256MB'
 max_parallel_workers_per_gather = 0
 CONF
+    if [ -n "$timescale_workers" ]; then
+        printf 'timescaledb.max_background_workers = %s\n' "$timescale_workers" >>"$conf"
+    fi
     printf "restore_command = '/bin/sh %s %s %s %%f \"%%p\"'\n" "$hook" "$wal_first" "$wal_last" >>"$conf"
     numeric() {
         value=$(field "$2")
