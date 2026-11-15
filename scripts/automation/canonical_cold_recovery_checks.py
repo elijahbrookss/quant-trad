@@ -1,5 +1,7 @@
 """Bind the independently verified restore to the held source commit."""
 
+from collections.abc import Callable
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -11,12 +13,22 @@ from scripts.automation import storage_host_boundary as host
 from scripts.automation.canonical_cold_collector_checks import RECEIPT_VERSION as COLLECTOR_RECEIPT_VERSION
 from scripts.automation.canonical_cold_named_recovery import _RESPONSE, verify_receiver_preflight, verify_signed_recovery
 from scripts.automation.canonical_cold_package import _hash_file, _pin, _unique_fields
+from scripts.automation.canonical_cold_receiver_ready import prepared_receiver_scope, verify_prepared_receiver_ready
 from scripts.db.canonical_cold_recovery_archive_transport import _CLOSURE
 
 
 PLAN_VERSION = "qt.canonical_cold_independent_plan.v2"
 RECEIPT_VERSION = "qt.canonical_cold_independent_execution.v2"
 _BASE_PINS = {"base_transfer_sha256", "baseline_verification_sha256", "pair_receipt_sha256"}
+
+
+@dataclass(frozen=True)
+class _ApprovedRecoveryChecks:
+    assert_receiver_ready: Callable[[], str]
+    verify: Callable
+
+    def __call__(self, fence, control, source_commit, provider_boundary, remaining, check_archive):
+        return self.verify(fence, control, source_commit, provider_boundary, remaining, check_archive)
 
 
 def _verify_digest(record, *, field, schema):
@@ -62,8 +74,30 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
         raise RuntimeError("canonical_cold_independent_recovery_preflight_scope_changed")
     root = Path(receipt_root)
     root_identity = _directory(root)
+    readiness_scope = prepared_receiver_scope(
+        approved_package_sha256=package_hash, receiver_preflight_sha256=measurement["measurement_sha256"], site_policy=site,
+    )
+    prepared = None
+
+    def assert_receiver_ready():
+        nonlocal prepared
+        if _directory(root) != root_identity:
+            raise RuntimeError("canonical_cold_independent_recovery_receipt_directory_changed")
+        check_ready = getattr(verify_site_restore, "assert_receiver_ready", None)
+        if not callable(check_ready):
+            raise RuntimeError("canonical_cold_independent_recovery_prepared_receiver_required")
+        envelope = check_ready()
+        ready_sha256 = verify_prepared_receiver_ready(
+            verify_signed_recovery(envelope, plan["receiver_public_key"]), scope=readiness_scope,
+        )
+        if prepared is not None and prepared[0] != ready_sha256:
+            raise RuntimeError("canonical_cold_independent_recovery_prepared_attempt_changed")
+        prepared = ready_sha256, envelope
+        return ready_sha256
 
     def verify(fence, control, source_commit, provider_boundary, remaining, check_archive):
+        if prepared is None:
+            raise RuntimeError("canonical_cold_independent_recovery_receiver_not_prepared_before_stop")
         check_archive()
         if (type(source_commit) is not int or source_commit < package["source_commit_floor"]
                 or not _pin(provider_boundary) or _directory(root) != root_identity):
@@ -88,10 +122,12 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
             raise ValueError("canonical_cold_independent_recovery_requires_native_receipts")
         reply = verify_signed_recovery(report["receiver_response"], plan["receiver_public_key"])
         if (set(reply) != {"schema", "request_sha256", "archive_closure", "pending_spool_verified", "runtime_sha256",
-                           "approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256"}
+                           "approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256",
+                           "prepared_receiver_sha256"}
                 or reply["schema"] != _RESPONSE or not _pin(reply["request_sha256"])
                 or reply["approved_package_sha256"] != package_hash or reply["provider_boundary_sha256"] != provider_boundary
                 or reply["receiver_preflight_sha256"] != measurement["measurement_sha256"]
+                or reply["prepared_receiver_sha256"] != prepared[0]
                 or any(reply[key] != report[key] for key in ("archive_closure", "pending_spool_verified"))):
             raise RuntimeError("canonical_cold_independent_recovery_signed_boundary_changed")
         closure = report["archive_closure"]
@@ -137,6 +173,7 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
         evidence = {"schema": RECEIPT_VERSION, "plan_sha256": plan_hash, "database_identity": identity,
                     "source_commit_seq": source_commit, "provider_boundary_sha256": provider_boundary,
                     "receiver_preflight_sha256": measurement["measurement_sha256"],
+                    "prepared_receiver_sha256": prepared[0], "prepared_receiver": prepared[1],
                     "pending_spool_before_anchor_sha256": None if pending_before_anchor is None else pending_before_anchor["source_sha256"],
                     **report}
         digest = archive_evidence_hash(evidence)
@@ -151,4 +188,4 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
         check_archive()
         return digest
 
-    return verify
+    return _ApprovedRecoveryChecks(assert_receiver_ready, verify)

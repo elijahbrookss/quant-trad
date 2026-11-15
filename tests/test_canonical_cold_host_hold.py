@@ -11,6 +11,7 @@ from market_data.archive_verification import ArchiveVerificationLimits
 from scripts.automation import canonical_cold_commit_observer as commit_observer
 from scripts.automation import canonical_cold_execute as execute
 from scripts.automation import canonical_cold_host_hold as hold
+from scripts.automation.canonical_cold_recovery_checks import _ApprovedRecoveryChecks
 from scripts.automation.canonical_cold_release_guard import compatible_release_floor
 from scripts.automation import storage_host_boundary as host
 
@@ -251,7 +252,7 @@ def test_completion_preserves_terminal_evidence_and_sets_correct_promotion_floor
 
 @pytest.mark.parametrize("scenario", (
     "committed", "original", "uncertain", "unchanged", "changed_postmaster", "missing_tail", "wrong_control", "changed_object",
-    "changed_capacity",
+    "changed_capacity", "unprepared_receiver",
 ))
 def test_execute_coordinates_one_approved_host_and_database_transition(authorized_hold, monkeypatch, scenario):
     arguments, stopped = authorized_hold
@@ -360,7 +361,15 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
         return capture, drained, restarted, None
 
     monkeypatch.setattr(execute, "bind_approved_collector_checks", bind_provider)
-    monkeypatch.setattr(execute, "bind_approved_recovery_checks", lambda **kwargs: kwargs["verify_site_restore"])
+    def receiver_ready():
+        assert not stopped and not journal.exists()
+        events.append("receiver_ready")
+        if scenario == "unprepared_receiver":
+            raise RuntimeError(scenario)
+        return "e" * 64
+
+    monkeypatch.setattr(execute, "bind_approved_recovery_checks",
+                        lambda **kwargs: _ApprovedRecoveryChecks(receiver_ready, kwargs["verify_site_restore"]))
 
     def transition(target_conn, control_conn, *, record, verify_provider_boundary, assert_host_held,
                    verified_objects, candidate_witness, **kwargs):
@@ -429,7 +438,7 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
     if scenario == "committed":
         assert run() == {"activation": {"source_commit_seq": 24},
                          "runtime": {"ready": True, "collector_restart_sha256": "d" * 64}}
-        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "provider_drained",
+        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "receiver_ready", "provider_drained",
                           "capacity", "prestart", "candidate_ready", "provider_restarted"]
     else:
         with pytest.raises(RuntimeError, match={"missing_tail": "provider_tail_missing",
@@ -443,9 +452,9 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
             assert events[-1] == "original_ready"
     elif scenario == "uncertain":
         assert host.load_receipt(journal)["phase"] == "database_fenced"
-        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "provider_drained"]
+        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "receiver_ready", "provider_drained"]
     elif scenario == "changed_postmaster":
         assert host.load_receipt(journal)["phase"] == "writers_stopped"
-        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity"]
+        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "receiver_ready"]
     else:
         assert not stopped and not journal.exists()

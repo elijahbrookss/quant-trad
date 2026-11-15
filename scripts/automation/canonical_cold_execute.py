@@ -144,6 +144,8 @@ def execute_approved_cutover(
             with _bounded_step(conn, seconds):
                 refreshed = _raw_index_headroom(conn, scope)
         capacity_check(**refreshed, timeout_seconds=check_deadline())
+        recovery_check.assert_receiver_ready()
+        check_deadline()
 
     with hold_cold_cutover(
         state_root, inventory=inventory, package_path=package_path, approved_package_hash=approved_package_hash,

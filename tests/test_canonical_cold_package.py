@@ -2,6 +2,7 @@ from contextlib import nullcontext
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
+from time import time
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -11,6 +12,7 @@ from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION
 from scripts.automation import canonical_cold_collector_checks as collectors
 from scripts.automation import canonical_cold_named_recovery as named
 from scripts.automation import canonical_cold_package as package
+from scripts.automation import canonical_cold_receiver_ready as ready
 from scripts.automation import canonical_cold_recovery_checks as recovery
 from scripts.automation.storage_host_boundary import digest, load_receipt
 from scripts.db.canonical_cold_witness import VERSION as WITNESS_VERSION
@@ -138,6 +140,14 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
                 "artifacts": {"independent_recovery": {"filename": path.name, "sha256": _write(path, json.dumps(plan).encode())}}}
     package_path = tmp_path / "package.json"
     package_hash = _write(package_path, json.dumps(accepted).encode())
+    readiness_scope = ready.prepared_receiver_scope(
+        approved_package_sha256=package_hash, receiver_preflight_sha256=measured, site_policy=measurement["site_policy"],
+    )
+    prepared = ready.make_prepared_receiver_ready(
+        scope=readiness_scope, materialized_sha256="b" * 64, expires_at=int(time()) + 3600,
+    )
+    signed_prepared = named._sign(prepared, receiver)
+    active_preparation = signed_prepared
     boundary = {"database_identity": "123/42", "source_commit_seq": 45, "anchor_sha256": "d" * 64}
     segments = [{"id": "first", "records_sha256": "1" * 64}, {"id": "second", "records_sha256": "2" * 64}]
     archive = {
@@ -167,23 +177,39 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
     def acknowledge(**overrides):
         body = {"schema": named._RESPONSE, "request_sha256": "a" * 64, "runtime_sha256": archive["receiver_runtime_sha256"],
                 "approved_package_sha256": package_hash, "provider_boundary_sha256": provider_digest,
-                "receiver_preflight_sha256": measured,
+                "receiver_preflight_sha256": measured, "prepared_receiver_sha256": digest(prepared),
                 **{key: report[key] for key in ("archive_closure", "pending_spool_verified")}}
         report["receiver_response"] = named._sign(body | overrides, receiver)
 
     acknowledge()
+    def restore(*args):
+        return report
+
+    restore.assert_receiver_ready = lambda: active_preparation
     options = dict(package_path=package_path, package=accepted, approved_package_hash=package_hash,
-                   receipt_root=root, verify_site_restore=lambda *args: report,
+                   receipt_root=root, verify_site_restore=restore,
                    expected_pending_scope_sha256=plan["pending_spool_scope_sha256"])
     checker = recovery.bind_approved_recovery_checks(**options)
     arguments = (None, None, 45, provider_digest, lambda: 30, lambda: None)
+    with pytest.raises(RuntimeError, match="receiver_not_prepared_before_stop"):
+        checker(*arguments)
+    active_preparation = named._sign({**prepared, "expires_at": int(time()) - 1}, receiver)
+    with pytest.raises(TimeoutError, match="prepared_receiver_expired"):
+        checker.assert_receiver_ready()
+    active_preparation = signed_prepared
+    assert checker.assert_receiver_ready() == digest(prepared)
+    active_preparation = named._sign({**prepared, "attempt_id": "f" * 32}, receiver)
+    with pytest.raises(RuntimeError, match="prepared_attempt_changed"):
+        checker.assert_receiver_ready()
+    active_preparation = signed_prepared
     certificate = checker(*arguments)
     assert checker(*arguments) == certificate
     proof = load_receipt(root / f"independent-recovery-{certificate}.json")
     assert proof["source_commit_seq"] == 45 and proof["provider_boundary_sha256"] == provider_digest
     assert proof["archive_closure"] == report["archive_closure"]
     assert proof["receiver_preflight_sha256"] == measured
-    for field in ("approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256"):
+    assert proof["prepared_receiver"] == signed_prepared and proof["prepared_receiver_sha256"] == digest(prepared)
+    for field in ("approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256", "prepared_receiver_sha256"):
         acknowledge(**{field: "9" * 64})
         with pytest.raises(RuntimeError, match="signed_boundary_changed"):
             checker(*arguments)

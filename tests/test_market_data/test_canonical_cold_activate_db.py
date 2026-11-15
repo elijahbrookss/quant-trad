@@ -30,6 +30,7 @@ from portal.backend.service.storage.repos.fact_retention import PostgresCanonica
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.automation import canonical_cold_execute
 from scripts.automation import canonical_cold_capacity_supervision as capacity_supervision
+from scripts.automation.canonical_cold_recovery_checks import _ApprovedRecoveryChecks
 from scripts.db import canonical_cold_activate as activation
 from scripts.db import canonical_cold_transition as transition_runner
 from scripts.db import fact_header_v2_online_proof as online
@@ -724,7 +725,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                               lambda *args, **kwargs: (lambda _: b"fixture pre-stop spool receipt",
                                                        bound_provider, restarted, None))
                 patch.setattr(canonical_cold_execute, "bind_approved_recovery_checks",
-                              lambda **kwargs: kwargs["verify_site_restore"])
+                              lambda **kwargs: _ApprovedRecoveryChecks(lambda: "e" * 64, kwargs["verify_site_restore"]))
                 def execute_once():
                     return canonical_cold_execute.execute_approved_cutover(
                         retained, control, state_root=tmp_path, inventory={"services": {"tsdb": {"id": "a" * 64}}},
