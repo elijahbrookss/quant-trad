@@ -1,5 +1,5 @@
 from contextlib import ExitStack, contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import timedelta
 from hashlib import sha256
 import json
@@ -12,6 +12,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.pool import NullPool
 
 from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+from core.storage_mounts import FilesystemEvidence
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.contracts import DatasetSeriesRequest
@@ -28,6 +29,7 @@ from portal.backend.service.storage.repos.fact_archival import PostgresCanonical
 from portal.backend.service.storage.repos.fact_retention import PostgresCanonicalFactRetentionRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.automation import canonical_cold_execute
+from scripts.automation import canonical_cold_capacity_supervision as capacity_supervision
 from scripts.db import canonical_cold_activate as activation
 from scripts.db import canonical_cold_transition as transition_runner
 from scripts.db import fact_header_v2_online_proof as online
@@ -620,6 +622,18 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 reader = connections.enter_context(engine.connect()) if retain_reader else None
                 physical_samples = []
                 refuse_final_capacity = retain_reader
+                lose_space_in_transaction = False
+                reserve, allowance, available = 2**30, 2**29, 2**31
+                devices = {
+                    "ssd": FilesystemEvidence("/fixture/ssd", "8:1", "recent-ssd", 2**34, 2**32, available, False),
+                    "hdd": FilesystemEvidence("/fixture/hdd", "8:2", "history-hdd", 2**34, 2**32, available, False),
+                }
+
+                def observe_device(path, *, expected_uuid, require_writable):
+                    assert require_writable is False
+                    item = devices[path.name]
+                    assert item.filesystem_uuid == expected_uuid
+                    return item
 
                 def capacity(*, history_filesystem_uuid, raw_index_bytes, database_directory, history_directory, timeout_seconds):
                     assert history_filesystem_uuid and raw_index_bytes > 0 and timeout_seconds > 0
@@ -627,7 +641,18 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     physical_samples.append(raw_index_bytes)
                     if refuse_final_capacity and len(physical_samples) == 3:
                         raise RuntimeError("fixture free space fell during independent restore")
-                    return {"receipt_hash": "e" * 64, "raw_index_bytes": raw_index_bytes}
+                    receipt = {"raw_index_bytes": raw_index_bytes, "devices": {
+                        tier: {**asdict(item), "reserve_bytes": reserve, "temporary_bytes": allowance}
+                        for tier, item in devices.items()
+                    }}
+                    return {**receipt, "receipt_hash": archive_evidence_hash(receipt)}
+
+                def verify_with_pressure(connection, result):
+                    verify_candidate(connection, result)
+                    if lose_space_in_transaction:
+                        devices["ssd"] = replace(devices["ssd"], available_bytes=available - allowance - 1)
+                        connection.exec_driver_sql("SELECT pg_sleep(5)")
+                        pytest.fail("physical resource watcher did not cancel the running statement")
 
                 def restarted(_services, *, connection=None):
                     assert connection is (reader if retain_reader else None)
@@ -636,6 +661,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 patch.setattr(canonical_cold_execute, "load_approved_package", lambda *args, **kwargs: package)
                 patch.setattr(canonical_cold_execute, "read_approved_candidate_witness", lambda *args: candidate_witness)
                 patch.setattr(canonical_cold_execute, "bind_approved_capacity_checks", lambda **kwargs: capacity)
+                patch.setattr(capacity_supervision, "inspect_filesystem", observe_device)
                 patch.setattr(canonical_cold_execute, "hold_cold_cutover", disposable_host)
                 patch.setattr(canonical_cold_execute, "bind_approved_collector_checks",
                               lambda *args, **kwargs: (lambda _: b"fixture pre-stop spool receipt",
@@ -648,7 +674,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                         package_path=tmp_path / "fixture.json",
                         approved_package_hash=execution["approved_package_hash"], receipts=receipts, store=new_store, limits=limits,
                         preflight_seconds=60, outage_seconds=60, provider_receipt_root=tmp_path,
-                        verify_recovery_boundary=recovery_boundary, verify_candidate=verify_candidate,
+                        verify_recovery_boundary=recovery_boundary, verify_candidate=verify_with_pressure,
                         verify_candidate_prestart=verify_started, verify_candidate_ready=verify_started,
                         verify_original_ready=verify_original_ready, read_connection=reader,
                     )
@@ -663,6 +689,18 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     physical_samples.clear()
                     phases.clear()
                     refuse_final_capacity = False
+                    lose_space_in_transaction = True
+                    with pytest.raises(RuntimeError, match="capacity_supervision_failed: storage_move_space_budget_exceeded"):
+                        execute_once()
+                    assert reopened == ["original"] and events["database_reopened"]["outcome"] == "original"
+                    assert "activation_committing" in phases and "activation_precommit_verified" not in phases
+                    with retained.begin():
+                        assert inspect_raw_mapping_index_member(retained)["tablespace_oid"] == 1663
+                    devices["ssd"] = replace(devices["ssd"], available_bytes=available)
+                    reopened.clear()
+                    physical_samples.clear()
+                    phases.clear()
+                    lose_space_in_transaction = False
 
                 completed = None
                 if lose_commit_reply:
@@ -706,6 +744,10 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     result = verified_candidate[-1]
                 assert len(physical_samples) == 3
                 assert events["activation_committing"]["physical_capacity"]["raw_index_bytes"] == physical_samples[-1]
+                physical = events["activation_precommit_verified"]["physical_supervision"]
+                assert physical["capacity_receipt_hash"] == events["activation_committing"]["physical_capacity"]["receipt_hash"]
+                assert physical["devices"]["ssd"]["floor_bytes"] == available - allowance
+                assert physical["after_wal"]["generated_bytes"] > 0
         expected_phases = ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
                            "accepted", "activation_precommit_verified"]
         if not lose_commit_reply or retain_reader:

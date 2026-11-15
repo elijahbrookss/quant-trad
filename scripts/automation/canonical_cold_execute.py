@@ -9,6 +9,7 @@ from sqlalchemy import text
 from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_verification import ArchiveVerificationLimits
 from scripts.automation.canonical_cold_capacity_checks import bind_approved_capacity_checks
+from scripts.automation.canonical_cold_capacity_supervision import supervise_approved_capacity
 from scripts.automation.canonical_cold_collector_checks import bind_approved_collector_checks
 from scripts.automation.canonical_cold_host_hold import hold_cold_cutover
 from scripts.automation.canonical_cold_package import load_approved_package, read_approved_candidate_witness
@@ -177,7 +178,9 @@ def execute_approved_cutover(
                 host_remaining=remaining, verify_provider_boundary=verify_drained,
                 verify_recovery_boundary=verify_recovered, record=record_phase,
                 verify_candidate=verify_candidate, candidate_witness=witness, verified_objects=verified,
-                read_connection=read_connection,
+                read_connection=read_connection, supervise_capacity=lambda target, seconds: supervise_approved_capacity(
+                    target, final_capacity, timeout_seconds=seconds,
+                ),
             )
         except Exception as error:
             if database_phase is None:

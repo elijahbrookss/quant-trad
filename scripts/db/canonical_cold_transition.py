@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 def run_fenced_transition(
     conn, control, *, package, approved_package_hash, receipts, store, limits, timeout_seconds,
     assert_host_held, host_remaining, verify_provider_boundary, verify_recovery_boundary, record,
-    verify_candidate, candidate_witness, verified_objects=None, read_connection=None,
+    verify_candidate, candidate_witness, verified_objects=None, read_connection=None, supervise_capacity=None,
 ):
     """Check the candidate inside the transaction before making DDL durable.
 
@@ -53,6 +53,7 @@ def run_fenced_transition(
     """
     if (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS
             or not isinstance(limits, ArchiveVerificationLimits) or conn is control
+            or (supervise_capacity is not None and not callable(supervise_capacity))
             or any(not native_transaction_mode(session) or session.in_transaction() for session in (conn, control))
             or not all(callable(callback) for callback in (
                 assert_host_held, host_remaining, verify_provider_boundary, verify_recovery_boundary, record, verify_candidate,
@@ -142,11 +143,14 @@ def run_fenced_transition(
             outcome = partial(read_activation_outcome, execution=execution, expected_execution_hash=execution_hash)
             retired_outcome = partial(outcome, require_identity_retired=True)
             with conn.begin():
-                with _bounded_step(conn, remaining_seconds()):
+                with _bounded_step(conn, remaining_seconds()), ExitStack() as capacity:
                     transaction = prepare_activation_transaction(conn, fence)
                     record("activation_committing", {"execution_hash": execution_hash, "source_commit_seq": source_commit,
                                                      "provider_boundary": provider_boundary,
                                                      "independent_recovery": recovery_boundary, "transaction": transaction})
+                    physical = None
+                    if supervise_capacity is not None:
+                        physical = capacity.enter_context(supervise_capacity(conn, remaining_seconds()))
                     result = activate_cold_storage(
                         conn, execution=execution, expected_execution_hash=execution_hash,
                         receipts=receipts, verified_objects=verified_objects, database_fence=fence,
@@ -178,10 +182,17 @@ def run_fenced_transition(
                     """)).mappings().one()
                     if any(final_tx[key] != transaction[key] for key in ("xid", "fsync", "synchronous_commit")):
                         raise RuntimeError("canonical_cold_transition_activation_transaction_changed")
+                    # Stop the cancellation thread before COMMIT. A late
+                    # observation can still force this transaction to roll back.
+                    capacity.close()
+                    remaining_seconds()
                     precommit = {"execution_hash": execution_hash, "xid": transaction["xid"], "witness_hash": witness_hash,
                                  "raw_mapping_index_receipt_hash": raw_index and raw_index["receipt_hash"],
                                  "identity_retirement": result["identity_retirement"],
                                  "wal_before_commit": final_tx["wal"]}
+                    if physical is not None:
+                        precommit["physical_supervision"] = physical
+                        result["physical_supervision"] = physical
                     record("activation_precommit_verified", precommit)
         except Exception as error:
             recovered_commit = False
