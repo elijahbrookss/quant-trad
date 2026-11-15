@@ -59,7 +59,7 @@ _PAUSED = text("""
 """)
 
 
-def _mount_paths(args):
+def _mount_paths(args, *, native_root=None):
     attempt, attempt_id = _private_root(args.attempt_root)
     paths = {name: _private_root(getattr(args, name))
              for name in ("pgdata", "tablespace", "socket", "archive_root")}
@@ -90,8 +90,10 @@ def _mount_paths(args):
 
     pgdata, _ = paths["pgdata"]
     link = pgdata / "pg_tblspc" / str(args.tablespace_oid)
-    if (not link.is_symlink() or Path(os.readlink(link)) != args.tablespace
-            or _identity(link.stat()) != paths["tablespace"][1]):
+    expected = args.tablespace if native_root is None else native_root / args.tablespace.relative_to(attempt)
+    if not link.is_symlink() or Path(os.readlink(link)) != expected:
+        raise ValueError("paused_recovery_native_tablespace_link_changed")
+    if native_root is None and _identity(link.stat()) != paths["tablespace"][1]:
         raise ValueError("paused_recovery_native_tablespace_link_changed")
     sock = args.socket / f".s.PGSQL.{args.port}"
     info = sock.lstat()

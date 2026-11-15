@@ -98,14 +98,15 @@ def _paths(clone, archive, filesystem_uuid, *, require_writable):
             "backing": _mount_backing(root, archive, device)}
 
 
-def _assert_postmaster_file(conn, paths):
-    path = Path(paths["directories"]["pgdata"]["path"]) / "postmaster.pid"
+def assert_postmaster_file(conn, pgdata):
+    """Check that SQL is connected to the exact mounted PostgreSQL data directory."""
+    path = Path(pgdata) / "postmaster.pid"
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise ValueError("private_placement_invalid_postmaster_file")
         local = stream.read(4097)
-    if (not 0 < len(local) <= 4096
-            or local != conn.scalar(text("SELECT pg_read_binary_file('postmaster.pid',0,4096)"))):
+    observed = conn.scalar(text("SELECT pg_read_binary_file('postmaster.pid',0,4096)"))
+    if not 0 < len(local) <= 4096 or local != bytes(observed):
         raise ValueError("private_placement_postmaster_file_changed")
 
 
@@ -138,7 +139,7 @@ def _bound_state(conn, clone, placement, *, require_writable):
                    require_writable=require_writable)
     if paths != placement["paths"]:
         raise RuntimeError("private_placement_paths_changed")
-    _assert_postmaster_file(conn, paths)
+    assert_postmaster_file(conn, paths["directories"]["pgdata"]["path"])
     registered = _registry(conn, clone, placement["history_target_id"])
     binding = placement["native_binding"]
     if (registered["root"], registered["filesystem_uuid"], registered["binding"]) != (

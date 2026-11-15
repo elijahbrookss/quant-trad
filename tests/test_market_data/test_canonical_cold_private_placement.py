@@ -94,7 +94,7 @@ def test_private_rebind_rolls_back_and_preserves_exact_native_tablespace(raw_ind
     # The fixture uses an actual private tablespace and a disposable loopback
     # connection, without a prior physical recovery or its Docker bind map.
     monkeypatch.setattr(placement, "assert_promoted_clone", lambda *_: None)
-    monkeypatch.setattr(placement, "_assert_postmaster_file", lambda *_: None)
+    monkeypatch.setattr(placement, "assert_postmaster_file", lambda *_: None)
     archive = Path("/candidate")
     paths = {"directories": {"root": {"path": str(root)}, "archive": {"inode": 211}, "objects": {"inode": 212}}}
     monkeypatch.setattr(placement, "_paths", lambda *_args, **_kwargs: paths)

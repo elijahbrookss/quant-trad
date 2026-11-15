@@ -112,3 +112,15 @@ def test_native_pause_refuses_another_reviewed_target(original_donor):
     with pytest.raises(RuntimeError, match="paused_recovery_native_state_changed: recovery_lsn"):
         with open_paused_donor(**(original_donor | changed)):
             pytest.fail("admitted evidence from a different recovery target")
+
+
+def test_paused_donor_readonly_alias_keeps_native_server_paths(original_donor):
+    options = original_donor | {"readonly_mount_alias": Path("/donor-alias")}
+    with open_paused_donor(**options) as donor:
+        conn = donor.connection
+        assert conn.engine.url.query["host"] == "/donor-alias/control/socket"
+        assert conn.exec_driver_sql("SHOW data_directory").scalar_one() == "/donor/pgdata"
+        _require_snapshot(conn, donor.identity, paused_donor=donor)
+    with pytest.raises(ValueError, match="invalid_mount_alias"):
+        with open_paused_donor(**(options | {"readonly_mount_alias": Path("/donor/control")})):
+            pytest.fail("admitted a bind inside the native donor path")

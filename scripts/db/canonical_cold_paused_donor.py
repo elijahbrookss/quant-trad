@@ -18,6 +18,7 @@ from scripts.ci.verify_paused_recovery_pair import (
     _bound_statement, _check_scope, _lsn, _mount_paths, _probe, _readonly_engine,
 )
 from scripts.db.canonical_cold_migration import PostgresMigrationSource
+from scripts.db.canonical_cold_private_placement import assert_postmaster_file
 
 
 @dataclass(frozen=True)
@@ -26,8 +27,10 @@ class PausedRollbackDonor:
     identity: dict
     accepted_commit_seq: int
     archive_objects: Path
+    clone_proof_sha256: str
     _transaction: object
     _args: SimpleNamespace
+    _native: SimpleNamespace
     _proof: dict
     _mounts: dict
     _paused: dict
@@ -47,8 +50,9 @@ class PausedRollbackDonor:
             LEAST(:milliseconds, COALESCE(NULLIF(setting::integer,0), :milliseconds))::text, true)
             FROM pg_settings WHERE name='statement_timeout'"""), {"milliseconds": remaining})
         _archive_identity(self.archive_objects.parent, proof)
-        if (_mount_paths(args) != self._mounts
-                or _probe(conn, args, proof, target_lsn=proof["target_lsn"], replay_lsn=proof["replay_lsn"]) != self._paused):
+        alias = self._native.attempt_root if self._native is not args else None
+        if (_mount_paths(args, native_root=alias) != self._mounts
+                or _probe_bound(conn, args, self._native, proof) != self._paused):
             raise RuntimeError("paused_rollback_donor_snapshot_changed")
 
 
@@ -67,6 +71,15 @@ def _archive_identity(root, proof):
             or any(not os.statvfs(path).f_flag & os.ST_RDONLY for path in paths)):
         raise ValueError("paused_rollback_donor_archive_mount_changed")
     return identities
+
+
+def _probe_bound(conn, local, native, proof):
+    state = _probe(conn, native, proof, target_lsn=proof["target_lsn"], replay_lsn=proof["replay_lsn"])
+    if local is not native:
+        # The link in a read-only bind still contains its server path.
+        # Pin the connection to this actual data directory as well.
+        assert_postmaster_file(conn, local.pgdata)
+    return state
 
 
 def _binding(clone, copy, suffix, *, copy_hash, suffix_hash):
@@ -103,7 +116,7 @@ def _binding(clone, copy, suffix, *, copy_hash, suffix_hash):
 @contextmanager
 def open_paused_donor(*, clone_proof, clone_proof_sha256, copy_receipt, copy_receipt_sha256,
                       suffix_receipt, suffix_receipt_sha256, archive_root, tablespace_name,
-                      port, timeout_seconds, statement_timeout_seconds=120):
+                      port, timeout_seconds, statement_timeout_seconds=120, readonly_mount_alias=None):
     """Open the original-name donor only through its private, mounted Unix socket.
 
     The stopped original must already be restarted into the exact reviewed
@@ -124,12 +137,22 @@ def open_paused_donor(*, clone_proof, clone_proof_sha256, copy_receipt, copy_rec
         tablespace_oid=clone["tablespace_oid"], tablespace_name=tablespace_name, port=port, max_objects=1,
         timeout_seconds=min(timeout_seconds, 86400), statement_timeout_seconds=statement_timeout_seconds)
     _check_scope(args)
+    native = args
+    if readonly_mount_alias is not None:
+        alias = Path(readonly_mount_alias)
+        if (not alias.is_absolute() or alias.is_relative_to(root) or root.is_relative_to(alias)
+                or (pgdata, history) != (root / "pgdata", root / "history")):
+            raise ValueError("paused_rollback_donor_invalid_mount_alias")
+        args = SimpleNamespace(**(vars(native) | {
+            "attempt_root": alias, "pgdata": alias / "pgdata", "tablespace": alias / "history",
+            "socket": alias / "control" / "socket", "archive_root": alias / "archive",
+        }))
     archive_root = Path(archive_root)
     archive_objects = archive_root / "objects"
-    if archive_root.is_relative_to(root) or root.is_relative_to(archive_root):
+    if any(archive_root.is_relative_to(path) or path.is_relative_to(archive_root) for path in (root, args.attempt_root)):
         raise ValueError("paused_rollback_donor_archive_overlaps_workspace")
 
-    mounts = _mount_paths(args)
+    mounts = _mount_paths(args, native_root=root if native is not args else None)
     _archive_identity(archive_root, clone)
     deadline = monotonic() + timeout_seconds
     def check():
@@ -141,12 +164,15 @@ def open_paused_donor(*, clone_proof, clone_proof_sha256, copy_receipt, copy_rec
             conn.exec_driver_sql("SET TRANSACTION READ ONLY")
             source = PostgresMigrationSource(engine, expected_system_identifier=copy["system_identifier"])
             _bound_statement(conn, check, statement_timeout_seconds)
-            paused = _probe(conn, args, clone, target_lsn=clone["target_lsn"], replay_lsn=clone["replay_lsn"])
+            paused = _probe_bound(conn, args, native, clone)
             identity = source.identity(conn)
             accepted = PostgresMarketDataRepository._current_commit_seq_with_session(conn)
             if accepted != clone["accepted_commit_seq"]:
                 raise RuntimeError("paused_rollback_donor_accepted_boundary_changed")
-            donor = PausedRollbackDonor(conn, identity, accepted, archive_objects, transaction, args, clone, mounts, paused, deadline)
+            donor = PausedRollbackDonor(
+                conn, identity, accepted, archive_objects, clone_proof_sha256, transaction, args, native, clone, mounts,
+                paused, deadline,
+            )
             donor.assert_snapshot(conn, identity)
             yield donor
             donor.assert_snapshot(conn, identity)
