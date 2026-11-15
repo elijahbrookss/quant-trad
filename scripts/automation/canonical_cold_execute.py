@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_verification import ArchiveVerificationLimits
+from scripts.automation.canonical_cold_capacity_checks import bind_approved_capacity_checks
 from scripts.automation.canonical_cold_collector_checks import bind_approved_collector_checks
 from scripts.automation.canonical_cold_host_hold import hold_cold_cutover
 from scripts.automation.canonical_cold_package import load_approved_package, read_approved_candidate_witness
@@ -16,10 +17,17 @@ from scripts.db.canonical_cold_activate import (
     assert_original_identity_registry, raw_index_placement_scope, read_original_watermark, verify_mounted_candidate,
 )
 from scripts.db.canonical_cold_database_fence import _database, native_transaction_mode, retain_read_session
-from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement
+from scripts.db.canonical_cold_raw_index import _fork_bytes, assert_raw_mapping_index_placement
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
 from scripts.db.canonical_cold_transition import run_fenced_transition
 from scripts.db.fact_header_v2_capture import _bounded_step
+
+
+def _raw_index_headroom(conn, scope):
+    raw = assert_raw_mapping_index_placement(conn, **raw_index_placement_scope(scope), on_history=False)
+    return {"history_filesystem_uuid": raw["target"]["filesystem_uuid"], "raw_index_bytes": _fork_bytes(raw["member"]),
+            "history_directory": raw["target"]["location"],
+            "database_directory": conn.scalar(text("SELECT current_setting('data_directory')"))}
 
 
 def _read_open_original(conn, control, *, package, timeout_seconds):
@@ -37,8 +45,7 @@ def _read_open_original(conn, control, *, package, timeout_seconds):
                     or _database(control, target["database"]) != target):
                 raise RuntimeError("canonical_cold_execute_control_endpoint_changed")
     assert_original_identity_registry(conn, scope=scope["identity_registry"])
-    assert_raw_mapping_index_placement(conn, **raw_index_placement_scope(scope), on_history=False)
-    return {"database": target, "source_commit_seq": watermark}
+    return {"database": target, "source_commit_seq": watermark, "raw_index": _raw_index_headroom(conn, scope)}
 
 
 def execute_approved_cutover(
@@ -72,11 +79,15 @@ def execute_approved_cutover(
     if outage_seconds > package["max_outage_seconds"]:
         raise ValueError("canonical_cold_execute_outage_exceeds_approved_budget")
     witness = read_approved_candidate_witness(package_path, package)
+    capacity_check = bind_approved_capacity_checks(
+        package_path=package_path, package=package, archive_root=store.root,
+        database_container=inventory["services"]["tsdb"]["id"],
+    )
     capture_provider_tail, verify_provider_boundary, verify_provider_restart, pending_scope_sha256 = bind_approved_collector_checks(
         conn, package_path=package_path, package=package, store=store, receipt_root=provider_receipt_root,
     )
     recovery_check = bind_approved_recovery_checks(
-        package_path=package_path, package=package, receipt_root=provider_receipt_root,
+        package_path=package_path, package=package, approved_package_hash=approved_package_hash, receipt_root=provider_receipt_root,
         verify_site_restore=verify_recovery_boundary, expected_pending_scope_sha256=pending_scope_sha256,
     )
     scope = package["scope"]
@@ -97,6 +108,7 @@ def execute_approved_cutover(
         conn.exec_driver_sql("SET TRANSACTION READ ONLY")
         with _bounded_step(conn, preflight_seconds):
             original = _read_open_original(conn, control, package=package, timeout_seconds=preflight_seconds)
+            capacity_check(**original["raw_index"], timeout_seconds=deadline - monotonic())
             verified = verify_mounted_candidate(conn, audit=audit, store=store, limits=limits, check_budget=check_preflight)
     if read_connection is not None:
         with ExitStack() as stack:
@@ -116,6 +128,14 @@ def execute_approved_cutover(
             raise RuntimeError("canonical_cold_execute_provider_tail_missing")
         if conn.in_transaction() or control.in_transaction():
             raise RuntimeError("canonical_cold_execute_provider_capture_connection_left_in_transaction")
+        seconds = int(check_deadline())
+        if seconds < 1:
+            raise TimeoutError("canonical_cold_execute_capacity_deadline")
+        with conn.begin():
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            with _bounded_step(conn, seconds):
+                refreshed = _raw_index_headroom(conn, scope)
+        capacity_check(**refreshed, timeout_seconds=check_deadline())
 
     with hold_cold_cutover(
         state_root, inventory=inventory, package_path=package_path, approved_package_hash=approved_package_hash,
@@ -123,9 +143,14 @@ def execute_approved_cutover(
     ) as (approved, assert_held, record, remaining, resume):
         database_phase = None
         database_outcome = None
+        final_capacity = None
 
         def record_phase(phase, evidence):
             nonlocal database_phase, database_outcome
+            if phase == "activation_committing":
+                if final_capacity is None:
+                    raise RuntimeError("canonical_cold_execute_final_capacity_unverified")
+                evidence = {**evidence, "physical_capacity": final_capacity}
             # Any attempted fence phase makes a pre-fence restart ineligible.
             database_phase = phase
             record(phase, evidence)
@@ -135,12 +160,22 @@ def execute_approved_cutover(
         def verify_drained(target, watermark):
             return verify_provider_boundary(target, watermark, provider_tail)
 
+        def verify_recovered(fence, admin, watermark, provider, seconds_left, check_archive):
+            nonlocal final_capacity
+            receipt = recovery_check(fence, admin, watermark, provider, seconds_left, check_archive)
+            with fence.connection.begin():
+                with _bounded_step(fence.connection, seconds_left()):
+                    fence.assert_quiet(fence.connection)
+                    final_args = _raw_index_headroom(fence.connection, scope)
+            final_capacity = capacity_check(**final_args, timeout_seconds=seconds_left())
+            return receipt
+
         try:
             activation = run_fenced_transition(
                 conn, control, package=approved, approved_package_hash=approved_package_hash, receipts=receipts,
                 store=store, limits=limits, timeout_seconds=outage_seconds, assert_host_held=assert_held,
                 host_remaining=remaining, verify_provider_boundary=verify_drained,
-                verify_recovery_boundary=recovery_check, record=record_phase,
+                verify_recovery_boundary=verify_recovered, record=record_phase,
                 verify_candidate=verify_candidate, candidate_witness=witness, verified_objects=verified,
                 read_connection=read_connection,
             )

@@ -153,7 +153,9 @@ def _stub_raw_index_case(monkeypatch):
     monkeypatch.setattr(activation, "verify_committed_raw_mapping_index", lambda conn, **kwargs: None)
     monkeypatch.setattr(activation, "assert_raw_mapping_index_placement", lambda conn, **kwargs: None)
     monkeypatch.setattr(transition_runner, "assert_raw_mapping_index_placement", lambda conn, **kwargs: None)
-    monkeypatch.setattr(canonical_cold_execute, "assert_raw_mapping_index_placement", lambda conn, **kwargs: None)
+    monkeypatch.setattr(canonical_cold_execute, "_raw_index_headroom",
+                        lambda conn, scope: {"history_filesystem_uuid": "fixture-history", "raw_index_bytes": 8192,
+                                             "database_directory": "/fixture/db", "history_directory": "/fixture/archive"})
     return {"target_id": "fixture-raw-history", "tablespace_oid": 50, "table_oid": 90, "index_oid": 91,
             "max_copy_bytes": 1024**2, "timeout_seconds": 15}
 
@@ -579,7 +581,12 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
             def disposable_host(*args, before_pause, **kwargs):
                 before_pause(lambda: 60)
 
-                def resume(ready, *, verify_before_start):
+                def resume(ready, *, verify_before_start=None):
+                    if verify_before_start is None:
+                        confirmed = ready({})
+                        assert confirmed == {"ready": True}
+                        reopened.append("original")
+                        return confirmed
                     assert verify_before_start({}) == {"ready": True}
                     result = ready({})
                     assert result == {"ready": True, "collector_restart_sha256": "d" * 64}
@@ -602,9 +609,25 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 assert tail == b"fixture pre-stop spool receipt"
                 return provider_boundary(connection, commit_seq)
 
+            def verify_original_ready(_services):
+                with retained.begin():
+                    assert retained.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
+                    assert activation.read_activation_outcome(retained, **outcome_arguments) == "original"
+                return {"ready": True}
+
             package["max_outage_seconds"] = 60
             with monkeypatch.context() as patch, ExitStack() as connections:
                 reader = connections.enter_context(engine.connect()) if retain_reader else None
+                physical_samples = []
+                refuse_final_capacity = retain_reader
+
+                def capacity(*, history_filesystem_uuid, raw_index_bytes, database_directory, history_directory, timeout_seconds):
+                    assert history_filesystem_uuid and raw_index_bytes > 0 and timeout_seconds > 0
+                    assert database_directory.startswith("/") and history_directory.startswith("/")
+                    physical_samples.append(raw_index_bytes)
+                    if refuse_final_capacity and len(physical_samples) == 3:
+                        raise RuntimeError("fixture free space fell during independent restore")
+                    return {"receipt_hash": "e" * 64, "raw_index_bytes": raw_index_bytes}
 
                 def restarted(_services, *, connection=None):
                     assert connection is (reader if retain_reader else None)
@@ -612,6 +635,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
 
                 patch.setattr(canonical_cold_execute, "load_approved_package", lambda *args, **kwargs: package)
                 patch.setattr(canonical_cold_execute, "read_approved_candidate_witness", lambda *args: candidate_witness)
+                patch.setattr(canonical_cold_execute, "bind_approved_capacity_checks", lambda **kwargs: capacity)
                 patch.setattr(canonical_cold_execute, "hold_cold_cutover", disposable_host)
                 patch.setattr(canonical_cold_execute, "bind_approved_collector_checks",
                               lambda *args, **kwargs: (lambda _: b"fixture pre-stop spool receipt",
@@ -620,13 +644,25 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                               lambda **kwargs: kwargs["verify_site_restore"])
                 def execute_once():
                     return canonical_cold_execute.execute_approved_cutover(
-                        retained, control, state_root=tmp_path, inventory={}, package_path=tmp_path / "fixture.json",
+                        retained, control, state_root=tmp_path, inventory={"services": {"tsdb": {"id": "a" * 64}}},
+                        package_path=tmp_path / "fixture.json",
                         approved_package_hash=execution["approved_package_hash"], receipts=receipts, store=new_store, limits=limits,
                         preflight_seconds=60, outage_seconds=60, provider_receipt_root=tmp_path,
                         verify_recovery_boundary=recovery_boundary, verify_candidate=verify_candidate,
                         verify_candidate_prestart=verify_started, verify_candidate_ready=verify_started,
-                        verify_original_ready=lambda _: pytest.fail("unexpected rollback"), read_connection=reader,
+                        verify_original_ready=verify_original_ready, read_connection=reader,
                     )
+
+                if refuse_final_capacity:
+                    with pytest.raises(RuntimeError, match="free space fell during independent restore"):
+                        execute_once()
+                    assert len(physical_samples) == 3 and reopened == ["original"]
+                    assert "activation_committing" not in phases
+                    assert events["database_reopened"]["outcome"] == "original"
+                    reopened.clear()
+                    physical_samples.clear()
+                    phases.clear()
+                    refuse_final_capacity = False
 
                 completed = None
                 if lose_commit_reply:
@@ -668,6 +704,8 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     result = completed["activation"]
                 else:
                     result = verified_candidate[-1]
+                assert len(physical_samples) == 3
+                assert events["activation_committing"]["physical_capacity"]["raw_index_bytes"] == physical_samples[-1]
         expected_phases = ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
                            "accepted", "activation_precommit_verified"]
         if not lose_commit_reply or retain_reader:

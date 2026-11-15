@@ -20,6 +20,7 @@ def authorized_hold(tmp_path, monkeypatch):
     services = {name: {"running": True, "id": f"{index:064x}"}
                 for index, name in enumerate(hold.PAUSE_ORDER, 1)}
     services["initialize"] = {"running": False, "id": "f" * 64}
+    services["tsdb"] = {"running": True, "id": "e" * 64}
     inventory = {"project": "cold-fixture", "source_revision": "a" * 40, "services": services}
     stopped = []
 
@@ -250,6 +251,7 @@ def test_completion_preserves_terminal_evidence_and_sets_correct_promotion_floor
 
 @pytest.mark.parametrize("scenario", (
     "committed", "original", "uncertain", "unchanged", "changed_postmaster", "missing_tail", "wrong_control", "changed_object",
+    "changed_capacity",
 ))
 def test_execute_coordinates_one_approved_host_and_database_transition(authorized_hold, monkeypatch, scenario):
     arguments, stopped = authorized_hold
@@ -305,9 +307,18 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
 
     monkeypatch.setattr(execute, "_database", database)
     monkeypatch.setattr(execute, "assert_original_identity_registry", lambda *a, **kw: None)
-    monkeypatch.setattr(execute, "raw_index_placement_scope", lambda *a: {})
-    monkeypatch.setattr(execute, "assert_raw_mapping_index_placement", lambda *a, **kw: None)
+    footprint = {"history_filesystem_uuid": "fixture-hdd", "raw_index_bytes": 20}
+    monkeypatch.setattr(execute, "_raw_index_headroom", lambda *a: footprint)
     monkeypatch.setattr(hold, "_record_serving_release", lambda *a, **kw: None)
+
+    def capacity(*, timeout_seconds, **physical):
+        assert physical == footprint and timeout_seconds > 0
+        events.append("capacity")
+        if scenario == "changed_capacity" and events.count("capacity") == 2:
+            raise RuntimeError(scenario)
+        return {"receipt_hash": "e" * 64}
+
+    monkeypatch.setattr(execute, "bind_approved_capacity_checks", lambda **kwargs: capacity)
 
     class Verified:
         def assert_unchanged(self):
@@ -365,7 +376,13 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
         if scenario == "uncertain":
             raise RuntimeError(scenario)
         if scenario == "committed":
+            def assert_quiet(session):
+                assert session is conn and session.in_transaction()
+            fence = SimpleNamespace(connection=target_conn, assert_quiet=assert_quiet)
+            assert kwargs["verify_recovery_boundary"](fence, control, 24, "provider", lambda: 60, lambda: None) == "recovered"
             record("activation_committing", {})
+            assert host.load_receipt(journal)["database_evidence"]["activation_committing"]["physical_capacity"] == {
+                "receipt_hash": "e" * 64}
             record("activation_precommit_verified", {})
             record("activation_verified", {})
         else:
@@ -403,17 +420,17 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
 
     def run():
         return execute.execute_approved_cutover(
-            conn, control, **arguments, receipts=object(), store=object(), limits=ArchiveVerificationLimits(),
+            conn, control, **arguments, receipts=object(), store=SimpleNamespace(root=root), limits=ArchiveVerificationLimits(),
             preflight_seconds=60, outage_seconds=1200, provider_receipt_root=root,
-            verify_recovery_boundary=lambda *a: None, verify_candidate=lambda *a: None,
+            verify_recovery_boundary=lambda *a: "recovered", verify_candidate=lambda *a: None,
             verify_candidate_prestart=application, verify_candidate_ready=application, verify_original_ready=original,
         )
 
     if scenario == "committed":
         assert run() == {"activation": {"source_commit_seq": 24},
                          "runtime": {"ready": True, "collector_restart_sha256": "d" * 64}}
-        assert events == ["checksums", "stamps", "provider_tail", "provider_drained", "prestart", "candidate_ready",
-                          "provider_restarted"]
+        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "provider_drained",
+                          "capacity", "prestart", "candidate_ready", "provider_restarted"]
     else:
         with pytest.raises(RuntimeError, match={"missing_tail": "provider_tail_missing",
                                                "wrong_control": "control_endpoint_changed"}.get(scenario, scenario)):
@@ -426,9 +443,9 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
             assert events[-1] == "original_ready"
     elif scenario == "uncertain":
         assert host.load_receipt(journal)["phase"] == "database_fenced"
-        assert events == ["checksums", "stamps", "provider_tail", "provider_drained"]
+        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "provider_drained"]
     elif scenario == "changed_postmaster":
         assert host.load_receipt(journal)["phase"] == "writers_stopped"
-        assert events == ["checksums", "stamps", "provider_tail"]
+        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity"]
     else:
         assert not stopped and not journal.exists()

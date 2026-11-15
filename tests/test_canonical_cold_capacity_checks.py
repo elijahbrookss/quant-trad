@@ -1,0 +1,123 @@
+from dataclasses import replace
+from hashlib import sha256
+import json
+from pathlib import PurePosixPath
+
+import pytest
+
+from core.storage_mounts import FilesystemEvidence
+from market_data.fact_archive import archive_evidence_hash
+from scripts.automation import canonical_cold_capacity_checks as capacity
+
+
+@pytest.fixture
+def physical_plan(tmp_path, monkeypatch):
+    plan = {
+        "schema": capacity.VERSION,
+        "rehearsal_sha256": "b" * 64,
+        "ssd": {"path": "/var/lib/docker", "filesystem_uuid": "recent-ssd", "reserve_bytes": 200, "temporary_bytes": 500},
+        "hdd": {"path": "/history", "filesystem_uuid": "archive-hdd", "reserve_bytes": 100, "temporary_bytes": 250},
+    }
+    evidence = {
+        "/var/lib/docker": FilesystemEvidence("/var/lib/docker", "8:1", "recent-ssd", 1000, 100, 800, False),
+        "/history": FilesystemEvidence("/history", "8:2", "archive-hdd", 2000, 200, 1700, False),
+        "/history/archives": FilesystemEvidence("/history/archives", "8:2", "archive-hdd", 2000, 200, 1700, False),
+    }
+    pgdata = "/var/lib/docker/volumes/test-db/_data"
+    evidence[pgdata] = replace(evidence["/var/lib/docker"], path=pgdata)
+    evidence[pgdata + "/pg_wal"] = replace(evidence[pgdata], path=pgdata + "/pg_wal")
+    evidence["/history/catalog"] = replace(evidence["/history"], path="/history/catalog")
+
+    def inspect(path, *, expected_uuid, require_writable=True):
+        observed = evidence[PurePosixPath(path.as_posix()).as_posix()]
+        assert observed.filesystem_uuid == expected_uuid
+        return observed
+
+    docker_info = {"DockerRootDir": "/var/lib/docker", "OperatingSystem": "Linux", "KernelVersion": "6.8.0"}
+    mounts = [{"Type": "volume", "Destination": "/pgdata", "Source": pgdata, "RW": True},
+              {"Type": "bind", "Destination": "/qt-history", "Source": "/history", "RW": True}]
+    docker = []
+
+    def read_docker(*args, timeout):
+        assert 0 < timeout <= 5
+        docker.append(args[0])
+        if args[0] == "inspect":
+            assert args[-1] == "c" * 64
+        return json.dumps({"context": "unix:///var/run/docker.sock", "info": docker_info, "inspect": mounts}[args[0]])
+
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    monkeypatch.setattr(capacity.host, "docker", read_docker)
+    monkeypatch.setattr(capacity, "inspect_filesystem", inspect)
+
+    def bind(archive="/history/archives", *, changed=False):
+        path = tmp_path / "capacity.json"
+        content = json.dumps(plan).encode()
+        path.write_bytes(content)
+        path.chmod(0o600)
+        package = {"scope": {"raw_mapping_index": {"max_copy_bytes": 200}},
+                   "artifacts": {"physical_capacity": {"filename": path.name, "sha256": sha256(content).hexdigest()}}}
+        if changed:
+            path.write_bytes(content + b" ")
+        return capacity.bind_approved_capacity_checks(package_path=tmp_path / "package.json",
+                                                      package=package, archive_root=archive, database_container="c" * 64)
+
+    def check(binder, **updates):
+        return binder(**({"history_filesystem_uuid": "archive-hdd",
+                          "raw_index_bytes": 175, "timeout_seconds": 10,
+                          "database_directory": "/pgdata", "history_directory": "/qt-history/catalog"} | updates))
+
+    return plan, evidence, docker_info, docker, bind, check
+
+
+def test_capacity_check_pins_manifest_and_reports_fresh_physical_headroom(physical_plan):
+    _, evidence, _, docker, bind, check = physical_plan
+    binder = bind()
+    receipt = check(binder)
+    assert receipt["devices"]["ssd"]["required_free_bytes"] == 700
+    assert receipt["devices"]["hdd"]["required_free_bytes"] == 350
+    assert receipt["devices"]["hdd"]["device_id"] == "8:2"
+    assert receipt["raw_index_bytes"] == 175
+    assert receipt.pop("receipt_hash") == archive_evidence_hash(receipt)
+    assert docker == ["context", "info", "inspect"]
+    evidence["/var/lib/docker"] = replace(evidence["/var/lib/docker"], available_bytes=699)
+    with pytest.raises(RuntimeError, match="insufficient: tier=ssd available=699 required=700"):
+        check(binder)
+
+
+def test_approved_plan_requires_bound_mounts_and_copy_headroom(physical_plan):
+    plan, _evidence, _info, _docker, bind, _check = physical_plan
+    with pytest.raises(RuntimeError, match="approved_plan_changed"):
+        bind(changed=True)
+    with pytest.raises(ValueError, match="plan_scope_changed"):
+        bind(archive="/unapproved/archives")
+    plan["hdd"]["temporary_bytes"] = 199
+    with pytest.raises(ValueError, match="plan_scope_changed"):
+        bind()
+
+
+def test_refuses_growth_and_qualified_device_changes(physical_plan, monkeypatch):
+    _, evidence, info, docker, bind, check = physical_plan
+    binder = bind()
+    with pytest.raises(RuntimeError, match="raw_index_copy_budget_exceeded"):
+        check(binder, raw_index_bytes=201)
+    with pytest.raises(RuntimeError, match="history_registration_changed"):
+        check(binder, history_filesystem_uuid="other-hdd")
+    assert not docker
+    with monkeypatch.context() as patch:
+        patch.setenv("DOCKER_HOST", "tcp://other-machine:2375")
+        with pytest.raises(RuntimeError, match="requires_local_docker"):
+            check(binder)
+    original_root = info["DockerRootDir"]
+    info["DockerRootDir"] = "/unapproved"
+    with pytest.raises(RuntimeError, match="docker_root_changed"):
+        check(binder)
+    info["DockerRootDir"] = original_root
+    pg_wal = "/var/lib/docker/volumes/test-db/_data/pg_wal"
+    evidence[pg_wal] = replace(evidence[pg_wal], device_id="8:3")
+    with pytest.raises(RuntimeError, match="postgresql_device_changed: member=wal"):
+        check(binder)
+    evidence[pg_wal] = replace(evidence[pg_wal], device_id="8:1")
+    evidence["/history/archives"] = replace(evidence["/history/archives"], device_id="8:3")
+    with pytest.raises(RuntimeError, match="requires_distinct_bound_devices"):
+        check(binder)
