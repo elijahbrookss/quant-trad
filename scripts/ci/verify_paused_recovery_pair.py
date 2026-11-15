@@ -38,6 +38,8 @@ _PAUSED = text("""
            pg_last_wal_replay_lsn()::text AS replay_lsn,
            pg_last_wal_replay_lsn() >= CAST(:minimum AS pg_lsn) AS reached_minimum,
            current_setting('recovery_target') AS recovery_target,
+           current_setting('recovery_target_lsn') AS recovery_target_lsn,
+           current_setting('recovery_target_inclusive') AS recovery_target_inclusive,
            current_setting('recovery_target_timeline') AS recovery_timeline,
            current_setting('recovery_target_action') AS recovery_action,
            current_setting('archive_mode') AS archive_mode,
@@ -98,12 +100,19 @@ def _mount_paths(args):
     return {"attempt": attempt_id, "paths": paths, "socket": _identity(info)}
 
 
-def _probe(conn, args, pair):
+def _lsn(value):
+    if isinstance(value, str) and re.fullmatch(r"[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}", value):
+        return tuple(int(part, 16) for part in value.split("/"))
+    return (0, 0)
+
+
+def _probe(conn, args, pair, *, target_lsn=None, replay_lsn=None):
     state = dict(conn.execute(_PAUSED, {"minimum": args.minimum_replay_lsn}).mappings().one())
     expected = {
         "database": args.database, "role": args.role, "role_oid": args.role_oid, "role_unchanged": True,
         "checkpoint_timeline": args.timeline, "in_recovery": True,
-        "pause_state": "paused", "reached_minimum": True, "recovery_target": "immediate",
+        "pause_state": "paused", "reached_minimum": True,
+        "recovery_target": "immediate" if target_lsn is None else "",
         "recovery_timeline": str(args.timeline), "recovery_action": "pause", "archive_mode": "off",
         "archive_only": True, "no_wal_receiver": True, "socket_only": True,
         "data_directory": str(args.pgdata), "socket_directories": str(args.socket),
@@ -111,6 +120,12 @@ def _probe(conn, args, pair):
     }
     identity = f"{state['system_identifier']}/{state['database_oid']}"
     changed = sorted(key for key, value in expected.items() if state[key] != value)
+    if target_lsn is not None and (
+        _lsn(state["recovery_target_lsn"]) != _lsn(target_lsn)
+        or _lsn(state["replay_lsn"]) != _lsn(replay_lsn)
+        or state["recovery_target_inclusive"] != "on"
+    ):
+        changed.append("recovery_lsn")
     if identity != pair["database_identity"] or changed:
         raise RuntimeError(f"paused_recovery_native_state_changed: {','.join(changed) or 'database_identity'}")
     spaces = conn.execute(text("""
@@ -141,7 +156,7 @@ def _catalog_closure(conn, baseline, max_objects, check, check_sql):
     return len(seen), required_bytes, digest.hexdigest()
 
 
-def _verify(args):
+def _check_scope(args):
     if (not 1 <= args.timeout_seconds <= 86400 or not 1 <= args.statement_timeout_seconds <= 600
             or not 1 <= args.max_objects <= MAX_RECOVERY_OBJECTS or not 1 <= args.port <= 65535
             or any(not 0 < oid < 2**32 for oid in (args.timeline, args.tablespace_oid, args.role_oid))
@@ -153,6 +168,36 @@ def _verify(args):
                        for value in (args.database, args.role))
             or any(os.environ.get(name) for name in ("PGHOSTADDR", "PGSERVICE", "PGPASSWORD"))):
         raise ValueError("paused_recovery_invalid_scope_or_inherited_connection")
+
+
+def _read_pair(args):
+    if not os.statvfs(args.receipt).f_flag & os.ST_RDONLY:
+        raise ValueError("paused_recovery_requires_readonly_pair_receipt")
+    pair = _bound_json(args.receipt, args.receipt_sha256)
+    if (not isinstance(pair, dict) or pair.get("schema_version") != "qt.encrypted_recovery_pair.v1"
+            or pair.get("restore_endpoint") != "immediate"
+            or not isinstance(pair.get("storage_layout"), dict)
+            or pair["storage_layout"].get("layout_version") != "market.fact_storage_tiers.v2"):
+        raise ValueError("paused_recovery_pair_outside_original_immediate_scope")
+    return pair
+
+
+def _readonly_engine(args, check):
+    url = URL.create("postgresql+psycopg2", username=args.role, database=args.database,
+                     query={"host": str(args.socket), "port": str(args.port), "passfile": "/dev/null",
+                            "sslmode": "disable", "gssencmode": "disable",
+                            "connect_timeout": str(max(2, min(5, int(check())))),
+                            "options": "-c default_transaction_read_only=on"})
+    return create_engine(url, poolclass=NullPool, isolation_level="REPEATABLE READ", hide_parameters=True)
+
+
+def _bound_statement(conn, check, seconds):
+    milliseconds = max(1, int(1000 * min(check(), seconds)))
+    conn.execute(text("SELECT set_config('statement_timeout', :timeout, true)"), {"timeout": str(milliseconds)})
+
+
+def _verify(args):
+    _check_scope(args)
     start = monotonic()
     deadline = start + args.timeout_seconds
 
@@ -163,24 +208,11 @@ def _verify(args):
         return remaining
 
     paths = _mount_paths(args)
-    if not os.statvfs(args.receipt).f_flag & os.ST_RDONLY:
-        raise ValueError("paused_recovery_requires_readonly_pair_receipt")
-    pair = _bound_json(args.receipt, args.receipt_sha256)
-    if (not isinstance(pair, dict) or pair.get("schema_version") != "qt.encrypted_recovery_pair.v1"
-            or pair.get("restore_endpoint") != "immediate"
-            or not isinstance(pair.get("storage_layout"), dict)
-            or pair["storage_layout"].get("layout_version") != "market.fact_storage_tiers.v2"):
-        raise ValueError("paused_recovery_pair_outside_original_immediate_scope")
-    url = URL.create("postgresql+psycopg2", username=args.role, database=args.database,
-                     query={"host": str(args.socket), "port": str(args.port), "passfile": "/dev/null",
-                            "sslmode": "disable", "gssencmode": "disable",
-                            "connect_timeout": str(max(2, min(5, int(check())))),
-                            "options": "-c default_transaction_read_only=on"})
-    engine = create_engine(url, poolclass=NullPool, isolation_level="REPEATABLE READ", hide_parameters=True)
+    pair = _read_pair(args)
+    engine = _readonly_engine(args, check)
 
     def bound(conn):
-        milliseconds = max(1, int(1000 * min(check(), args.statement_timeout_seconds)))
-        conn.execute(text("SELECT set_config('statement_timeout', :timeout, true)"), {"timeout": str(milliseconds)})
+        _bound_statement(conn, check, args.statement_timeout_seconds)
 
     def bind(conn):
         conn.exec_driver_sql("SET TRANSACTION READ ONLY")
@@ -228,19 +260,24 @@ def _verify(args):
     return receipt | {"verification_sha256": archive_evidence_hash(receipt)}
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, epilog=(
-        "Baseline-only objects are permitted because the paired archive inventory is captured after the physical "
-        "backup endpoint. Every object referenced by the paused catalog must match the verified baseline."
-    ))
+def _add_scope_arguments(parser):
     for name in ("attempt-root", "pgdata", "socket", "tablespace", "archive-root", "receipt"):
         parser.add_argument(f"--{name}", type=Path, required=True)
-    for name in ("database", "role", "device-id", "tablespace-name", "receipt-sha256", "minimum-replay-lsn"):
+    for name in ("database", "role", "device-id", "tablespace-name", "receipt-sha256"):
         parser.add_argument(f"--{name}", required=True)
     for name in ("pgdata-inode", "role-oid", "tablespace-oid", "tablespace-inode", "timeline", "max-objects", "timeout-seconds"):
         parser.add_argument(f"--{name}", type=int, required=True)
     parser.add_argument("--port", type=int, default=5432)
     parser.add_argument("--statement-timeout-seconds", type=int, default=15)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, epilog=(
+        "Baseline-only objects are permitted because the paired archive inventory is captured after the physical "
+        "backup endpoint. Every object referenced by the paused catalog must match the verified baseline."
+    ))
+    _add_scope_arguments(parser)
+    parser.add_argument("--minimum-replay-lsn", required=True)
     args = parser.parse_args(argv)
     try:
         result = _verify(args)
