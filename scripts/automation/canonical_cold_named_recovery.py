@@ -28,6 +28,7 @@ from portal.backend.service.storage.recovery_copies import _json_write, _sync
 from scripts.automation.canonical_cold_collector_checks import RECEIPT_VERSION as COLLECTOR_RECEIPT_VERSION
 from scripts.automation.canonical_cold_receiver_ready import (
     PREPARED_READY_FILENAME, make_prepared_receiver_ready, prepared_receiver_scope, verify_prepared_receiver_ready,
+    verify_replayed_checkpoint_baseline,
 )
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, _identity, _private_root
 from scripts.automation.storage_host_boundary import load_receipt
@@ -46,6 +47,8 @@ from scripts.db.canonical_cold_recovery_wal_transfer import (
     _MAX_SEGMENTS, _baseline, _prefix_window, stage_final_wal, verify_wal_prefix,
 )
 from scripts.db.canonical_cold_prepared_custody import capture_prepared_custody
+from scripts.db.canonical_cold_replayed_checkpoint import build_replayed_checkpoint
+from scripts.db.canonical_cold_retained_wal import capture_retained_wal
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
@@ -558,7 +561,7 @@ def _open_receive_database(control_engine, target_engine, anchor, pgdata, tables
         conn.exec_driver_sql(f"ALTER DATABASE {quoted} ALLOW_CONNECTIONS true")
 
 
-def _empty_receiver_paths(site, workspace, pgdata, tablespaces):
+def _empty_receiver_paths(site, measured, workspace, pgdata, tablespaces):
     root, root_id = _private_root(site.receiving)
     workspace, work_id = _private_root(workspace)
     pgdata, pgdata_id = _private_root(pgdata)
@@ -575,13 +578,13 @@ def _empty_receiver_paths(site, workspace, pgdata, tablespaces):
     if any(left != right and (left.is_relative_to(right) or right.is_relative_to(left))
            for left, _ in destinations.values() for right, _ in destinations.values()):
         raise ValueError("canonical_named_recovery_receiver_tablespace_invalid")
-    _assert_receiver_preflight_mounts(site.checked_preflight(), root, workspace, pgdata, destinations)
+    _assert_receiver_preflight_mounts(measured, root, workspace, pgdata, destinations)
     return root, workspace, pgdata, destinations, ((root, root_id), (workspace, work_id), (pgdata, pgdata_id), *destinations.values())
 
 
 @dataclass
-class _PreparedReceiver:
-    site: NamedRecoverySite
+class _NativeReceiver:
+    site: RecoverySitePolicy
     signer: Ed25519PrivateKey
     root: Path
     roots: tuple
@@ -595,26 +598,38 @@ class _PreparedReceiver:
     settings_sha256: str
     unarmed: str
     base_restore: Path
+    owner_pid: int
+
+
+@dataclass
+class _PreparedReceiver(_NativeReceiver):
     baseline: PreparedArchiveBaseline
     custody: object
     ready: dict
     digest: str
-    owner_pid: int
+    retained_wal: object = None
     active: bool = True
     armed: bool = False
 
 
+@dataclass
+class _StagedReplayedReceiver:
+    native: _NativeReceiver
+    measured: dict
+    checkpoint: dict
+    inventory: Path
+    archive_objects: Path
+    baseline: PreparedArchiveBaseline
+    custody: object
+    retained_wal: object
+    active: bool = True
+    used: bool = False
+
+
 @contextmanager
-def prepare_named_receiver(*, site, signing_key, pgbackrest, restic, database_key, base_archive_key,
-                           workspace, pgdata, tablespaces, timeout_seconds, ready_seconds, max_custody_entries):
-    """Prepare the exact native base and hold its private custody until named recovery."""
-    if not isinstance(site, NamedRecoverySite) or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86_400:
-        raise ValueError("canonical_named_recovery_invalid_preparation")
-    if site.replayed_checkpoint_sha256 is not None:
-        raise ValueError("canonical_named_recovery_replayed_custody_required")
-    if type(ready_seconds) is not int or not 1 <= ready_seconds <= MAX_MIGRATION_SECONDS:
-        raise ValueError("canonical_named_recovery_invalid_readiness_lease")
-    root, workspace, pgdata, destinations, roots = _empty_receiver_paths(site, workspace, pgdata, tablespaces)
+def _restored_receiver(*, site, measured, signing_key, pgbackrest, restic, database_key, base_archive_key,
+                       workspace, pgdata, tablespaces, timeout_seconds):
+    root, workspace, pgdata, destinations, roots = _empty_receiver_paths(site, measured, workspace, pgdata, tablespaces)
     deadline = monotonic() + timeout_seconds
 
     def check():
@@ -637,7 +652,6 @@ def prepare_named_receiver(*, site, signing_key, pgbackrest, restic, database_ke
             raise RuntimeError("canonical_named_recovery_prepared_workspace_busy") from None
         if _identity(os.fstat(owner)) != dict(roots)[workspace] or os.path.lexists(root / PREPARED_READY_FILENAME):
             raise RuntimeError("canonical_named_recovery_preparation_already_used")
-        measured = site.checked_preflight()
         verifier = site.baseline_verification
         pair = _baseline(root, site.base_transfer_sha256, verifier, verifier["verification_sha256"])
         base_restore = workspace / "base-archive"
@@ -647,40 +661,16 @@ def prepare_named_receiver(*, site, signing_key, pgbackrest, restic, database_ke
             tablespaces={name: path for name, (path, _) in destinations.items()}, pgbackrest=pgbackrest,
             database_key=database_key, pair=pair, unarmed=unarmed, budget=site.database, deadline=deadline, check=check)
         try:
-            native = verify_handoff(repository=root, receipt_sha256=verifier["pair_receipt_sha256"],
+            report = verify_handoff(repository=root, receipt_sha256=verifier["pair_receipt_sha256"],
                 archive_restore=base_restore, pgbackrest=pgbackrest, restic=restic, database_key=database_key,
-                archive_key=base_archive_key, timeout_seconds=check(), max_archive_bytes=site.archive.bytes,
+                archive_key=base_archive_key, timeout_seconds=min(check(), 86_400), max_archive_bytes=site.archive.bytes,
                 max_archive_objects=site.max_archive_objects, wal_segment_bytes=verifier["wal_segment_bytes"],
                 max_wal_segments=verifier["wal_segments"], reserve_bytes=site.archive.reserve_bytes, native_workspace=workspace)
-            if native != verifier:
+            if report != verifier:
                 raise RuntimeError("canonical_named_recovery_prepared_baseline_changed")
-            with capture_prepared_custody(pgdata=pgdata,
-                    tablespaces={name: path for name, (path, _) in destinations.items()}, archive_root=base_restore,
-                    max_entries=max_custody_entries, check=check) as custody:
-                baseline = prepare_archive_baseline(root / "complete.json", base_restore,
-                    expected_receipt_sha256=native["pair_receipt_sha256"], max_objects=site.max_archive_objects, check=check)
-                auto = _prepared_configuration(pgdata, unarmed)
-                custody.assert_held(check)
-                settings_sha256 = _file_hash(settings)
-                materialized = archive_evidence_hash({"custody_sha256": custody.sha256, "entries": custody.entries,
-                    "native_verification_sha256": native["verification_sha256"], "tablespace_oids": space_oids,
-                    "recovery_configuration_sha256": hashlib.sha256(auto).hexdigest()})
-                scope = _ready_scope(site, measured)
-                body = make_prepared_receiver_ready(scope=scope, materialized_sha256=materialized, expires_at=int(time()) + ready_seconds)
-                digest = verify_prepared_receiver_ready(body, scope=scope)
-                ready = _sign(body, signer)
-                _publish(root / PREPARED_READY_FILENAME, ready)
-                prepared = _PreparedReceiver(site, signer, root, roots, workspace, pgdata, destinations, space_oids,
-                    pgbackrest, restic, settings, settings_sha256, unarmed, base_restore, baseline, custody, ready, digest, os.getpid())
-                try:
-                    yield prepared
-                finally:
-                    prepared.active = False
-                    ready_path = root / PREPARED_READY_FILENAME
-                    if (_identity(root.lstat()) == dict(roots)[root] and ready_path.exists()
-                            and load_receipt(ready_path, max_bytes=_MAX_RECEIPT) == ready):
-                        ready_path.unlink()
-                        _sync(root)
+            native = _NativeReceiver(site, signer, root, roots, workspace, pgdata, destinations, space_oids,
+                pgbackrest, restic, settings, _file_hash(settings), unarmed, base_restore, os.getpid())
+            yield native, check
         finally:
             settings.unlink()
             _sync(workspace)
@@ -688,15 +678,211 @@ def prepare_named_receiver(*, site, signing_key, pgbackrest, restic, database_ke
         os.close(owner)
 
 
+@contextmanager
+def _publish_prepared_receiver(native, site, measured, baseline, custody, ready_seconds, check, *,
+                               checkpoint=None, retained_wal=None, archive_objects=None):
+    custody.assert_held(check)
+    auto = _prepared_configuration(native.pgdata, native.unarmed, replayed=checkpoint is not None)
+    if _file_hash(native.settings) != native.settings_sha256:
+        raise RuntimeError("canonical_named_recovery_prepared_pgbackrest_configuration_changed")
+    materialized = {"custody_sha256": custody.sha256, "entries": custody.entries,
+        "native_verification_sha256": site.baseline_verification["verification_sha256"],
+        "tablespace_oids": native.tablespace_oids, "recovery_configuration_sha256": hashlib.sha256(auto).hexdigest()}
+    if retained_wal is not None:
+        retained_wal.assert_held(check)
+        materialized["retained_wal_sha256"] = retained_wal.sha256
+    scope = _ready_scope(site, measured)
+    body = make_prepared_receiver_ready(scope=scope, materialized_sha256=archive_evidence_hash(materialized),
+        expires_at=int(time()) + ready_seconds, replayed_checkpoint=checkpoint, baseline_verification=site.baseline_verification)
+    digest = _verify_site_ready(site, body, scope=scope)
+    ready = _sign(body, native.signer)
+    ready_path = native.root / PREPARED_READY_FILENAME
+    check()
+    _publish(ready_path, ready)
+    fields = vars(native) | {"site": site}
+    if archive_objects is not None:
+        fields["base_restore"] = archive_objects
+    prepared = _PreparedReceiver(**fields, baseline=baseline, custody=custody, ready=ready,
+                                 digest=digest, retained_wal=retained_wal)
+    try:
+        yield prepared
+    finally:
+        prepared.active = False
+        if (_identity(native.root.lstat()) == dict(native.roots)[native.root] and ready_path.exists()
+                and load_receipt(ready_path, max_bytes=_MAX_RECEIPT) == ready):
+            ready_path.unlink()
+            _sync(native.root)
+
+
+def _custody(native, archive_root, max_custody_entries, check):
+    return capture_prepared_custody(pgdata=native.pgdata,
+        tablespaces={name: path for name, (path, _) in native.destinations.items()}, archive_root=archive_root,
+        max_entries=max_custody_entries, check=check)
+
+
+@contextmanager
+def prepare_named_receiver(*, site, signing_key, pgbackrest, restic, database_key, base_archive_key,
+                           workspace, pgdata, tablespaces, timeout_seconds, ready_seconds, max_custody_entries):
+    """Prepare the exact native base and hold its private custody until named recovery."""
+    if not isinstance(site, NamedRecoverySite) or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86_400:
+        raise ValueError("canonical_named_recovery_invalid_preparation")
+    if site.replayed_checkpoint_sha256 is not None:
+        raise ValueError("canonical_named_recovery_replayed_custody_required")
+    _check_ready_lease(ready_seconds)
+    measured = site.checked_preflight()
+    with _restored_receiver(site=site, measured=measured, signing_key=signing_key, pgbackrest=pgbackrest, restic=restic,
+            database_key=database_key, base_archive_key=base_archive_key, workspace=workspace, pgdata=pgdata,
+            tablespaces=tablespaces, timeout_seconds=timeout_seconds) as (native, check):
+        with _custody(native, native.base_restore, max_custody_entries, check) as custody:
+            baseline = prepare_archive_baseline(native.root / "complete.json", native.base_restore,
+                expected_receipt_sha256=site.baseline_verification["pair_receipt_sha256"],
+                max_objects=site.max_archive_objects, check=check)
+            with _publish_prepared_receiver(native, site, measured, baseline, custody, ready_seconds, check) as prepared:
+                yield prepared
+
+
+def _check_ready_lease(ready_seconds):
+    if type(ready_seconds) is not int or not 1 <= ready_seconds <= MAX_MIGRATION_SECONDS:
+        raise ValueError("canonical_named_recovery_invalid_readiness_lease")
+
+
+@contextmanager
+def prepare_replayed_receiver(*, site, receiver_preflight, signing_key, pgbackrest, restic, database_key, base_archive_key,
+                              workspace, pgdata, tablespaces, timeout_seconds, max_custody_entries, replay_before_approval):
+    """Build a later stopped recovery point and keep its custody while it is reviewed."""
+    if (not isinstance(site, RecoverySitePolicy) or isinstance(site, NamedRecoverySite)
+            or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS
+            or not callable(replay_before_approval)):
+        raise ValueError("canonical_named_recovery_invalid_replay_preparation")
+    measured = verify_receiver_preflight(receiver_preflight, site.receiver_public_key)
+    if measured["site_policy"] != site.preflight_scope():
+        raise ValueError("canonical_named_recovery_preflight_policy_changed")
+    with _restored_receiver(site=site, measured=measured, signing_key=signing_key, pgbackrest=pgbackrest, restic=restic,
+            database_key=database_key, base_archive_key=base_archive_key, workspace=workspace, pgdata=pgdata,
+            tablespaces=tablespaces, timeout_seconds=timeout_seconds) as (native, check):
+        baseline = site.baseline_verification
+        unarmed = _prepared_configuration(native.pgdata, native.unarmed)
+        attempt = archive_evidence_hash({"receiver_preflight_sha256": measured["measurement_sha256"],
+                                        "preparation": native.unarmed})
+        prefixes = []
+        authenticating = True
+
+        def authenticate_prefix(*, after, through, prefix_sha256, previous_prefix_sha256=None, limits=None):
+            if not authenticating or native.owner_pid != os.getpid():
+                raise ValueError("canonical_named_recovery_live_replay_preparation_required")
+            head = prefixes[-1]["body"] if prefixes else None
+            expected = (baseline["wal_backup_stop"], None) if head is None else (head["through"], head["wal_prefix_sha256"])
+            if (after, previous_prefix_sha256) != expected:
+                raise ValueError("canonical_named_recovery_prefix_chain_changed")
+            limits = _prefix_limits(site, limits)
+            expires = monotonic() + min(check(), limits.seconds)
+
+            def check_batch():
+                seconds = min(check(), int(expires - monotonic()))
+                if seconds < 1:
+                    raise TimeoutError("canonical_named_recovery_prepared_wal_deadline")
+                return seconds
+
+            envelope = _authenticate_wal_prefix(native, attempt, after=after, through=through, prefix_sha256=prefix_sha256,
+                previous_prefix_sha256=previous_prefix_sha256, limits=limits, deadline=expires, check=check_batch)
+            prefixes.append(envelope)
+            return envelope
+
+        try:
+            result = replay_before_approval(pgdata=native.pgdata, base_restore=native.base_restore,
+                                            authenticate_prefix=authenticate_prefix, check=check)
+        finally:
+            authenticating = False
+        if not isinstance(result, dict) or not {"paused_receipt", "archive_receipt", "stopped_control",
+                "stopped_control_sha256", "archive_inventory", "archive_objects"} <= result.keys():
+            raise ValueError("canonical_named_recovery_replay_evidence_required")
+        if _prepared_configuration(native.pgdata, native.unarmed, replayed=True) != unarmed:
+            raise RuntimeError("canonical_named_recovery_unarmed_configuration_changed")
+        wal = verify_wal_prefix_chain(site=site, prepared_sha256=attempt, prefixes=prefixes)
+        archive_receipt = result["archive_receipt"]
+        archive_objects, objects_id = _private_root(result["archive_objects"])
+        archive_root, archive_id = _private_root(archive_objects.parent)
+        inventory = Path(result["archive_inventory"])
+        protected_roots = (native.root, native.pgdata, native.base_restore, *(path for path, _ in native.destinations.values()))
+        if (native.workspace.is_relative_to(archive_root)
+                or not (objects_id[0] == archive_id[0] == dict(native.roots)[native.workspace][0])
+                or any(archive_root.is_relative_to(path) or path.is_relative_to(archive_root) for path in protected_roots)
+                or inventory.parent != archive_root or archive_receipt.get("catalog_inventory_path") != str(inventory)
+                or archive_receipt.get("pgdata") != str(native.pgdata)
+                or archive_receipt.get("pgdata_inode") != native.pgdata.stat().st_ino
+                or archive_receipt.get("suffix_root") != str(archive_objects)
+                or archive_receipt.get("suffix_inode") != archive_id[1]):
+            raise ValueError("canonical_named_recovery_replayed_archive_scope_changed")
+        checkpoint = build_replayed_checkpoint(
+            pair_receipt_sha256=baseline["pair_receipt_sha256"], database_identity=baseline["database_identity"],
+            timeline=result["paused_receipt"]["timeline"], paused_receipt=result["paused_receipt"],
+            archive_receipt=archive_receipt, stopped_control=result["stopped_control"],
+            stopped_control_sha256=result["stopped_control_sha256"],
+            **{field: wal[field] for field in ("wal_first", "wal_verified_through", "wal_segment_bytes", "wal_verification_sha256")})
+        verify_replayed_checkpoint_baseline(checkpoint, baseline_verification=baseline,
+                                           expected_checkpoint_sha256=checkpoint["verification_sha256"])
+        with _custody(native, archive_root, max_custody_entries, check) as custody:
+            _check_stopped_control(native.pgdata, checkpoint)
+            archive = prepare_replayed_archive_baseline(inventory, checkpoint=checkpoint, max_objects=site.max_archive_objects,
+                                                        archive_objects=archive_objects, check=check)
+            retained = capture_retained_wal(receiving=native.root, baseline=baseline,
+                base_transfer_sha256=site.base_transfer_sha256, checkpoint=checkpoint,
+                checkpoint_sha256=checkpoint["verification_sha256"], wal_verification=wal, prefix_receipts=prefixes,
+                max_segments=wal["prefix_segments"] + baseline["wal_segments"],
+                native_verify=lambda records: _verify_native_wal_entries(native, records, monotonic() + check(), check),
+                check=check)
+            custody.assert_held(check)
+            staged = _StagedReplayedReceiver(native, measured, checkpoint, inventory, archive_objects, archive, custody, retained)
+            try:
+                yield staged
+            finally:
+                staged.active = False
+
+
+@contextmanager
+def seal_replayed_receiver(*, staged, site, ready_seconds):
+    """Publish readiness for the exact reviewed, still-held replayed receiver."""
+    _check_ready_lease(ready_seconds)
+    if (not isinstance(staged, _StagedReplayedReceiver) or not staged.active or staged.used
+            or staged.native.owner_pid != os.getpid() or not isinstance(site, NamedRecoverySite)
+            or site.checked_preflight() != staged.measured
+            or staged.baseline.checkpoint_sha256 != site.replayed_checkpoint_sha256
+            or site.replayed_checkpoint_sha256 != staged.checkpoint["verification_sha256"]):
+        raise ValueError("canonical_named_recovery_replayed_custody_required")
+    if len(staged.retained_wal.files) >= site.max_restart_segments:
+        raise ValueError("canonical_named_recovery_replayed_restart_budget_insufficient")
+    deadline = monotonic() + ready_seconds
+
+    def check():
+        if monotonic() >= deadline:
+            raise TimeoutError("canonical_named_recovery_receiver_deadline")
+        _check_receiver_roots(staged.native.roots)
+
+    _check_stopped_control(staged.native.pgdata, staged.checkpoint)
+    staged.used = True
+    with _publish_prepared_receiver(staged.native, site, staged.measured, staged.baseline, staged.custody, ready_seconds, check,
+            checkpoint=staged.checkpoint, retained_wal=staged.retained_wal, archive_objects=staged.archive_objects) as prepared:
+        yield prepared
+
+
+def _check_stopped_control(pgdata, checkpoint):
+    control = _private_bytes(pgdata / "global" / "pg_control", limit=8192)
+    if len(control) != 8192 or hashlib.sha256(control).hexdigest() != checkpoint["stopped_control_sha256"]:
+        raise RuntimeError("canonical_named_recovery_replayed_control_changed")
+
+
 def _check_receiver_roots(roots):
     if any(_identity(path.lstat()) != identity for path, identity in roots):
         raise RuntimeError("canonical_named_recovery_receiver_mount_changed")
 
 
-def _prepared_configuration(pgdata, unarmed):
+def _prepared_configuration(pgdata, unarmed, *, replayed=False):
     config = pgdata / "postgresql.auto.conf"
+    backup = pgdata / "backup_label"
+    recovery = pgdata / "recovery.signal"
     if (os.path.lexists(pgdata / "postmaster.pid") or os.path.lexists(pgdata / "standby.signal")
-            or any(not path.is_file() or path.is_symlink() for path in (pgdata / "backup_label", pgdata / "recovery.signal"))):
+            or not recovery.is_file() or recovery.is_symlink()
+            or (os.path.lexists(backup) if replayed else not backup.is_file() or backup.is_symlink())):
         raise RuntimeError("canonical_named_recovery_prepared_cluster_used")
     raw = _private_bytes(config, limit=65536)
     if (not re.search(rb"(?m)^recovery_target_name\s*=\s*'" + unarmed.encode() + rb"'\s*$", raw)
@@ -706,7 +892,7 @@ def _prepared_configuration(pgdata, unarmed):
 
 
 def _arm_prepared(prepared, anchor):
-    raw = _prepared_configuration(prepared.pgdata, prepared.unarmed)
+    raw = _prepared_configuration(prepared.pgdata, prepared.unarmed, replayed=prepared.retained_wal is not None)
     lines = [line for line in raw.splitlines(keepends=True)
              if not re.match(rb"\s*recovery_target(?:_[a-z_]+)?\s*=", line)]
     lines.extend((f"\nrecovery_target_name = '{anchor['restore_name']}'\n".encode(),
@@ -755,18 +941,41 @@ def _verify_native_wal_entries(prepared, wal, deadline, check):
     return entries
 
 
-def verify_prepared_wal_prefix(*, prepared, after, through, prefix_sha256, timeout_seconds,
-                               previous_prefix_sha256=None, limits=None):
-    """Authenticate one installed archive batch before the receiver starts replay."""
-    if (not isinstance(prepared, _PreparedReceiver) or not prepared.active or prepared.armed
-            or prepared.owner_pid != os.getpid() or type(timeout_seconds) is not int
-            or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS):
-        raise ValueError("canonical_named_recovery_live_prepared_receiver_required")
-    site = prepared.site
+def _prefix_limits(site, limits):
     limits = site.wal if limits is None else limits
     if (not isinstance(limits, TransferLimits) or any(getattr(limits, name) > getattr(site.wal, name)
             for name in ("seconds", "bytes", "files")) or limits.reserve_bytes < site.wal.reserve_bytes):
         raise ValueError("canonical_named_recovery_prefix_outside_site_budget")
+    return limits
+
+
+def _authenticate_wal_prefix(native, attempt, *, after, through, prefix_sha256, previous_prefix_sha256, limits, deadline, check):
+    site = native.site
+    verifier = site.baseline_verification
+    seconds = int(check())
+    if seconds < 1:
+        raise TimeoutError("canonical_named_recovery_receiver_deadline")
+    wal = verify_wal_prefix(receiving=native.root, base_transfer_sha256=site.base_transfer_sha256,
+        baseline=verifier, baseline_verification_sha256=verifier["verification_sha256"], after=after, through=through,
+        expected_hash=prefix_sha256, previous_prefix_sha256=previous_prefix_sha256,
+        limits=replace(limits, seconds=min(limits.seconds, seconds)))
+    entries = _verify_native_wal_entries(native, wal | {"wal_segment_bytes": verifier["wal_segment_bytes"]}, deadline, check)
+    return _sign({"schema": _WAL_PREFIX_VERIFICATION, "prepared_receiver_sha256": attempt,
+                  "pair_receipt_sha256": verifier["pair_receipt_sha256"],
+                  "baseline_verification_sha256": verifier["verification_sha256"], "wal_prefix_sha256": prefix_sha256,
+                  "previous_prefix_sha256": previous_prefix_sha256, "after": after, "through": through,
+                  "verified_wal_sha256": archive_evidence_hash(entries), "segments": len(entries)}, native.signer)
+
+
+def verify_prepared_wal_prefix(*, prepared, after, through, prefix_sha256, timeout_seconds,
+                               previous_prefix_sha256=None, limits=None):
+    """Authenticate one installed archive batch before the receiver starts replay."""
+    if (not isinstance(prepared, _PreparedReceiver) or not prepared.active or prepared.armed
+            or prepared.retained_wal is not None or prepared.owner_pid != os.getpid() or type(timeout_seconds) is not int
+            or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS):
+        raise ValueError("canonical_named_recovery_live_prepared_receiver_required")
+    site = prepared.site
+    limits = _prefix_limits(site, limits)
     measured = site.checked_preflight()
     ready = load_receipt(prepared.root / PREPARED_READY_FILENAME, max_bytes=_MAX_RECEIPT)
     if ready != prepared.ready:
@@ -784,25 +993,13 @@ def verify_prepared_wal_prefix(*, prepared, after, through, prefix_sha256, timeo
         return remaining
 
     prepared.custody.assert_held(check)
-    verifier = site.baseline_verification
-    seconds = int(check())
-    if seconds < 1:
-        raise TimeoutError("canonical_named_recovery_receiver_deadline")
-    wal = verify_wal_prefix(receiving=prepared.root, base_transfer_sha256=site.base_transfer_sha256,
-        baseline=verifier, baseline_verification_sha256=verifier["verification_sha256"], after=after, through=through,
-        expected_hash=prefix_sha256, previous_prefix_sha256=previous_prefix_sha256,
-        limits=replace(limits, seconds=min(limits.seconds, seconds)))
-    entries = _verify_native_wal_entries(prepared, wal | {"wal_segment_bytes": verifier["wal_segment_bytes"]},
-                                         deadline, check)
+    envelope = _authenticate_wal_prefix(prepared, prepared.digest, after=after, through=through, prefix_sha256=prefix_sha256,
+        previous_prefix_sha256=previous_prefix_sha256, limits=limits, deadline=deadline, check=check)
     prepared.custody.assert_held(check)
     if load_receipt(prepared.root / PREPARED_READY_FILENAME, max_bytes=_MAX_RECEIPT) != ready:
         raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
     check()
-    return _sign({"schema": _WAL_PREFIX_VERIFICATION,
-                  "prepared_receiver_sha256": prepared.digest, "pair_receipt_sha256": verifier["pair_receipt_sha256"],
-                  "baseline_verification_sha256": verifier["verification_sha256"], "wal_prefix_sha256": prefix_sha256,
-                  "previous_prefix_sha256": previous_prefix_sha256, "after": after, "through": through,
-                  "verified_wal_sha256": archive_evidence_hash(entries), "segments": len(entries)}, prepared.signer)
+    return envelope
 
 
 def verify_wal_prefix_chain(*, site, prepared_sha256, prefixes):
@@ -923,6 +1120,12 @@ def recover_named_site(*, prepared, suffix_key, pending_key, boot_isolated, veri
         if pending_verified["segments"] != source["segments"]:
             raise RuntimeError("canonical_named_recovery_pending_receipts_differ")
     prepared.custody.assert_held(check)
+    checkpoint = ready_body.get("replayed_checkpoint")
+    if checkpoint is not None:
+        if prepared.retained_wal is None or prepared.baseline.checkpoint_sha256 != checkpoint["verification_sha256"]:
+            raise RuntimeError("canonical_named_recovery_replayed_custody_required")
+        _check_stopped_control(pgdata, checkpoint)
+        prepared.retained_wal.assert_held(check)
     _arm_prepared(prepared, anchor)
     with boot_isolated(pgdata, check) as (control_engine, target_engine):
         _open_receive_database(control_engine, target_engine, anchor, pgdata, destinations, prepared.tablespace_oids, check)
