@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from time import monotonic, sleep
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -679,15 +680,17 @@ def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, bas
 
 
 def _run_source_operator_fixture(*, engine, worker, policy, signed_preflight, scratch, generated, boundary,
-                                 authenticate_prefix, check):
+                                 authenticate_prefix=None, check=None, receiver_inbox=None):
     from scripts.automation.canonical_cold_receiver_operator import _replay_selection
     from scripts.automation.canonical_cold_source_operator import PLAN_VERSION
 
     setup = scratch / "source-operator"
     state = setup / "state"
-    inbox = setup / "receiver-inbox"
-    for path in (setup, state, inbox):
+    inbox = receiver_inbox or setup / "receiver-inbox"
+    for path in (setup, state):
         path.mkdir(mode=0o700)
+    if receiver_inbox is None:
+        inbox.mkdir(mode=0o700)
     pgdata = setup / "source-control"
     (pgdata / "global").mkdir(mode=0o700, parents=True)
     pgdata.chmod(0o700)
@@ -765,10 +768,15 @@ def _run_source_operator_fixture(*, engine, worker, policy, signed_preflight, sc
              for path in [progress_path, *receipts]]
     assert after == before
     selection_path = inbox / "replay-selection.json"
-    shutil.copy2(announced["selection"], selection_path)
-    assert hashlib.sha256(selection_path.read_bytes()).hexdigest() == announced["selection_sha256"]
-    measured = signed_preflight["body"]
-    selection = _replay_selection(selection_path, policy, measured, check)
+    selection_content = Path(announced["selection"]).read_bytes()
+    assert hashlib.sha256(selection_content).hexdigest() == announced["selection_sha256"]
+    if receiver_inbox is None:
+        shutil.copy2(announced["selection"], selection_path)
+    else:
+        from tests.test_market_data.local_receiver_operator_fixture import publish_bytes
+
+        publish_bytes(selection_path, selection_content)
+    selection = load_receipt(selection_path)
     native_result = Path(announced["target_receipt"])
     assert hashlib.sha256(native_result.read_bytes()).hexdigest() == announced["target_receipt_sha256"]
     native = load_receipt(native_result)
@@ -780,8 +788,10 @@ def _run_source_operator_fixture(*, engine, worker, policy, signed_preflight, sc
     segments = [row["segment"] for batch in check_wal for row in batch]
     assert segments == _wal_range(baseline["wal_backup_stop"], generated[-1], baseline["wal_segment_bytes"], 7)[1:]
     assert native["wal_sha1"] == check_wal[-1][-1]["wal_checksum"]
-    for batch in selection["prefixes"]:
-        authenticate_prefix(**batch)
+    if authenticate_prefix is not None:
+        selection = _replay_selection(selection_path, policy, signed_preflight["body"], check)
+        for batch in selection["prefixes"]:
+            authenticate_prefix(**batch)
     assert not (policy.receiving / "encrypted-wal-transfer.json").exists()
     print(f"QT_NATIVE_SOURCE_SELECTION batches={'+'.join(str(len(batch)) for batch in check_wal)} through={target['segment']} "
           f"target={target_lsn} replay={replay_lsn} resumed_pending={interrupted['pending']['through']} "
@@ -803,7 +813,9 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     replayed = os.getenv("QT_NAMED_REPLAYED_FIXTURE") == "1"
     runtime_fixture = os.getenv("QT_NAMED_RUNTIME_FIXTURE") == "1"
     source_fixture = os.getenv("QT_NAMED_SOURCE_FIXTURE") == "1"
+    operator_fixture = os.getenv("QT_NAMED_RECEIVER_OPERATOR") == "1"
     assert not source_fixture or replayed
+    assert not operator_fixture or (replayed and runtime_fixture and source_fixture)
     rolling_prefix = replayed or os.getenv("QT_TEST_ROLLING_WAL_PREFIX") == "1"
     with engine.begin() as conn:
         identity = _identity(conn)[0]
@@ -815,12 +827,19 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         if rolling_prefix:
             source_postmaster = conn.exec_driver_sql(_SOURCE_POSTMASTER).one()
             conn.exec_driver_sql("CREATE TABLE public.qt_named_wal_prefix_probe (record integer PRIMARY KEY)")
-    objects = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    archive_storage = tmp_path
+    if operator_fixture:
+        from tests.test_market_data.local_receiver_operator_fixture import ARCHIVE_STORAGE
+
+        archive_storage = ARCHIVE_STORAGE
+    objects = FilesystemRawArchiveObjectStore(archive_storage / "objects")
     structures, claim, series = _define_trade_stream(storage, monkeypatch)
-    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(archive_storage))
+    if operator_fixture:
+        monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(tmp_path))
     worker = _prepare_native_repository(engine, identity, tmp_path, monkeypatch)
     _, first_trade = _seal_trade(tmp_path, claim, trade_id="coordinator-before-backup")
-    _native_recover(structures, tmp_path)
+    _native_recover(structures, archive_storage)
     with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
         full = worker.create(snapshot, objects=objects, keep_copies=2)
     assert full["database_type"] == "full"
@@ -845,7 +864,12 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
 
     source = Ed25519PrivateKey.generate()
     receiver = Ed25519PrivateKey.generate()
-    source_sign = private_key("source-sign", source.private_bytes_raw().hex())
+    if operator_fixture:
+        source_sign = tmp_path / "source-sign"
+        source_sign.touch(mode=0o600)
+        source_sign.write_text(source.private_bytes_raw().hex())
+    else:
+        source_sign = private_key("source-sign", source.private_bytes_raw().hex())
     receiver_sign = private_key("receiver-sign", receiver.private_bytes_raw().hex())
     suffix_key = private_key("named-suffix", secrets.token_hex(32))
     pending_key = private_key("named-pending", secrets.token_hex(32))
@@ -874,9 +898,15 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     receiver_uuid = "postwrite-independent-fixture"
     udev = Path(os.environ["QT_STORAGE_UDEV_ROOT"])
     (udev / f"b{os.major(device)}:{os.minor(device)}").write_text(f"E:ID_FS_UUID={receiver_uuid}\n")
-    # This disposable server pair shares a single kernel. The independent host
-    # pins are fixture inputs. Capacity and native metadata are measured for real.
-    monkeypatch.setattr(preflight.named, "receiver_host_sha256", lambda: "c" * 64)
+    operator = None
+    if operator_fixture:
+        from tests.test_market_data.local_receiver_operator_fixture import LocalReceiverOperator
+
+        operator = LocalReceiverOperator(workspace=workspace, pgdata=pgdata, tablespace=history_path)
+        measured = operator.preflight(policy=policy, receiver_signing_key=receiver_sign, worker=worker, pair=pair)
+    else:
+        # Split-container predecessor uses explicit test-only host pins.
+        monkeypatch.setattr(preflight.named, "receiver_host_sha256", lambda: "c" * 64)
     mount = lambda path: preflight.ReceiverPath(path, receiver_uuid)
     preflight_options = dict(site=policy, receiver_signing_key=receiver_sign, expected_host_sha256="c" * 64,
         source_host_sha256="d" * 64, source_filesystem_uuids=(pair["filesystem_uuid"],), receiving=mount(receiving),
@@ -884,15 +914,16 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         pgbackrest=worker.pgbackrest, restic=worker.restic, database_key=worker.config.database_key_path,
         archive_key=worker.config.archive_key_path, pending_expected=True, runtime_bytes=16 * 1024**2,
         runtime_entries=128, max_manifest_entries=10_000, timeout_seconds=25)
-    with pytest.raises(ValueError, match="host_not_independent"):
-        preflight.measure_receiver_preflight(**(preflight_options | {"source_host_sha256": "c" * 64}))
-    with pytest.raises(RuntimeError, match="mount_identity_mismatch"):
-        preflight.measure_receiver_preflight(**(preflight_options | {"receiving": preflight.ReceiverPath(receiving, "wrong-uuid")}))
-    with pytest.raises(ValueError, match="tablespace_allowlist_changed"):
-        preflight.measure_receiver_preflight(**(preflight_options | {"tablespaces": {}}))
-    with pytest.raises(RuntimeError, match="capacity_insufficient"):
-        preflight.measure_receiver_preflight(**(preflight_options | {"runtime_bytes": 2 * 1024**3}))
-    measured = preflight.measure_receiver_preflight(**preflight_options)
+    if operator is None:
+        with pytest.raises(ValueError, match="host_not_independent"):
+            preflight.measure_receiver_preflight(**(preflight_options | {"source_host_sha256": "c" * 64}))
+        with pytest.raises(RuntimeError, match="mount_identity_mismatch"):
+            preflight.measure_receiver_preflight(**(preflight_options | {"receiving": preflight.ReceiverPath(receiving, "wrong-uuid")}))
+        with pytest.raises(ValueError, match="tablespace_allowlist_changed"):
+            preflight.measure_receiver_preflight(**(preflight_options | {"tablespaces": {}}))
+        with pytest.raises(RuntimeError, match="capacity_insufficient"):
+            preflight.measure_receiver_preflight(**(preflight_options | {"runtime_bytes": 2 * 1024**3}))
+        measured = preflight.measure_receiver_preflight(**preflight_options)
     sizing = measured["body"]
     assert sizing["database_targets"]["tablespace:qt_history_hdd-01"]["logical_bytes"] > 0
     assert sizing["archive_restore_files"] >= pair["archive_objects"]
@@ -906,13 +937,15 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
           f"workspace_required={capacity['required_bytes']} entries={capacity['required_entries']}")
     raw_ids = [first_trade.raw_record_id]
     if replayed:
-        prefix_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-prefix")
+        prefix_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-prefix",
+                                    storage_root=archive_storage)
         raw_ids.append(prefix_trade.raw_record_id)
         prefix_facts = _admitted_rows(storage.database, series)[0]
         prefix_commit = prefix_facts[-1].market_commit_seq
         generated, prefix_boundary = _emit_fixture_wal_prefix(engine, replayed=True)
         assert prefix_boundary[2] == generated[-1]
-    later_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-at-anchor")
+    later_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-at-anchor",
+                               storage_root=archive_storage)
     raw_ids.append(later_trade.raw_record_id)
     scope, records, _ = _pending_level2(storage, structures, pending_root)
     start = first_trade.received_at - timedelta(seconds=10)
@@ -1088,13 +1121,14 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         restic=worker.restic, database_key=worker.config.database_key_path, base_archive_key=worker.config.archive_key_path,
         workspace=workspace, pgdata=pgdata, tablespaces={"qt_history_hdd-01": history_path},
         timeout_seconds=100, max_custody_entries=10_000)
-    if replayed:
+    if replayed and operator is None:
         from tests.test_market_data.local_named_replayed_fixture import NativeReplayedFixture
 
         native_receiver = NativeReplayedFixture(database=engine.url.database, role=role, pgdata=pgdata)
-    receiver_options = dict(suffix_key=suffix_key, pending_key=pending_key,
-        boot_isolated=native_receiver.boot if replayed else boot_isolated,
-        verify_original_runtime=verify_original, timeout_seconds=100)
+    if operator is None:
+        receiver_options = dict(suffix_key=suffix_key, pending_key=pending_key,
+            boot_isolated=native_receiver.boot if replayed else boot_isolated,
+            verify_original_runtime=verify_original, timeout_seconds=100)
 
     def qualify_receiver(prepared):
         pg_control = pgdata / "global" / "pg_control"
@@ -1179,6 +1213,60 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
 
     @contextmanager
     def prepare_before_fence():
+        nonlocal package_path
+        if operator is not None:
+            from scripts.automation.canonical_cold_receiver_ready import PREPARED_READY_FILENAME
+            from tests.test_market_data.local_receiver_operator_package import (
+                measure_local_candidate_witness, publish_local_receiver_operator_package,
+            )
+
+            plan_pin = operator.start(policy=policy, measured=measured, target=target, role=role, role_oid=role_oid,
+                tablespace_oid=member[0], credentials={"receiver_signing_key": receiver_sign,
+                    "database_key": worker.config.database_key_path, "base_archive_key": worker.config.archive_key_path,
+                    "suffix_key": suffix_key, "pending_key": pending_key})
+            selection_phase = operator.phase("awaiting_replay_selection")
+            assert selection_phase["inbox"] == str(operator.inbox)
+            review_selection = _run_source_operator_fixture(engine=engine, worker=worker, policy=policy,
+                signed_preflight=measured, scratch=scratch, generated=generated, boundary=prefix_boundary,
+                receiver_inbox=operator.inbox)
+            approval_phase = operator.phase("awaiting_approval")
+            offer_path = Path(approval_phase["offer"])
+            offer = _opened(offer_path, policy.receiver_public_key)
+            checkpoint = offer["checkpoint"]
+            checkpoint_pin = approval_phase["checkpoint_sha256"]
+            assert offer["site_plan_sha256"] == plan_pin
+            assert checkpoint["verification_sha256"] == checkpoint_pin
+            assert checkpoint["accepted_commit_seq"] == prefix_commit < source_commit
+            assert checkpoint["redo_wal_segment"] == prefix_boundary[2] > base_native["wal_backup_stop"]
+            assert not (pgdata / "postmaster.pid").exists()
+            review = review_selection(offer_path, plan_pin, scope_hash)
+            assert (review["phase"], review["checkpoint_sha256"], review["archive_objects"]) == (
+                "receiver_offer_reviewed", checkpoint_pin, 2)
+            assert review["source_wal_files_now"] <= policy.wal.files
+            runtime = runtime_artifact()
+            with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
+                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+                witness = measure_local_candidate_witness(conn, store=objects, fact_version_id=expected[0].fact_version_id,
+                    dataset_id=frozen.dataset_id, dataset_hash=frozen.dataset_hash, series_id=series)
+            package_path, package, package_hash = publish_local_receiver_operator_package(inbox=operator.inbox,
+                target_database=target, source_commit_floor=source_commit, tablespace_oid=member[0],
+                checkpoint_sha256=checkpoint_pin, independent_recovery_path=Path(review["independent_recovery"]),
+                independent_recovery_sha256=review["independent_recovery_sha256"],
+                replay_equivalence_path=receipts / runtime["filename"], replay_equivalence_sha256=runtime["sha256"],
+                candidate_witness=witness, provider_scope=scope, spool_root=pending_root)
+            print(f"QT_STANDALONE_SOURCE_REVIEW checkpoint={checkpoint_pin} archive_objects=2 "
+                  f"source_wal_files={review['source_wal_files_now']} approval_package_sha256={package_hash}")
+            site = NamedRecoverySite(**vars(policy), approved_package_sha256=package_hash, receiver_preflight=measured,
+                replayed_checkpoint_sha256=checkpoint_pin, max_restart_segments=3)
+            recover_source = bind_named_recovery_source(site=site, signing_key=source_sign, provider_receipt_root=receipts,
+                database_repository=worker.root, archive_objects=objects.root, scratch=scratch, baseline=baseline,
+                restic=worker.restic, archive_key=suffix_key, pending_key=pending_key, pending_spool=pending_root,
+                replayed_inventory=Path(review["replayed_inventory"]))
+            ready_event = operator.phase("ready")
+            prepared = SimpleNamespace(ready=load_receipt(receiving / PREPARED_READY_FILENAME, max_bytes=1024**2),
+                                       digest=ready_event["prepared_receiver_sha256"])
+            yield prepared, site, package, package_hash, recover_source
+            return
         if replayed:
             from scripts.automation.canonical_cold_named_recovery import prepare_replayed_receiver, seal_replayed_receiver
 
@@ -1237,15 +1325,30 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
                         "evidence": {"source_commit_seq": source_commit, "pending_spool": before}}
             provider_hash = archive_evidence_hash(provider)
             save_receipt(receipts / f"collector-drained-{provider_hash}.json", provider | {"sha256": provider_hash}, initial=True)
-            with ThreadPoolExecutor(max_workers=1) as threads, archive_namespace(objects.root, exclusive=True) as check_archive:
-                result = threads.submit(qualify_receiver, prepared)
-                def remaining():
-                    if result.done():
-                        result.result()
-                    return fence.deadline - monotonic()
+            with archive_namespace(objects.root, exclusive=True) as check_archive:
+                if operator is None:
+                    with ThreadPoolExecutor(max_workers=1) as threads:
+                        result = threads.submit(qualify_receiver, prepared)
 
-                report = recover_source(fence, control, source_commit, provider_hash, remaining, check_archive)
-                reply = result.result(timeout=10)
+                        def remaining():
+                            if result.done():
+                                result.result()
+                            return fence.deadline - monotonic()
+
+                        report = recover_source(fence, control, source_commit, provider_hash, remaining, check_archive)
+                        reply = result.result(timeout=10)
+                else:
+                    def remaining():
+                        operator.check()
+                        return fence.deadline - monotonic()
+
+                    report = recover_source(fence, control, source_commit, provider_hash, remaining, check_archive)
+                    recovered = operator.phase("recovered", seconds=12)
+                    reply = _opened(receiving / "named-recovery-response.json", site.receiver_public_key)
+                    assert recovered["closure_sha256"] == reply["archive_closure"]["closure_sha256"]
+                    operator.finish()
+                    print(f"QT_STANDALONE_ORIGINAL_RUNTIME receipt_sha256={reply['runtime_sha256']} frozen_rows={len(expected)} "
+                          f"raw_manifests=2 pending_ids={len(records)}")
             assert reply["archive_closure"] == report["archive_closure"]
             assert report["archive_closure"]["receiver_runtime_sha256"] == reply["runtime_sha256"]
             coverage = report["archive_closure"]["coverage"]
@@ -1280,14 +1383,15 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             assert published["receiver_preflight_sha256"] == sizing["measurement_sha256"]
             assert published["receiver_response"] == report["receiver_response"]
             assert reply["prepared_receiver_sha256"] == prepared.digest
-            with pytest.raises(ValueError, match="live_prepared_receiver_required"):
-                recover_named_site(prepared=prepared, **receiver_options)
+            if operator is None:
+                with pytest.raises(ValueError, match="live_prepared_receiver_required"):
+                    recover_named_site(prepared=prepared, **receiver_options)
         finally:
             reopen_database_fence(fence, control, expected_outcome="original", read_outcome=lambda _: "original", record=lambda *_: None)
     if rolling_prefix:
         with engine.connect() as conn:
             assert conn.exec_driver_sql(_SOURCE_POSTMASTER).one() == source_postmaster
-        print("QT_ROLLING_WAL_SOURCE_STABLE exact_restored_probe_rows=5 source_postmaster_and_timeline=unchanged")
+        print("QT_ROLLING_WAL_SOURCE_STABLE source_postmaster_and_timeline=unchanged")
 
 
 def _prepare_native_repository(engine, identity, tmp_path, monkeypatch):
@@ -1355,14 +1459,14 @@ def _pending_level2(storage, structures, root):
     return scope, records, failed
 
 
-def _later_trade(structures, root, claim, record, *, trade_id="after-physical-endpoint"):
+def _later_trade(structures, root, claim, record, *, trade_id="after-physical-endpoint", storage_root=None):
     late = structures.claim_stream(definition_id=claim.definition_id, owner_id="post-point-fixture",
                                    lease_seconds=60, bounded=True)
     structures.append_session_event(late, event_ordinal=0, connection_epoch=0, event_type="session_started",
                                     occurred_at=record.received_at)
     structures.release(late)
     _, accepted = _seal_trade(root, late, trade_id=trade_id)
-    _native_recover(structures, root)
+    _native_recover(structures, storage_root or root)
     return accepted
 
 
