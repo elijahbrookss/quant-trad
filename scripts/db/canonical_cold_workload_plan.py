@@ -78,6 +78,7 @@ def _catalog(conn, *, dataset_id, series_id, frame, start, end, watermark):
         JOIN market.series AS s ON s.id=ds.series_id
         WHERE d.id=:dataset_id AND ds.series_id=:series_id
           AND s.instrument_id=:instrument AND s.fact_type='candle.ohlcv' AND s.timeframe_seconds=:frame
+          AND s.contract_version='candle.ohlcv.v1'
         LIMIT 2
     """), {"dataset_id": dataset_id, "series_id": series_id, "instrument": INSTRUMENT, "frame": frame}).mappings().all()
     if len(rows) != 1:
@@ -87,7 +88,7 @@ def _catalog(conn, *, dataset_id, series_id, frame, start, end, watermark):
             or not row["dataset_hash"].startswith(dataset_id.removeprefix("mds_"))
             or not 0 < row["max_commit_seq"] <= row["dataset_commit"] <= watermark
             or (row["range_start"], row["range_end"]) != (reads._timestamp(start), reads._timestamp(end))
-            or "candle.ohlcv.v1" not in row["payload_schemas"] or not 0 < row["row_count"] <= 44_641):
+            or not 0 < row["row_count"] <= 44_641):
         raise ValueError(f"saved dataset range, commit or contract differs: {dataset_id}/{series_id}")
     return row
 
