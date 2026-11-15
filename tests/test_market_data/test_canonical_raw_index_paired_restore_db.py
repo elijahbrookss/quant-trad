@@ -24,10 +24,15 @@ def _restore_same_path(worker, copied, selected, *target, tablespace):
     source = Path("/qt-history")
     restored = Path("/qt-restored-history")
     root = copied.parent
-    assert source.stat().st_dev != restored.stat().st_dev
+    source_id, restore_id = source.stat(), restored.stat()
+    same_device = os.getenv("QT_SAME_DEVICE_RECOVERY_TEST") == "1"
+    assert (source_id.st_dev == restore_id.st_dev) == same_device
+    assert (source_id.st_dev, source_id.st_ino) != (restore_id.st_dev, restore_id.st_ino)
     assert (source / "source-volume").read_text() == "source\n"
     assert not (source / "restore-volume").exists()
     assert not (restored / "source-volume").exists()
+    if same_device:
+        print(f"QT_SAME_DEVICE_ISOLATED_HISTORY device={source_id.st_dev} source_inode={source_id.st_ino} restore_inode={restore_id.st_ino}")
     _restored_access(worker, copied)
     request = root / "restore-request.tmp"
     request.write_text(f"{selected['database_label']}\n{tablespace}\n")

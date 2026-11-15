@@ -1,0 +1,46 @@
+# Append after same-path-recovery.compose.yml. QT_SAME_DEVICE_HISTORY selects a
+# disposable local volume with private source and replacement directories (UID 70, mode 0700).
+services:
+  timescaledb:
+    volumes:
+      - type: volume
+        source: same-device-history
+        target: /qt-history
+        volume: {subpath: source}
+  restore-writer:
+    volumes:
+      - type: volume
+        source: same-device-history
+        target: /qt-history
+        volume: {subpath: replacement}
+  restored:
+    command:
+      - |
+        while [ ! -f /qt-restore/start ]; do sleep 1; done
+        test ! -e /qt-history/source-volume || exit 1
+        test ! -e /qt-source/pgdata/PG_VERSION || exit 1
+        test -f /qt-history/restore-volume || exit 1
+        printf '%s\n' QT_REPLACEMENT_SOURCE_MOUNTS_ABSENT
+        exec postgres -D /qt-restore/pgdata -c archive_mode=off -c timescaledb.telemetry_level=off -c shared_preload_libraries=timescaledb,pg_stat_statements
+    volumes:
+      - type: volume
+        source: same-device-history
+        target: /qt-history
+        volume: {subpath: replacement}
+  test:
+    environment:
+      QT_SAME_DEVICE_RECOVERY_TEST: "1"
+    volumes:
+      - type: volume
+        source: same-device-history
+        target: /qt-history
+        volume: {subpath: source}
+      - type: volume
+        source: same-device-history
+        target: /qt-restored-history
+        read_only: true
+        volume: {subpath: replacement}
+volumes:
+  same-device-history:
+    external: true
+    name: ${QT_SAME_DEVICE_HISTORY:?required}
