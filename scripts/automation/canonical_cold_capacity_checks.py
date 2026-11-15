@@ -19,6 +19,15 @@ VERSION = "qt.canonical_cold_capacity_plan.v1"
 _DEVICE_PLAN = {"path", "filesystem_uuid", "reserve_bytes", "temporary_bytes"}
 _DOCKER_INFO = '{"DockerRootDir":{{json .DockerRootDir}},"OperatingSystem":{{json .OperatingSystem}},' \
                '"KernelVersion":{{json .KernelVersion}}}'
+_NATIVE_DIRECTORIES = r"""
+for path do
+    resolved=$(readlink -f -- "$path")
+    test -d "$resolved" && test -w "$resolved" && test -x "$resolved" || exit 1
+    device=$(stat -L -c '%d' -- "$resolved")
+    test "$resolved" = "$(readlink -f -- "$path")"
+    printf '%s\n%s\n' "$resolved" "$device"
+done
+"""
 
 
 def _absolute_path(value):
@@ -56,6 +65,19 @@ def _mounted_path(mounts, path):
             or mount.get("Type") not in ("bind", "volume") or mount.get("RW") is not True):
         raise RuntimeError("canonical_cold_capacity_postgresql_mount_unqualified")
     return _absolute_path(mount.get("Source")) / path.relative_to(target)
+
+
+def _native_directories(database_container, directories, *, timeout):
+    result = host.docker("exec", "--user", "postgres", database_container, "sh", "-ec",
+                         _NATIVE_DIRECTORIES, "qt-capacity", *directories, timeout=timeout).splitlines()
+    if len(result) != 2 * len(directories):
+        raise RuntimeError("canonical_cold_capacity_invalid_native_directories")
+    for resolved, value in zip(result[::2], result[1::2], strict=True):
+        path = _absolute_path(resolved)
+        if not re.fullmatch(r"[0-9]{1,20}", value) or int(value) >= 2**64:
+            raise RuntimeError("canonical_cold_capacity_invalid_native_directories")
+        number = int(value)
+        yield str(path), f"{os.major(number)}:{os.minor(number)}"
 
 
 def bind_approved_capacity_checks(*, package_path, package, archive_root, database_container):
@@ -112,7 +134,8 @@ def bind_approved_capacity_checks(*, package_path, package, archive_root, databa
             if evidence.available_bytes < required:
                 raise RuntimeError(f"canonical_cold_capacity_insufficient: tier={name} "
                                    f"available={evidence.available_bytes} required={required}")
-            observed[name] = {**asdict(evidence), "required_free_bytes": required}
+            observed[name] = {**asdict(evidence), "reserve_bytes": approved["reserve_bytes"],
+                              "temporary_bytes": approved["temporary_bytes"], "required_free_bytes": required}
         actual_archive = inspect_filesystem(Path(str(archive)), expected_uuid=hdd["filesystem_uuid"])
         if (observed["ssd"]["device_id"] == observed["hdd"]["device_id"]
                 or actual_archive.path != str(archive) or actual_archive.device_id != observed["hdd"]["device_id"]):
@@ -120,16 +143,21 @@ def bind_approved_capacity_checks(*, package_path, package, archive_root, databa
         mounts = json.loads(host.docker("inspect", "--format", "{{json .Mounts}}", database_container, timeout=remaining()))
         if not isinstance(mounts, list) or not 1 <= len(mounts) <= 64 or not all(isinstance(m, dict) for m in mounts):
             raise RuntimeError("canonical_cold_capacity_invalid_postgresql_mounts")
+        directories = (("database", str(_absolute_path(database_directory)), "ssd"),
+                       ("wal", str(_absolute_path(database_directory) / "pg_wal"), "ssd"),
+                       ("history", str(_absolute_path(history_directory)), "hdd"))
+        # Docker's private volume hierarchy is intentionally inaccessible to
+        # some host operators. Resolve the members in the running database's
+        # mount namespace, as its OS account. The native device number uses
+        # the same kernel as the approved host UUID and capacity observations.
+        native = _native_directories(database_container, tuple(path for _, path, _ in directories),
+                                     timeout=remaining())
         postgresql = {}
-        for name, directory, tier in (("database", database_directory, "ssd"),
-                                      ("wal", str(_absolute_path(database_directory) / "pg_wal"), "ssd"),
-                                      ("history", history_directory, "hdd")):
+        for (name, _, tier), (directory, device_id) in zip(directories, native, strict=True):
             path = _mounted_path(mounts, directory)
-            device = inspect_filesystem(Path(str(path)), expected_uuid=observed[tier]["filesystem_uuid"],
-                                        require_writable=False)
-            if device.device_id != observed[tier]["device_id"] or device.read_only:
+            if device_id != observed[tier]["device_id"]:
                 raise RuntimeError(f"canonical_cold_capacity_postgresql_device_changed: member={name}")
-            postgresql[name] = device.path
+            postgresql[name] = str(path)
         remaining()
         receipt = {"plan_sha256": digest, "observed_at": datetime.now(UTC).isoformat(),
                    "devices": observed, "archive_path": actual_archive.path, "raw_index_bytes": raw_index_bytes,

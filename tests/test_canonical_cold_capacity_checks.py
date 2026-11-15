@@ -1,6 +1,7 @@
 from dataclasses import replace
 from hashlib import sha256
 import json
+import os
 from pathlib import PurePosixPath
 
 import pytest
@@ -24,12 +25,12 @@ def physical_plan(tmp_path, monkeypatch):
         "/history/archives": FilesystemEvidence("/history/archives", "8:2", "archive-hdd", 2000, 200, 1700, False),
     }
     pgdata = "/var/lib/docker/volumes/test-db/_data"
-    evidence[pgdata] = replace(evidence["/var/lib/docker"], path=pgdata)
-    evidence[pgdata + "/pg_wal"] = replace(evidence[pgdata], path=pgdata + "/pg_wal")
-    evidence["/history/catalog"] = replace(evidence["/history"], path="/history/catalog")
 
     def inspect(path, *, expected_uuid, require_writable=True):
-        observed = evidence[PurePosixPath(path.as_posix()).as_posix()]
+        native_path = PurePosixPath(path.as_posix()).as_posix()
+        if native_path not in evidence:
+            raise PermissionError("the host account cannot access database directories")
+        observed = evidence[native_path]
         assert observed.filesystem_uuid == expected_uuid
         return observed
 
@@ -37,10 +38,16 @@ def physical_plan(tmp_path, monkeypatch):
     mounts = [{"Type": "volume", "Destination": "/pgdata", "Source": pgdata, "RW": True},
               {"Type": "bind", "Destination": "/qt-history", "Source": "/history", "RW": True}]
     docker = []
+    native = {path: (path, os.makedev(8, minor))
+              for path, minor in (("/pgdata", 1), ("/pgdata/pg_wal", 1), ("/qt-history/catalog", 2))}
 
     def read_docker(*args, timeout):
         assert 0 < timeout <= 5
         docker.append(args[0])
+        if args[0] == "exec":
+            assert args[1:7] == ("--user", "postgres", "c" * 64, "sh", "-ec", capacity._NATIVE_DIRECTORIES)
+            assert args[7:] == ("qt-capacity", "/pgdata", "/pgdata/pg_wal", "/qt-history/catalog")
+            return "\n".join(f"{path}\n{device}" for path, device in (native[path] for path in args[8:])) + "\n"
         if args[0] == "inspect":
             assert args[-1] == "c" * 64
         return json.dumps({"context": "unix:///var/run/docker.sock", "info": docker_info, "inspect": mounts}[args[0]])
@@ -67,26 +74,31 @@ def physical_plan(tmp_path, monkeypatch):
                           "raw_index_bytes": 175, "timeout_seconds": 10,
                           "database_directory": "/pgdata", "history_directory": "/qt-history/catalog"} | updates))
 
-    return plan, evidence, docker_info, docker, bind, check
+    return plan, evidence, docker_info, docker, bind, check, native, mounts
 
 
 def test_capacity_check_pins_manifest_and_reports_fresh_physical_headroom(physical_plan):
-    _, evidence, _, docker, bind, check = physical_plan
+    _, evidence, _, docker, bind, check, *_ = physical_plan
     binder = bind()
     receipt = check(binder)
     assert receipt["devices"]["ssd"]["required_free_bytes"] == 700
     assert receipt["devices"]["hdd"]["required_free_bytes"] == 350
+    assert (receipt["devices"]["ssd"]["reserve_bytes"], receipt["devices"]["ssd"]["temporary_bytes"]) == (200, 500)
+    assert (receipt["devices"]["hdd"]["reserve_bytes"], receipt["devices"]["hdd"]["temporary_bytes"]) == (100, 250)
     assert receipt["devices"]["hdd"]["device_id"] == "8:2"
     assert receipt["raw_index_bytes"] == 175
     assert receipt.pop("receipt_hash") == archive_evidence_hash(receipt)
-    assert docker == ["context", "info", "inspect"]
+    assert receipt["postgresql"] == {"database": "/var/lib/docker/volumes/test-db/_data",
+                                      "wal": "/var/lib/docker/volumes/test-db/_data/pg_wal",
+                                      "history": "/history/catalog"}
+    assert docker == ["context", "info", "inspect", "exec"]
     evidence["/var/lib/docker"] = replace(evidence["/var/lib/docker"], available_bytes=699)
     with pytest.raises(RuntimeError, match="insufficient: tier=ssd available=699 required=700"):
         check(binder)
 
 
 def test_approved_plan_requires_bound_mounts_and_copy_headroom(physical_plan):
-    plan, _evidence, _info, _docker, bind, _check = physical_plan
+    plan, _evidence, _info, _docker, bind, *_ = physical_plan
     with pytest.raises(RuntimeError, match="approved_plan_changed"):
         bind(changed=True)
     with pytest.raises(ValueError, match="plan_scope_changed"):
@@ -97,7 +109,7 @@ def test_approved_plan_requires_bound_mounts_and_copy_headroom(physical_plan):
 
 
 def test_refuses_growth_and_qualified_device_changes(physical_plan, monkeypatch):
-    _, evidence, info, docker, bind, check = physical_plan
+    _, evidence, info, docker, bind, check, native, mounts = physical_plan
     binder = bind()
     with pytest.raises(RuntimeError, match="raw_index_copy_budget_exceeded"):
         check(binder, raw_index_bytes=201)
@@ -113,11 +125,17 @@ def test_refuses_growth_and_qualified_device_changes(physical_plan, monkeypatch)
     with pytest.raises(RuntimeError, match="docker_root_changed"):
         check(binder)
     info["DockerRootDir"] = original_root
-    pg_wal = "/var/lib/docker/volumes/test-db/_data/pg_wal"
-    evidence[pg_wal] = replace(evidence[pg_wal], device_id="8:3")
+    native["/pgdata/pg_wal"] = ("/qt-history/wal", os.makedev(8, 2))
     with pytest.raises(RuntimeError, match="postgresql_device_changed: member=wal"):
         check(binder)
-    evidence[pg_wal] = replace(evidence[pg_wal], device_id="8:1")
+    native["/pgdata/pg_wal"] = ("/unknown/wal", os.makedev(8, 1))
+    with pytest.raises(RuntimeError, match="postgresql_path_unmounted"):
+        check(binder)
+    native["/pgdata/pg_wal"] = ("/pgdata/pg_wal", os.makedev(8, 1))
+    mounts[0]["RW"] = False
+    with pytest.raises(RuntimeError, match="postgresql_mount_unqualified"):
+        check(binder)
+    mounts[0]["RW"] = True
     evidence["/history/archives"] = replace(evidence["/history/archives"], device_id="8:3")
     with pytest.raises(RuntimeError, match="requires_distinct_bound_devices"):
         check(binder)
