@@ -20,43 +20,55 @@ if ! printf '%s\n' "$first" "$last" "$segment" | awk '
     exit 1
 fi
 
+case "${QT_REHEARSAL_WAL_PHASE:-initial}" in
+    initial) ledger=/qt-work/control/fetched-wal.sha1 ;;
+    later) ledger=/qt-work/control/later-fetched-wal.sha1 ;;
+    *) exit 1 ;;
+esac
+required_failure() {
+    if [ "${QT_REHEARSAL_WAL_PHASE:-initial}" = later ]; then
+        printf '%s\n' "$segment" >>/qt-work/control/later-wal-failure || true
+        exit 126
+    fi
+    exit 1
+}
 wal=/qt-work/pgdata/pg_wal
 destination=$wal/RECOVERYXLOG
-case "$requested" in pg_wal/RECOVERYXLOG|"$destination") ;; *) exit 1 ;; esac
-test -d "$wal" && test ! -L "$wal" && test ! -L "$destination" || exit 1
+case "$requested" in pg_wal/RECOVERYXLOG|"$destination") ;; *) required_failure ;; esac
+test -d "$wal" && test ! -L "$wal" && test ! -L "$destination" || required_failure
 prefix=$(printf '%.16s' "$segment")
 directory=/repository/database/archive/qt/15-1/$prefix
-test "$(readlink -f "$directory")" = "$directory" && test -d "$directory" || exit 1
+test "$(readlink -f "$directory")" = "$directory" && test -d "$directory" || required_failure
 match=
 for source in "$directory/$segment"-*; do
     suffix=${source##*/}
     suffix=${suffix#"$segment"-}
     if printf '%s\n' "$suffix" | grep -Eq '^[0-9a-f]{40}(\.(zst|gz|bz2|lz4))?$'; then
-        test -z "$match" && test -f "$source" && test ! -L "$source" || exit 1
+        test -z "$match" && test -f "$source" && test ! -L "$source" || required_failure
         match="$suffix"
     fi
 done
-test -n "$match" || exit 1
+test -n "$match" || required_failure
 expected=${match%%.*}
 
 key=
-test "$(stat -c '%u %a %h' /database-key)" = '70 600 1' && test ! -L /database-key || exit 1
-IFS= read -r key < /database-key || test -n "$key"
-test "${#key}" -eq 64 || exit 1
-case "$key" in *[!a-f0-9]*) exit 1 ;; esac
+test "$(stat -c '%u %a %h' /database-key)" = '70 600 1' && test ! -L /database-key || required_failure
+IFS= read -r key < /database-key || test -n "$key" || required_failure
+test "${#key}" -eq 64 || required_failure
+case "$key" in *[!a-f0-9]*) required_failure ;; esac
 
-staged=$(mktemp "$wal/.qt-verified-wal-XXXXXXXX")
+staged=$(mktemp "$wal/.qt-verified-wal-XXXXXXXX") || required_failure
 trap 'rm -f -- "$staged"' EXIT
-trap 'exit 1' HUP INT TERM
+trap required_failure HUP INT TERM
 if ! PGBACKREST_REPO1_CIPHER_PASS=$key /usr/local/bin/pgbackrest --no-config --stanza=qt \
     --repo1-path=/repository/database --repo1-cipher-type=aes-256-cbc \
     --pg1-path=/qt-work/pgdata --lock-path=/qt-work/control/lock --archive-async=n \
     --log-level-file=off --log-level-console=off archive-get "$segment" "$staged" >/dev/null 2>&1; then
-    exit 1
+    required_failure
 fi
 unset key
-test "$(stat -c %s "$staged")" -eq 16777216 || exit 1
-digest=$(sha1sum "$staged")
-test "${digest%% *}" = "$expected" || exit 1
-mv -f -- "$staged" "$destination"
-printf '%s %s\n' "$segment" "$expected" >>/qt-work/control/fetched-wal.sha1
+test "$(stat -c %s "$staged")" -eq 16777216 || required_failure
+digest=$(sha1sum "$staged") || required_failure
+test "${digest%% *}" = "$expected" || required_failure
+mv -f -- "$staged" "$destination" || required_failure
+printf '%s %s\n' "$segment" "$expected" >>"$ledger" || required_failure
