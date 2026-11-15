@@ -736,8 +736,29 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         assert not any(negative_data.iterdir())
         assert not (receiving / "named-recovery-response.json").exists()
         assert not (restore_root / "start").exists()
-        return recover_named_site(**receiver_options, workspace=workspace, pgdata=pgdata,
-                                  tablespaces={"signed_history_fixture": history_path})
+        approved_workspace = dict(workspace=workspace, pgdata=pgdata, tablespaces={"signed_history_fixture": history_path})
+        deadline = monotonic() + 60
+        while not (receiving / "named-recovery-request.json").is_file():
+            if monotonic() >= deadline:
+                raise TimeoutError("fixture signed recovery request did not arrive")
+            sleep(0.05)
+        pack = next((receiving / "final-archive" / "restic" / "data").glob("*/*"))
+        original = pack.read_bytes()
+        assert len(original) > 1
+        intact = receiving / "fixture-intact-restic-pack"
+        for damaged in (original[:-1], bytes([original[0] ^ 1]) + original[1:]):
+            pack.rename(intact)
+            try:
+                pack.write_bytes(damaged)
+                with pytest.raises(RuntimeError, match="archive_transport_ciphertext_changed"):
+                    recover_named_site(**receiver_options, **approved_workspace)
+                assert not any(pgdata.iterdir()) and not any(history_path.iterdir())
+                assert set(workspace.iterdir()) == {pgdata}
+                assert not (restore_root / "start").exists()
+                assert not (receiving / "named-recovery-response.json").exists()
+            finally:
+                intact.replace(pack)
+        return recover_named_site(**receiver_options, **approved_workspace)
 
     with activation_fixture._fence_connections(storage) as (retained, control):
         fence = close_database_fence(retained, control, expected_database=target, timeout_seconds=110, record=lambda *_: None)

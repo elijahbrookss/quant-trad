@@ -27,10 +27,12 @@ from scripts.automation.verify_canonical_recovery_archive import _sha256
 from scripts.automation.verify_encrypted_recovery_handoff import _bound_json, _selected_backup, verify_handoff
 from scripts.db.canonical_cold_database_fence import DatabaseFence
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
-from scripts.db.canonical_cold_recovery_archive_transport import stage_encrypted_archive_suffix, verify_named_archive_closure
+from scripts.db.canonical_cold_recovery_archive_transport import (
+    close_named_archive_suffix, restore_named_archive_suffix, stage_encrypted_archive_suffix,
+)
 from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope, measure_pending_spool, stage_pending_spool, verify_pending_spool
 from scripts.db.canonical_cold_recovery_suffix import PreparedArchiveBaseline, prepare_archive_baseline
-from scripts.db.canonical_cold_recovery_wal_transfer import _baseline, verify_final_wal, stage_final_wal
+from scripts.db.canonical_cold_recovery_wal_transfer import _baseline, stage_final_wal
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
@@ -524,11 +526,20 @@ def recover_named_site(*, site, signing_key, pgbackrest, restic, database_key, b
         raise RuntimeError("canonical_named_recovery_exchange_already_used")
     wal_options = _wal_options(site, anchor_path, request["anchor_sha256"], check)
     pair = _baseline(root, site.base_transfer_sha256, site.baseline_verification, wal_options["baseline_verification_sha256"])
-    verify_final_wal(receiving=root, expected_hash=request["wal_transfer_sha256"], **wal_options)
     base_restore = workspace / "base-archive"
     suffix_restore = workspace / "final-archive"
-    for path in (base_restore, suffix_restore):
-        path.mkdir(mode=0o700)
+    suffix_restore.mkdir(mode=0o700)
+    suffix_id = _identity(suffix_restore.lstat())
+    try:
+        suffix = restore_named_archive_suffix(receiving=root, wal_options=wal_options,
+            expected_wal_sha256=request["wal_transfer_sha256"], archive_transfer_sha256=request["archive_transfer_sha256"],
+            archive_restore=suffix_restore, restic=restic, decryption_key=suffix_key, limits=_limit(site.archive, check),
+            native_workspace=workspace)
+    except Exception:
+        if _identity(suffix_restore.lstat()) == suffix_id and not any(suffix_restore.iterdir()):
+            suffix_restore.rmdir()
+        raise
+    base_restore.mkdir(mode=0o700)
     settings = _native_restore(root=root, workspace=workspace, pgdata=pgdata,
         tablespaces={name: path for name, (path, _) in destinations.items()}, pgbackrest=pgbackrest,
         database_key=database_key, pair=pair, anchor=anchor, budget=site.database, deadline=deadline, check=check)
@@ -562,10 +573,8 @@ def recover_named_site(*, site, signing_key, pgbackrest, restic, database_key, b
             _open_receive_database(control_engine, target_engine, anchor, pgdata, destinations, check)
             with target_engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
                 conn.exec_driver_sql("SET TRANSACTION READ ONLY")
-                closure = verify_named_archive_closure(conn, receiving=root, baseline=baseline, wal_options=wal_options,
-                    expected_wal_sha256=request["wal_transfer_sha256"], native_named=native, native_named_sha256=native["verification_sha256"],
-                    archive_transfer_sha256=request["archive_transfer_sha256"], archive_restore=suffix_restore, restic=restic,
-                    decryption_key=suffix_key, max_objects=site.max_archive_objects, limits=_limit(site.archive, check))
+                closure = close_named_archive_suffix(conn, suffix=suffix, baseline=baseline, native_named=native,
+                    native_named_sha256=native["verification_sha256"], max_objects=site.max_archive_objects, timeout_seconds=check())
             runtime = verify_original_runtime(target_engine, base_restore, suffix_restore, pending_verified, check)
             if not _sha256(runtime):
                 raise RuntimeError("canonical_named_recovery_original_runtime_unverified")

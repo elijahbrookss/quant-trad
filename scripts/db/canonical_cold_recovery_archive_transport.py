@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -184,15 +184,20 @@ def stage_encrypted_archive_suffix(*, fence, baseline, source_root, plaintext_st
     return report | {"archive_transfer_sha256": digest}
 
 
-def verify_named_archive_closure(conn, *, receiving, baseline, wal_options, expected_wal_sha256,
-                                 native_named, native_named_sha256, archive_transfer_sha256,
-                                 archive_restore, restic, decryption_key, max_objects, limits):
-    """Restore the exact suffix, then close it against the named database in a stable read transaction."""
-    receiving, receiver_id = _private_root(receiving)
-    archive_restore, restore_id = _private_root(archive_restore)
-    if (receiving.is_relative_to(archive_restore) or archive_restore.is_relative_to(receiving)
-            or any(archive_restore.iterdir()) or Path(decryption_key).is_relative_to(receiving)):
-        raise ValueError("canonical_recovery_archive_transport_isolated_restore_required")
+@dataclass(frozen=True)
+class _RestoredArchiveSuffix:
+    receiving: Path
+    receiving_id: tuple[int, int]
+    restore: Path
+    restore_id: tuple[int, int]
+    pair: dict
+    anchor: dict
+    report: dict
+    transfer_sha256: str
+    remaining_seconds: float
+
+
+def _require_snapshot(conn):
     endpoint = conn.engine.url
     query_host = endpoint.query.get("host")
     if (endpoint.host not in {None, "127.0.0.1", "::1", "restored"}
@@ -200,8 +205,9 @@ def verify_named_archive_closure(conn, *, receiving, baseline, wal_options, expe
             or not conn.in_transaction() or conn.get_isolation_level() != "REPEATABLE READ"
             or conn.scalar(text("SHOW transaction_read_only")) != "on"):
         raise ValueError("canonical_recovery_archive_transport_readonly_snapshot_required")
-    deadline = monotonic() + limits.seconds
-    pair, anchor, wal = _boundary(receiving, wal_options, expected_wal_sha256, deadline)
+
+
+def _require_named_replay(conn, anchor):
     recovery = conn.execute(text("""
         SELECT pg_is_in_recovery() AS recovering, current_setting('archive_mode') AS archive_mode,
                current_setting('recovery_target_name') AS target_name,
@@ -209,11 +215,9 @@ def verify_named_archive_closure(conn, *, receiving, baseline, wal_options, expe
     """), {"lsn": anchor["anchor_lsn"]}).one()
     if tuple(recovery) != (False, "off", anchor["restore_name"], True):
         raise RuntimeError("canonical_recovery_archive_transport_named_replay_changed")
-    archive_dir = receiving / _DIR
-    report = _bound_json(archive_dir / "complete.json", archive_transfer_sha256)
-    archive = report["archive"]
-    if report != _binding(pair, anchor, wal, baseline_verification_sha256=wal_options["baseline_verification_sha256"], archive=archive):
-        raise RuntimeError("canonical_recovery_archive_transport_receipt_mismatch")
+
+
+def _require_native_named(native_named, native_named_sha256, baseline, pair, report):
     named = {key: value for key, value in native_named.items() if key != "verification_sha256"}
     if (native_named.get("schema") != "qt.encrypted_recovery_repository_verification.v1"
             or native_named.get("verification_sha256") != native_named_sha256 or archive_evidence_hash(named) != native_named_sha256
@@ -221,6 +225,27 @@ def verify_named_archive_closure(conn, *, receiving, baseline, wal_options, expe
             or named.get("anchor_sha256") != report["anchor_sha256"] or named.get("wal_verified_through") != report["wal_segment"]
             or any(named.get(key) != pair[key] for key in ("database_identity", "database_label", "archive_snapshot", "storage_layout"))):
         raise RuntimeError("canonical_recovery_archive_transport_native_named_mismatch")
+
+
+def restore_named_archive_suffix(*, receiving, wal_options, expected_wal_sha256, archive_transfer_sha256,
+                                 archive_restore, restic, decryption_key, limits, native_workspace=None):
+    """Authenticate final ciphertext and restore the exact suffix before PostgreSQL startup."""
+    receiving, receiver_id = _private_root(receiving)
+    archive_restore, restore_id = _private_root(archive_restore)
+    if (receiving.is_relative_to(archive_restore) or archive_restore.is_relative_to(receiving)
+            or any(archive_restore.iterdir()) or Path(decryption_key).is_relative_to(receiving)):
+        raise ValueError("canonical_recovery_archive_transport_isolated_restore_required")
+    if native_workspace is not None:
+        native_workspace, _ = _private_root(native_workspace)
+        if native_workspace.is_relative_to(receiving) or native_workspace.is_relative_to(archive_restore):
+            raise ValueError("canonical_recovery_archive_transport_isolated_restore_required")
+    deadline = monotonic() + limits.seconds
+    pair, anchor, wal = _boundary(receiving, wal_options, expected_wal_sha256, deadline)
+    archive_dir = receiving / _DIR
+    report = _bound_json(archive_dir / "complete.json", archive_transfer_sha256)
+    archive = report["archive"]
+    if report != _binding(pair, anchor, wal, baseline_verification_sha256=wal_options["baseline_verification_sha256"], archive=archive):
+        raise RuntimeError("canonical_recovery_archive_transport_receipt_mismatch")
     free = shutil.disk_usage(archive_restore).free
 
     def check():
@@ -231,17 +256,17 @@ def verify_named_archive_closure(conn, *, receiving, baseline, wal_options, expe
         if now < limits.reserve_bytes or free - now > limits.bytes:
             raise RuntimeError("canonical_recovery_archive_transport_plaintext_budget_exceeded")
 
-    with TemporaryDirectory(prefix="qt-archive-closure-") as work:
+    with TemporaryDirectory(prefix="qt-archive-closure-", dir=native_workspace) as work:
         repository, repository_id = _private_root(archive_dir / "restic")
         if repository_id[0] != receiver_id[0]:
             raise ValueError("canonical_recovery_archive_transport_repository_device_changed")
-        run = _restic_run(restic, decryption_key, repository, work, deadline, check, read_only=True)
         snapshot = archive["archive_snapshot"]
         if not _sha256(snapshot):
             raise RuntimeError("canonical_recovery_archive_transport_snapshot_invalid")
         encrypted = _encrypted_inventory(repository, receiver_id[0], limits, check)
         if any(archive.get(key) != value for key, value in encrypted.items()):
             raise RuntimeError("canonical_recovery_archive_transport_ciphertext_changed")
+        run = _restic_run(restic, decryption_key, repository, work, deadline, check, read_only=True)
         metadata = json.loads(run("cat", "snapshot", snapshot), object_pairs_hook=_unique_fields)
         owner = "qt-" + hashlib.sha256(pair["database_identity"].encode()).hexdigest()[:32]
         if metadata.get("hostname") != owner or metadata.get("tags") != [anchor["restore_name"]]:
@@ -251,11 +276,34 @@ def verify_named_archive_closure(conn, *, receiving, baseline, wal_options, expe
             raise RuntimeError("canonical_recovery_archive_transport_restore_budget_exceeded")
         run("restore", snapshot, "--target", str(archive_restore), "--verify")
     check()
+    return _RestoredArchiveSuffix(receiving, receiver_id, archive_restore, restore_id, pair, anchor, report,
+                                  archive_transfer_sha256, deadline - monotonic())
+
+
+def close_named_archive_suffix(conn, *, suffix, baseline, native_named, native_named_sha256, max_objects, timeout_seconds):
+    """Close the decrypted suffix against the exact named read-only database snapshot."""
+    _require_snapshot(conn)
+    if not isinstance(suffix, _RestoredArchiveSuffix):
+        raise ValueError("canonical_recovery_archive_transport_verified_suffix_required")
+    pair, anchor, report = suffix.pair, suffix.anchor, suffix.report
+    deadline = monotonic() + min(timeout_seconds, suffix.remaining_seconds)
+
+    def check():
+        _remaining(deadline)
+        if (_identity(suffix.receiving.lstat()) != suffix.receiving_id or _identity(suffix.restore.lstat()) != suffix.restore_id):
+            raise RuntimeError("canonical_recovery_archive_transport_mount_changed")
+
+    check()
+    if _bound_json(suffix.receiving / _DIR / "complete.json", suffix.transfer_sha256) != report:
+        raise RuntimeError("canonical_recovery_archive_transport_receipt_mismatch")
+    _require_native_named(native_named, native_named_sha256, baseline, pair, report)
     conn.execute(text("SELECT set_config('statement_timeout', :timeout, true)"), {"timeout": str(_remaining(deadline) * 1000)})
-    coverage = verify_final_archive_suffix(conn, anchor, baseline, archive, archive_restore,
-                                           max_objects=max_objects, suffix_snapshot_id=snapshot, check=check)
-    result = {"schema": _CLOSURE, "archive_transfer_sha256": archive_transfer_sha256,
-              "native_named_sha256": native_named_sha256, "wal_transfer_sha256": expected_wal_sha256,
+    _require_named_replay(conn, anchor)
+    archive = report["archive"]
+    coverage = verify_final_archive_suffix(conn, anchor, baseline, archive, suffix.restore,
+                                           max_objects=max_objects, suffix_snapshot_id=archive["archive_snapshot"], check=check)
+    result = {"schema": _CLOSURE, "archive_transfer_sha256": suffix.transfer_sha256,
+              "native_named_sha256": native_named_sha256, "wal_transfer_sha256": report["wal_transfer_sha256"],
               "base_transfer_sha256": report["base_transfer_sha256"], "anchor_sha256": report["anchor_sha256"],
               "baseline_verification_sha256": report["baseline_verification_sha256"],
               "storage_layout": report["storage_layout"], "wal_segment": report["wal_segment"],
@@ -263,3 +311,20 @@ def verify_named_archive_closure(conn, *, receiving, baseline, wal_options, expe
               "source_commit_seq": anchor["source_commit_seq"], "restore_name": anchor["restore_name"],
               "replay_lsn": anchor["anchor_lsn"], "coverage": coverage}
     return result | {"closure_sha256": archive_evidence_hash(result)}
+
+
+def verify_named_archive_closure(conn, *, receiving, baseline, wal_options, expected_wal_sha256,
+                                 native_named, native_named_sha256, archive_transfer_sha256,
+                                 archive_restore, restic, decryption_key, max_objects, limits):
+    """Run both archive phases against an already running isolated named clone."""
+    _require_snapshot(conn)
+    receiving, _ = _private_root(receiving)
+    _require_named_replay(conn, _bound_json(wal_options["anchor_path"], wal_options["anchor_sha256"]))
+    pair = _baseline(receiving, wal_options["base_transfer_sha256"], wal_options["baseline"], wal_options["baseline_verification_sha256"])
+    report = _bound_json(receiving / _DIR / "complete.json", archive_transfer_sha256)
+    _require_native_named(native_named, native_named_sha256, baseline, pair, report)
+    suffix = restore_named_archive_suffix(receiving=receiving, wal_options=wal_options, expected_wal_sha256=expected_wal_sha256,
+        archive_transfer_sha256=archive_transfer_sha256, archive_restore=archive_restore, restic=restic,
+        decryption_key=decryption_key, limits=limits)
+    return close_named_archive_suffix(conn, suffix=suffix, baseline=baseline, native_named=native_named,
+        native_named_sha256=native_named_sha256, max_objects=max_objects, timeout_seconds=limits.seconds)
