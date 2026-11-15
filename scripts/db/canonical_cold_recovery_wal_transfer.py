@@ -22,7 +22,7 @@ from scripts.automation.stage_encrypted_recovery_handoff import (
     _PUBLISHED, _SCHEMA, _encode, _file, _identity, _private_root, _safe_member, _source_hold, _stamp,
 )
 from scripts.automation.verify_encrypted_recovery_handoff import _anchor_wal, _archive_filenames, _bound_json, _wal_range
-from scripts.db.canonical_cold_database_fence import DatabaseFence, _database
+from scripts.db.canonical_cold_database_fence import DatabaseFence, _DATABASE, _database
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
@@ -68,6 +68,36 @@ def _suffix(stop, last, segment_bytes, max_segments):
             or segment_bytes & (segment_bytes - 1)):
         raise ValueError("canonical_recovery_wal_segment_size_invalid")
     return _wal_range(stop, last, segment_bytes, max_segments + 1)[1:]
+
+
+def check_source_wal_capacity(control, *, expected_database, backup_stop, segment_bytes, max_segments, timeout_seconds):
+    """Reject a span that already exceeds the named receiver's WAL file cap."""
+    if type(max_segments) is not int or not 1 <= max_segments <= _MAX_SEGMENTS:
+        raise ValueError("canonical_recovery_wal_segment_budget_invalid")
+    timeout_ms = min(int(timeout_seconds * 1000), 5_000)
+    if timeout_ms < 1:
+        raise TimeoutError("canonical_recovery_wal_preflight_deadline")
+    with control.begin():
+        control.exec_driver_sql("SET TRANSACTION READ ONLY")
+        control.execute(text("""
+            SELECT set_config('statement_timeout',
+                LEAST(:timeout, CASE WHEN setting::bigint=0 THEN :timeout
+                                    ELSE setting::bigint END)::text, true)
+            FROM pg_settings WHERE name='statement_timeout'
+        """), {"timeout": timeout_ms}).close()
+        row = control.execute(text(f"""
+            SELECT target.*, current_database() AS control_database, current_setting('archive_mode') AS archive_mode,
+                   pg_size_bytes(current_setting('wal_segment_size')) AS segment_bytes,
+                   CASE WHEN NOT pg_is_in_recovery()
+                        THEN pg_walfile_name(pg_current_wal_insert_lsn()) END AS segment
+            FROM ({_DATABASE}) AS target
+        """), {"name": expected_database["database"]}).mappings().one_or_none()
+    if (row is None or any(row[key] != value for key, value in expected_database.items())
+            or (row["control_database"], row["archive_mode"], row["segment_bytes"]) != ("postgres", "on", segment_bytes)
+            or not row["allow_connections"] or row["segment"] is None):
+        raise RuntimeError("canonical_recovery_wal_preflight_source_changed")
+    # The current WAL is a lower bound. The exact fenced anchor is checked after the stop.
+    return len(_suffix(backup_stop, row["segment"], segment_bytes, max_segments))
 
 
 def _check_wal_archiver(control, fence, last, floor, timeout, check):

@@ -43,7 +43,7 @@ from scripts.automation import canonical_cold_recovery_preflight as preflight
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, stage_handoff, verify_staged_handoff
 from scripts.automation.storage_host_boundary import load_receipt, save_receipt
 from scripts.automation.verify_encrypted_recovery_handoff import verify_handoff
-from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
+from scripts.db.canonical_cold_database_fence import _database, close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS
 from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
@@ -775,6 +775,16 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         assert (pgdata / "backup_label").is_file() and (pgdata / "recovery.signal").is_file()
         ready = recover_source.assert_receiver_ready()
         assert ready == prepared.ready
+        admission = bind_approved_recovery_checks(package_path=package_path, package=package,
+            approved_package_hash=approved_package_hash, receipt_root=receipts,
+            verify_site_restore=recover_source, expected_pending_scope_sha256=scope_hash)
+        assert admission.assert_receiver_ready() == prepared.digest
+        with retained.begin():
+            expected_database = _database(retained, target["database"])
+        segments = admission.assert_source_wal_capacity(control, expected_database=expected_database, timeout_seconds=5)
+        assert 0 <= segments <= site.wal.files
+        assert not control.in_transaction()
+
         def bulk_operation_during_fence(*args, **kwargs):
             pytest.fail("bulk materialization repeated during the source fence")
         for name in ("_native_restore", "verify_handoff", "prepare_archive_baseline"):

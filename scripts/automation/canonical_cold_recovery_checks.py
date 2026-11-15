@@ -15,6 +15,7 @@ from scripts.automation.canonical_cold_named_recovery import _RESPONSE, verify_r
 from scripts.automation.canonical_cold_package import _hash_file, _pin, _unique_fields
 from scripts.automation.canonical_cold_receiver_ready import prepared_receiver_scope, verify_prepared_receiver_ready
 from scripts.db.canonical_cold_recovery_archive_transport import _CLOSURE
+from scripts.db.canonical_cold_recovery_wal_transfer import check_source_wal_capacity
 
 
 PLAN_VERSION = "qt.canonical_cold_independent_plan.v2"
@@ -26,6 +27,7 @@ _BASE_PINS = {"base_transfer_sha256", "baseline_verification_sha256", "pair_rece
 class _ApprovedRecoveryChecks:
     assert_receiver_ready: Callable[[], str]
     verify: Callable
+    assert_source_wal_capacity: Callable
 
     def __call__(self, fence, control, source_commit, provider_boundary, remaining, check_archive):
         return self.verify(fence, control, source_commit, provider_boundary, remaining, check_archive)
@@ -94,6 +96,21 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
             raise RuntimeError("canonical_cold_independent_recovery_prepared_attempt_changed")
         prepared = ready_sha256, envelope
         return ready_sha256
+
+    def assert_source_wal_capacity(control, *, expected_database, timeout_seconds):
+        baseline = getattr(verify_site_restore, "wal_baseline", None)
+        _verify_digest(baseline, field="verification_sha256", schema="qt.encrypted_recovery_repository_verification.v1")
+        if (prepared is None or baseline["verification_sha256"] != plan["baseline_verification_sha256"]
+                or baseline.get("pair_receipt_sha256") != plan["pair_receipt_sha256"]
+                or baseline.get("database_identity") != identity
+                or baseline.get("anchor_sha256") is not None
+                or baseline.get("wal_verified_through") != baseline.get("wal_backup_stop")
+                or any(expected_database[key] != target[key] for key in ("database", "system_identifier", "database_oid"))):
+            raise RuntimeError("canonical_cold_independent_recovery_wal_baseline_changed")
+        return check_source_wal_capacity(
+            control, expected_database=expected_database, backup_stop=baseline["wal_backup_stop"],
+            segment_bytes=baseline["wal_segment_bytes"], max_segments=site["wal"]["files"], timeout_seconds=timeout_seconds,
+        )
 
     def verify(fence, control, source_commit, provider_boundary, remaining, check_archive):
         if prepared is None:
@@ -188,4 +205,4 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
         check_archive()
         return digest
 
-    return _ApprovedRecoveryChecks(assert_receiver_ready, verify)
+    return _ApprovedRecoveryChecks(assert_receiver_ready, verify, assert_source_wal_capacity)

@@ -14,6 +14,39 @@ from scripts.automation import canonical_cold_host_hold as hold
 from scripts.automation.canonical_cold_recovery_checks import _ApprovedRecoveryChecks
 from scripts.automation.canonical_cold_release_guard import compatible_release_floor
 from scripts.automation import storage_host_boundary as host
+from scripts.db.canonical_cold_recovery_wal_transfer import check_source_wal_capacity
+
+
+@pytest.mark.parametrize(("segment", "count", "error"), (
+    ("0000000100000000000000FF", 0, None),
+    ("00000001000000010000007F", 128, None),
+    ("000000010000000100000080", None, "recovery_handoff_wal_range_outside_budget"),
+    ("00000002000000010000007F", None, "recovery_handoff_wal_timeline_or_segment_invalid"),
+))
+def test_pre_stop_wal_admission_checks_exact_suffix_budget(segment, count, error):
+    expected = {"database": "qt", "system_identifier": "11", "database_oid": 20, "allow_connections": True}
+    row = {**expected, "control_database": "postgres", "archive_mode": "on", "segment_bytes": 16 * 1024**2,
+           "segment": segment}
+    calls = []
+
+    def query(statement, bindings):
+        calls.append(str(statement))
+        if "set_config" in calls[-1]:
+            assert bindings == {"timeout": 1000}
+            return SimpleNamespace(close=lambda: None)
+        assert bindings == {"name": "qt"}
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(one_or_none=lambda: row))
+
+    control = SimpleNamespace(begin=nullcontext, exec_driver_sql=calls.append, execute=query)
+    options = {"expected_database": expected, "backup_stop": "0000000100000000000000FF", "segment_bytes": 16 * 1024**2,
+               "max_segments": 128, "timeout_seconds": 1}
+    if error:
+        with pytest.raises(ValueError, match=error):
+            check_source_wal_capacity(control, **options)
+    else:
+        assert check_source_wal_capacity(control, **options) == count
+    assert len(calls) == 3 and calls[0] == "SET TRANSACTION READ ONLY"
+    assert "pg_current_wal_insert_lsn()" in calls[-1] and "pg_switch_wal" not in calls[-1]
 
 
 @pytest.fixture
@@ -252,7 +285,7 @@ def test_completion_preserves_terminal_evidence_and_sets_correct_promotion_floor
 
 @pytest.mark.parametrize("scenario", (
     "committed", "original", "uncertain", "unchanged", "changed_postmaster", "missing_tail", "wrong_control", "changed_object",
-    "changed_capacity", "unprepared_receiver",
+    "changed_capacity", "unprepared_receiver", "wal_overflow",
 ))
 def test_execute_coordinates_one_approved_host_and_database_transition(authorized_hold, monkeypatch, scenario):
     arguments, stopped = authorized_hold
@@ -368,8 +401,15 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
             raise RuntimeError(scenario)
         return "e" * 64
 
+    def source_wal_capacity(session, *, expected_database, timeout_seconds):
+        assert session is control and expected_database == target and timeout_seconds > 0
+        assert not stopped and not journal.exists()
+        events.append("source_wal_capacity")
+        if scenario == "wal_overflow":
+            raise ValueError("recovery_handoff_wal_range_outside_budget")
+
     monkeypatch.setattr(execute, "bind_approved_recovery_checks",
-                        lambda **kwargs: _ApprovedRecoveryChecks(receiver_ready, kwargs["verify_site_restore"]))
+                        lambda **kwargs: _ApprovedRecoveryChecks(receiver_ready, kwargs["verify_site_restore"], source_wal_capacity))
 
     def transition(target_conn, control_conn, *, record, verify_provider_boundary, assert_host_held,
                    verified_objects, candidate_witness, **kwargs):
@@ -438,8 +478,12 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
     if scenario == "committed":
         assert run() == {"activation": {"source_commit_seq": 24},
                          "runtime": {"ready": True, "collector_restart_sha256": "d" * 64}}
-        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "receiver_ready", "provider_drained",
-                          "capacity", "prestart", "candidate_ready", "provider_restarted"]
+        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "receiver_ready",
+                          "source_wal_capacity", "provider_drained", "capacity", "prestart", "candidate_ready", "provider_restarted"]
+    elif scenario == "wal_overflow":
+        with pytest.raises(ValueError, match="recovery_handoff_wal_range_outside_budget"):
+            run()
+        assert events[-2:] == ["receiver_ready", "source_wal_capacity"]
     else:
         with pytest.raises(RuntimeError, match={"missing_tail": "provider_tail_missing",
                                                "wrong_control": "control_endpoint_changed"}.get(scenario, scenario)):
@@ -452,9 +496,10 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
             assert events[-1] == "original_ready"
     elif scenario == "uncertain":
         assert host.load_receipt(journal)["phase"] == "database_fenced"
-        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "receiver_ready", "provider_drained"]
+        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "receiver_ready",
+                          "source_wal_capacity", "provider_drained"]
     elif scenario == "changed_postmaster":
         assert host.load_receipt(journal)["phase"] == "writers_stopped"
-        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "receiver_ready"]
+        assert events == ["capacity", "checksums", "stamps", "provider_tail", "capacity", "receiver_ready", "source_wal_capacity"]
     else:
         assert not stopped and not journal.exists()

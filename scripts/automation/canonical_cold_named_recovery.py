@@ -390,6 +390,7 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
                 "receiver_response": signed_reply}
 
     recover.assert_receiver_ready = assert_receiver_ready
+    recover.wal_baseline = site.baseline_verification
     return recover
 
 

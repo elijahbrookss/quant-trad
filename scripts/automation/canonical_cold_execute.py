@@ -145,6 +145,9 @@ def execute_approved_cutover(
                 refreshed = _raw_index_headroom(conn, scope)
         capacity_check(**refreshed, timeout_seconds=check_deadline())
         recovery_check.assert_receiver_ready()
+        recovery_check.assert_source_wal_capacity(
+            control, expected_database=original["database"], timeout_seconds=check_deadline(),
+        )
         check_deadline()
 
     with hold_cold_cutover(

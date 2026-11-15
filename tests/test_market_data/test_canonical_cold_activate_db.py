@@ -725,7 +725,9 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                               lambda *args, **kwargs: (lambda _: b"fixture pre-stop spool receipt",
                                                        bound_provider, restarted, None))
                 patch.setattr(canonical_cold_execute, "bind_approved_recovery_checks",
-                              lambda **kwargs: _ApprovedRecoveryChecks(lambda: "e" * 64, kwargs["verify_site_restore"]))
+                              lambda **kwargs: _ApprovedRecoveryChecks(
+                                  lambda: "e" * 64, kwargs["verify_site_restore"], lambda *a, **kw: None,
+                              ))
                 def execute_once():
                     return canonical_cold_execute.execute_approved_cutover(
                         retained, control, state_root=tmp_path, inventory={"services": {"tsdb": {"id": "a" * 64}}},
