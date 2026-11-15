@@ -18,7 +18,12 @@ def check_deployed_source_reader(restored_url, objects, dataset_id, series, expe
         return
     source = Path(path).resolve(strict=True)
     expected_hash = os.environ["QT_EXACT_OLD_SOURCE_HASH"]
-    assert restored_url.host in {"restored", "timescaledb", "127.0.0.1"}
+    private_socket = restored_url.host is None
+    if private_socket:
+        assert restored_url.port == 55432 and restored_url.password is None
+        assert dict(restored_url.query) == {"host": "/qt-restore/receiver-workspace/rolling-socket"}
+    else:
+        assert restored_url.host in {"restored", "timescaledb", "127.0.0.1"}
     assert restored_url.database.startswith("qt_migration_")
     assert os.environ.get("QT_DB_TEST_ISOLATED") == "1"
     # Purely additive candidate tables are present because the fixture candidate
@@ -26,6 +31,8 @@ def check_deployed_source_reader(restored_url, objects, dataset_id, series, expe
     restored = create_engine(restored_url, poolclass=NullPool)
     try:
         with restored.connect() as conn:
+            if private_socket:
+                assert conn.exec_driver_sql("SELECT inet_server_addr() IS NULL AND current_setting('listen_addresses')=''").scalar_one()
             assert conn.scalar(text("SELECT to_regclass('market.cold_fact_pages') IS NOT NULL"))
     finally:
         restored.dispose()

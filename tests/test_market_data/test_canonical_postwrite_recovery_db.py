@@ -541,15 +541,9 @@ def _signed_tablespace_member(conn):
 _SOURCE_POSTMASTER = "SELECT pg_postmaster_start_time(), timeline_id FROM pg_control_checkpoint()"
 
 
-def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, baseline):
-    from scripts.automation.canonical_cold_named_recovery import (
-        _sign, verify_prepared_wal_prefix, verify_signed_recovery, verify_wal_prefix_chain,
-    )
-    from scripts.db.canonical_cold_recovery_wal_transfer import (
-        check_source_wal_capacity, stage_wal_prefix, verify_wal_prefix,
-    )
-
+def _emit_fixture_wal_prefix(engine, *, replayed=False):
     generated = []
+    boundary = None
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as archiver:
         archiver.exec_driver_sql("SET statement_timeout='5s'")
         for record in range(1, 6):
@@ -557,6 +551,13 @@ def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, bas
                 writer.exec_driver_sql("SET LOCAL statement_timeout='5s'")
                 writer.exec_driver_sql("SET LOCAL synchronous_commit=on")
                 writer.execute(text("INSERT INTO public.qt_named_wal_prefix_probe VALUES (:record)"), {"record": record})
+            if replayed and record == 5:
+                archiver.exec_driver_sql("CHECKPOINT").close()
+                redo = archiver.exec_driver_sql("SELECT redo_wal_file FROM pg_control_checkpoint()").scalar_one()
+                target, replay = archiver.exec_driver_sql("""
+                    SELECT pg_current_wal_insert_lsn()::text,pg_create_restore_point('qt_fixture_signed_prefix')::text
+                """).one()
+                boundary = (target, replay, redo)
             segment = archiver.exec_driver_sql("SELECT pg_walfile_name(pg_current_wal_insert_lsn())").scalar_one()
             generated.append(segment)
             archiver.exec_driver_sql("SELECT pg_switch_wal()").close()
@@ -567,12 +568,26 @@ def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, bas
         """), {"segment": generated[-1]}):
             assert monotonic() < deadline, "all fixture prefix WAL must be archived"
             sleep(0.1)
+    return generated, boundary
+
+
+def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, baseline, *, generated=None,
+                              authenticate_prefix=None):
+    from scripts.automation.canonical_cold_named_recovery import (
+        _sign, verify_prepared_wal_prefix, verify_signed_recovery, verify_wal_prefix_chain,
+    )
+    from scripts.db.canonical_cold_recovery_wal_transfer import (
+        check_source_wal_capacity, stage_wal_prefix, verify_wal_prefix,
+    )
+
+    if generated is None:
+        generated, _ = _emit_fixture_wal_prefix(engine)
 
     segment_bytes = baseline["wal_segment_bytes"]
     assert _wal_range(generated[0], generated[-1], segment_bytes, 5) == generated
     start = baseline["wal_backup_stop"]
     first_through, last_through = generated[1], generated[-1]
-    prefix_limits = TransferLimits(25, 64 * 1024**2, 16)
+    prefix_limits = TransferLimits(25, 64 * 1024**2, 3 if authenticate_prefix is not None else 16)
     options = dict(receiving=receiving, base_transfer_sha256=transfer["transfer_receipt_sha256"],
                    baseline=baseline, baseline_verification_sha256=baseline["verification_sha256"],
                    limits=prefix_limits)
@@ -607,8 +622,16 @@ def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, bas
         control_engine.dispose()
 
     assert [item["segment"] for item in first["files"] + second["files"]] == (
-        _wal_range(start, last_through, segment_bytes, prefix_limits.files + 1)[1:]
+        _wal_range(start, last_through, segment_bytes, 2 * prefix_limits.files + 1)[1:]
     )
+    if authenticate_prefix is not None:
+        for batch in (first, second):
+            authenticate_prefix(after=batch["wal_after"], through=batch["wal_transferred_through"],
+                                prefix_sha256=batch["wal_prefix_sha256"],
+                                previous_prefix_sha256=batch["previous_prefix_sha256"], limits=prefix_limits)
+        assert not (receiving / "encrypted-wal-transfer.json").exists()
+        print(f"QT_SIGNED_REPLAYED_PREFIX files={len(first['files'])}+{len(second['files'])} through={last_through}")
+        return
     envelopes = []
     for batch in (first, second):
         envelope = verify_prepared_wal_prefix(prepared=prepared, after=batch["wal_after"],
@@ -656,13 +679,15 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     assert os.getenv("QT_STORAGE_DEMO") == "1" and os.getuid() == 70
     engine = storage.database._engine
     assert engine.url.host == "timescaledb" and engine.url.database.startswith("qt_migration_")
-    rolling_prefix = os.getenv("QT_TEST_ROLLING_WAL_PREFIX") == "1"
+    replayed = os.getenv("QT_NAMED_REPLAYED_FIXTURE") == "1"
+    rolling_prefix = replayed or os.getenv("QT_TEST_ROLLING_WAL_PREFIX") == "1"
     with engine.begin() as conn:
         identity = _identity(conn)[0]
         cluster, db_oid = identity.split("/")
         target = {"system_identifier": cluster, "database_oid": int(db_oid), "database": engine.url.database}
         member = _signed_tablespace_member(conn)
         assert member[1] == str(signed_named_tablespace)
+        role, role_oid = conn.exec_driver_sql("SELECT rolname,oid FROM pg_roles WHERE rolname=session_user").one()
         if rolling_prefix:
             source_postmaster = conn.exec_driver_sql(_SOURCE_POSTMASTER).one()
             conn.exec_driver_sql("CREATE TABLE public.qt_named_wal_prefix_probe (record integer PRIMARY KEY)")
@@ -703,7 +728,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     policy = RecoverySitePolicy(receiving=receiving,
         base_transfer_sha256=transfer["transfer_receipt_sha256"], baseline_verification=base_native,
         source_public_key=source.public_key().public_bytes_raw().hex(), receiver_public_key=receiver.public_key().public_bytes_raw().hex(),
-        wal=TransferLimits(35, 64 * 1024**2, 16), archive=TransferLimits(40, 64 * 1024**2, 100),
+        wal=TransferLimits(35, 64 * 1024**2, 3 if replayed else 16), archive=TransferLimits(40, 64 * 1024**2, 100),
         pending=TransferLimits(40, 16 * 1024**2, 100), database=TransferLimits(40, 256 * 1024**2, 1, 32 * 1024**2),
         max_archive_objects=100, max_pending_entries=64)
     scratch = tmp_path / "source-scratch"
@@ -755,35 +780,57 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     assert not any(pgdata.iterdir()) and not any(history_path.iterdir())
     print(f"QT_RECEIVER_PREFLIGHT database={sizing['database_targets']} archive={sizing['archive_restore_bytes']} "
           f"workspace_required={capacity['required_bytes']} entries={capacity['required_entries']}")
+    raw_ids = [first_trade.raw_record_id]
+    if replayed:
+        prefix_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-prefix")
+        raw_ids.append(prefix_trade.raw_record_id)
+        prefix_facts = _admitted_rows(storage.database, series)[0]
+        prefix_commit = prefix_facts[-1].market_commit_seq
+        generated, prefix_boundary = _emit_fixture_wal_prefix(engine, replayed=True)
+        assert prefix_boundary[2] == generated[-1]
     later_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-at-anchor")
+    raw_ids.append(later_trade.raw_record_id)
     scope, records, _ = _pending_level2(storage, structures, pending_root)
     start = first_trade.received_at - timedelta(seconds=10)
     end = later_trade.received_at + timedelta(seconds=10)
     frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(series, start, end)])
     expected = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series)
-    assert len(expected) == 2
+    assert len(expected) == len(raw_ids)
     source_commit = _admitted_rows(storage.database, series)[0][-1].market_commit_seq
     scope_hash = archive_evidence_hash(asdict(scope))
-    plan = {"schema": PLAN_VERSION, "pending_spool_scope_sha256": scope_hash,
-            "receiver_public_key": policy.receiver_public_key, "receiver_preflight": measured,
-            **{key: sizing["site_policy"][key] for key in ("base_transfer_sha256", "baseline_verification_sha256", "pair_receipt_sha256")}}
-    plan_path = receipts / "recovery-plan.json"
-    save_receipt(plan_path, plan, initial=True)
-    plan_hash = hashlib.sha256(plan_path.read_bytes()).hexdigest()
-    package = {"source_commit_floor": source_commit, "scope": {"target_database": target},
-               "artifacts": {"independent_recovery": {"filename": plan_path.name, "sha256": plan_hash}}}
     package_path = receipts / "package.json"
-    save_receipt(package_path, package, initial=True)
-    approved_package_hash = hashlib.sha256(package_path.read_bytes()).hexdigest()
-    site = NamedRecoverySite(**vars(policy), approved_package_sha256=approved_package_hash, receiver_preflight=measured)
-    with pytest.raises(ValueError, match="preflight_policy_changed"):
-        replace(site, wal=replace(site.wal, bytes=site.wal.bytes + 1))
-    source_options = dict(site=site, provider_receipt_root=receipts,
-        database_repository=worker.root, archive_objects=objects.root, scratch=scratch, baseline=baseline,
-        restic=worker.restic, archive_key=suffix_key, pending_key=pending_key, pending_spool=pending_root)
-    with pytest.raises(ValueError, match="signing_key_unapproved"):
-        bind_named_recovery_source(**source_options, signing_key=receiver_sign)
-    recover_source = bind_named_recovery_source(**source_options, signing_key=source_sign)
+
+    def approve_fixture(staged=None):
+        pins = {}
+        inventory = None
+        schema = PLAN_VERSION
+        if staged is not None:
+            from scripts.automation.canonical_cold_recovery_checks import REPLAYED_PLAN_VERSION
+
+            schema = REPLAYED_PLAN_VERSION
+            pins = {"replayed_checkpoint_sha256": staged.checkpoint["verification_sha256"], "max_restart_segments": 3}
+            inventory = scratch / "received-prefix-catalog.jsonl"
+            shutil.copyfile(staged.inventory, inventory)
+        plan = {"schema": schema, "pending_spool_scope_sha256": scope_hash,
+                "receiver_public_key": policy.receiver_public_key, "receiver_preflight": measured, **pins,
+                **{key: sizing["site_policy"][key] for key in
+                   ("base_transfer_sha256", "baseline_verification_sha256", "pair_receipt_sha256")}}
+        plan_path = receipts / "recovery-plan.json"
+        save_receipt(plan_path, plan, initial=True)
+        plan_hash = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+        package = {"source_commit_floor": source_commit, "scope": {"target_database": target},
+                   "artifacts": {"independent_recovery": {"filename": plan_path.name, "sha256": plan_hash}}}
+        save_receipt(package_path, package, initial=True)
+        package_hash = hashlib.sha256(package_path.read_bytes()).hexdigest()
+        site = NamedRecoverySite(**vars(policy), approved_package_sha256=package_hash, receiver_preflight=measured, **pins)
+        with pytest.raises(ValueError, match="preflight_policy_changed"):
+            replace(site, wal=replace(site.wal, bytes=site.wal.bytes + 1))
+        source_options = dict(site=site, provider_receipt_root=receipts, database_repository=worker.root,
+            archive_objects=objects.root, scratch=scratch, baseline=baseline, restic=worker.restic, archive_key=suffix_key,
+            pending_key=pending_key, pending_spool=pending_root, replayed_inventory=inventory)
+        with pytest.raises(ValueError, match="signing_key_unapproved"):
+            bind_named_recovery_source(**source_options, signing_key=receiver_sign)
+        return site, package, package_hash, bind_named_recovery_source(**source_options, signing_key=source_sign)
 
     @contextmanager
     def boot_isolated(restored_path, check):
@@ -812,8 +859,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             assert conn.execute(text("""
                 SELECT raw_record_id FROM market.raw_archive_record_mappings
                 WHERE raw_record_id=ANY(:ids) ORDER BY raw_record_id
-            """), {"ids": [first_trade.raw_record_id, later_trade.raw_record_id]}).scalars().all() == sorted(
-                (first_trade.raw_record_id, later_trade.raw_record_id))
+            """), {"ids": raw_ids}).scalars().all() == sorted(raw_ids)
             if rolling_prefix:
                 probe_rows = conn.exec_driver_sql(
                     "SELECT record FROM public.qt_named_wal_prefix_probe ORDER BY record"
@@ -832,7 +878,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
                 return suffix if suffix.is_file() else super().local_path(object_key)
 
         suffix_store = FilesystemRawArchiveObjectStore(suffix_restore / suffix_prefix, writable=False)
-        recovered_store = ReceiverArchiveView(base_restore / source_prefix, writable=False)
+        recovered_store = ReceiverArchiveView(base_restore if replayed else base_restore / source_prefix, writable=False)
         recovered_db = Database(target_engine.url.render_as_string(hide_password=False))
         try:
             assert recovered_db.ensure_schema(), str(recovered_db.last_error)
@@ -852,19 +898,17 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         return archive_evidence_hash({"layout": pair["storage_layout"], "frozen": frozen.dataset_id,
                                       "pending": pending["verification_sha256"], "tablespace": list(restored)})
 
-    prepare_options = dict(site=site, signing_key=receiver_sign, pgbackrest=worker.pgbackrest,
+    prepare_options = dict(signing_key=receiver_sign, pgbackrest=worker.pgbackrest,
         restic=worker.restic, database_key=worker.config.database_key_path, base_archive_key=worker.config.archive_key_path,
         workspace=workspace, pgdata=pgdata, tablespaces={"qt_history_hdd-01": history_path},
-        timeout_seconds=100, ready_seconds=120, max_custody_entries=10_000)
-    receiver_options = dict(suffix_key=suffix_key, pending_key=pending_key, boot_isolated=boot_isolated,
-        verify_original_runtime=verify_original, timeout_seconds=100)
+        timeout_seconds=100, max_custody_entries=10_000)
+    if replayed:
+        from tests.test_market_data.local_named_replayed_fixture import NativeReplayedFixture
 
-    for supplied, failure in (({"qt_history_hdd-01": alias}, "directory_invalid"), ({}, "preflight_receiver_changed"),
-                              ({"qt_history_hdd-01": history_path}, "preflight_mount_changed")):
-        with pytest.raises(ValueError, match=failure), prepare_named_receiver(**(prepare_options | {
-                "workspace": negative, "pgdata": negative_data, "tablespaces": supplied})):
-            pytest.fail("unapproved preparation was admitted")
-    assert not any(negative_data.iterdir())
+        native_receiver = NativeReplayedFixture(database=engine.url.database, role=role, pgdata=pgdata)
+    receiver_options = dict(suffix_key=suffix_key, pending_key=pending_key,
+        boot_isolated=native_receiver.boot if replayed else boot_isolated,
+        verify_original_runtime=verify_original, timeout_seconds=100)
 
     def qualify_receiver(prepared):
         pg_control = pgdata / "global" / "pg_control"
@@ -893,17 +937,89 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
                 intact.replace(pack)
         return recover_named_site(prepared=prepared, **receiver_options)
 
+    def replay_before_approval(*, pgdata, base_restore, authenticate_prefix, check):
+        from scripts.automation.canonical_cold_receiver_replay import replay_private_receiver
+        from tests.test_market_data.local_named_replayed_fixture import PORT, SOCKET, materialize_fixture_archive
+
+        _stage_fixture_wal_prefix(engine, None, worker, receiving, transfer, base_native,
+                                  generated=generated, authenticate_prefix=authenticate_prefix)
+        prefix_target, prefix_replay, _ = prefix_boundary
+        archive_paths = None
+
+        @contextmanager
+        def boot_paused(path, *, socket, port, timeline, target_lsn, check):
+            assert (socket, port, timeline, target_lsn) == (SOCKET, PORT, 1, prefix_target)
+            with native_receiver.boot(path, check, target=target_lsn, expected_replay=prefix_replay) as engines:
+                yield engines
+
+        def verify_archive(conn, check_archive):
+            nonlocal archive_paths
+            paused, receipt, inventory, prefix_objects = materialize_fixture_archive(conn, pgdata=pgdata,
+                archive_root=workspace / "replayed-archive", source_objects=objects.root, base_restore=base_restore,
+                pair=pair, pair_receipt=pair_receipt, pair_receipt_sha256=transfer["pair_receipt_sha256"],
+                tablespace=history_path, tablespace_oid=member[0], role_oid=role_oid, target=prefix_target,
+                replay=prefix_replay, check=check_archive)
+            assert paused["accepted_commit_seq"] == prefix_commit and receipt["catalog_objects"] == 2
+            assert set(conn.exec_driver_sql("SELECT raw_record_id FROM market.raw_archive_record_mappings").scalars()) == set(raw_ids[:2])
+            decoded = [record.raw_record_id for path in prefix_objects.rglob("*.parquet") for record in read_raw_archive_parquet(path)]
+            assert sorted(decoded) == sorted(raw_ids[:2])
+            archive_paths = {"archive_inventory": inventory, "archive_objects": prefix_objects}
+            return receipt
+
+        def read_control(path, check_control):
+            assert path == pgdata
+            check_control()
+            control, expected_hash = native_receiver.stopped_control()
+            assert hashlib.sha256((pgdata / "global/pg_control").read_bytes()).hexdigest() == expected_hash
+            return control
+
+        result = replay_private_receiver(pgdata=pgdata, workspace=workspace, socket=SOCKET, port=PORT,
+            expected_roots=[(path, native_receiver._identity(path)) for path in (pgdata, workspace, history_path)],
+            expected_control_sha256=hashlib.sha256((pgdata / "global/pg_control").read_bytes()).hexdigest(),
+            database_identity=identity, database=engine.url.database, role=role, role_oid=role_oid, timeline=1,
+            target_lsn=prefix_target, replay_lsn=prefix_replay,
+            restore_command=f'{worker.pgbackrest} --config={workspace / "pgbackrest.conf"} --stanza=qt archive-get %f "%p"',
+            boot_paused=boot_paused, verify_archive=verify_archive, timeout_seconds=max(1, min(check(), 75)),
+            read_stopped_control=read_control, tablespaces={"qt_history_hdd-01": (history_path, member[0])},
+            request_restartpoint=True)
+        assert archive_paths is not None
+        return result | archive_paths
+
     @contextmanager
     def prepare_before_fence():
-        with prepare_named_receiver(**prepare_options) as prepared:
+        if replayed:
+            from scripts.automation.canonical_cold_named_recovery import prepare_replayed_receiver, seal_replayed_receiver
+
+            with prepare_replayed_receiver(**prepare_options, site=policy, receiver_preflight=measured,
+                                            replay_before_approval=replay_before_approval) as staged:
+                assert not package_path.exists()
+                assert staged.checkpoint["accepted_commit_seq"] == prefix_commit < source_commit
+                assert staged.checkpoint["redo_wal_segment"] == prefix_boundary[2] > base_native["wal_backup_stop"]
+                assert not (pgdata / "postmaster.pid").exists()
+                site, package, package_hash, recover_source = approve_fixture(staged)
+                with seal_replayed_receiver(staged=staged, site=site, ready_seconds=120) as prepared:
+                    print(f"QT_SIGNED_REPLAYED_APPROVAL checkpoint={staged.checkpoint['verification_sha256']} "
+                          f"prefix_commit={prefix_commit} final_commit={source_commit} package_sha256={package_hash}")
+                    yield prepared, site, package, package_hash, recover_source
+            return
+        site, package, package_hash, recover_source = approve_fixture()
+        for supplied, failure in (({"qt_history_hdd-01": alias}, "directory_invalid"), ({}, "preflight_receiver_changed"),
+                                  ({"qt_history_hdd-01": history_path}, "preflight_mount_changed")):
+            with pytest.raises(ValueError, match=failure), prepare_named_receiver(**(prepare_options | {
+                    "site": site, "ready_seconds": 120, "workspace": negative,
+                    "pgdata": negative_data, "tablespaces": supplied})):
+                pytest.fail("unapproved preparation was admitted")
+        assert not any(negative_data.iterdir())
+        with prepare_named_receiver(**prepare_options, site=site, ready_seconds=120) as prepared:
             assert not (restore_root / "start").exists()
             assert (pgdata / "backup_label").is_file() and (pgdata / "recovery.signal").is_file()
             if rolling_prefix:
                 _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, base_native)
                 assert not (restore_root / "start").exists()
-            yield prepared
+            yield prepared, site, package, package_hash, recover_source
 
-    with prepare_before_fence() as prepared, activation_fixture._fence_connections(storage) as (retained, control):
+    with prepare_before_fence() as approved, activation_fixture._fence_connections(storage) as (retained, control):
+        prepared, site, package, approved_package_hash, recover_source = approved
         ready = recover_source.assert_receiver_ready()
         assert ready == prepared.ready
         admission = bind_approved_recovery_checks(package_path=package_path, package=package,
@@ -940,7 +1056,16 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
                 reply = result.result(timeout=10)
             assert reply["archive_closure"] == report["archive_closure"]
             assert report["archive_closure"]["receiver_runtime_sha256"] == reply["runtime_sha256"]
-            assert report["archive_closure"]["coverage"]["final_objects"] == 2
+            coverage = report["archive_closure"]["coverage"]
+            assert coverage["final_objects"] == len(raw_ids)
+            if replayed:
+                wal = load_receipt(receiving / "encrypted-wal-transfer.json", max_bytes=65536)
+                assert wal["schema"] == "qt.encrypted_recovery_wal_transfer.v2"
+                assert wal["checkpoint_sha256"] == site.replayed_checkpoint_sha256 == report["archive_closure"]["checkpoint_sha256"]
+                assert wal["wal_after"] == generated[-1] and 0 < len(wal["files"]) <= site.wal.files
+                assert coverage["baseline_objects_used"] == 2 and coverage["verified_suffix_objects"] == 1
+                print(f"QT_SIGNED_REPLAYED_FINAL archive_baseline=2 archive_suffix=1 wal_final_files={len(wal['files'])} "
+                      f"wal_after={wal['wal_after']} final_wal={wal['wal_transferred_through']} closure={report['archive_closure']['closure_sha256']}")
             assert report["pending_spool_verified"]["pre_anchor_sha256"] == before["source_sha256"]
             response = load_receipt(receiving / "named-recovery-response.json", max_bytes=1024**2)
             response["body"]["request_sha256"] = "f" * 64
@@ -951,6 +1076,9 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             def exact_reply(*_):
                 return report
             exact_reply.assert_receiver_ready = lambda: ready
+            if replayed:
+                exact_reply.wal_baseline = base_native
+                exact_reply.restart_budget = site.max_restart_segments
             binding = bind_approved_recovery_checks(package_path=package_path, package=package,
                 approved_package_hash=approved_package_hash, receipt_root=receipts,
                 verify_site_restore=exact_reply, expected_pending_scope_sha256=scope_hash)
