@@ -3,8 +3,10 @@
 Run with no network. Mount the clone and verified baseline read-only under the
 attempt root, the pair receipt read-only, and the archive input and writable
 private suffix as separate binds. A matching object already in the suffix is
-verified and reused even if its source has since expired. Current serving SQL,
-WAL replay, backup keys, and archive deletion are outside this tool's scope.
+verified and reused even if its source has since expired. Optionally place the
+required baseline objects in the same private archive for application reads.
+Current serving SQL, WAL replay, backup keys, and archive deletion are outside
+this tool's scope.
 """
 
 from __future__ import annotations
@@ -136,10 +138,10 @@ def _place_object(key, descriptor, *, source, objects, work, reserve_bytes, chec
     return True
 
 
-def _copy_catalog(conn, args, baseline, objects, work, check, bound, *, baseline_bytes):
+def _copy_catalog(conn, args, baseline, objects, work, check, bound, *, baseline_bytes, baseline_source=None):
     catalog_hash, suffix_hash = hashlib.sha256(), hashlib.sha256()
     seen = set()
-    total_bytes = suffix_bytes = copied = reused = 0
+    total_bytes = suffix_bytes = copied = reused = baseline_copied = baseline_reused = 0
     for row in _archive_rows(conn, max_objects=args.max_objects, check=bound):
         check()
         key, digest, size = row["object_key"], row["object_sha256"], row["byte_count"]
@@ -156,6 +158,12 @@ def _copy_catalog(conn, args, baseline, objects, work, check, bound, *, baseline
         if known is not None:
             if known != descriptor:
                 raise RuntimeError(f"paused_archive_suffix_baseline_key_changed: {key}")
+            if baseline_source is None:
+                continue
+            added = _place_object(key, descriptor, source=baseline_source, objects=objects, work=work,
+                                  reserve_bytes=args.reserve_bytes, check=check)
+            baseline_copied += added
+            baseline_reused += not added
             continue
         suffix_bytes += size
         if baseline_bytes + suffix_bytes > args.max_work_bytes:
@@ -165,12 +173,17 @@ def _copy_catalog(conn, args, baseline, objects, work, check, bound, *, baseline
         copied += added
         reused += not added
         suffix_hash.update(encoded)
-    return {
+    result = {
         "catalog_inventory_sha256": catalog_hash.hexdigest(), "catalog_objects": len(seen), "catalog_bytes": total_bytes,
         "suffix_inventory_sha256": suffix_hash.hexdigest(), "suffix_objects": copied + reused, "suffix_bytes": suffix_bytes,
         "copied_objects": copied, "reused_objects": reused,
         "baseline_objects_used": len(seen) - copied - reused, "baseline_bytes_used": total_bytes - suffix_bytes,
     }
+    if baseline_source is not None:
+        result.update(archive_root=str(objects.parent), materialized_inventory_sha256=catalog_hash.hexdigest(),
+                      materialized_objects=len(seen), materialized_bytes=total_bytes,
+                      copied_baseline_objects=baseline_copied, reused_baseline_objects=baseline_reused)
+    return result
 
 
 def materialize(args):
@@ -220,6 +233,10 @@ def materialize(args):
         with archive_namespace(args.suffix, exclusive=True) as held:
             baseline = prepare_archive_baseline(args.receipt, args.archive_root,
                 expected_receipt_sha256=args.receipt_sha256, max_objects=args.max_objects, check=check)
+            baseline_source = None
+            if args.materialize_baseline:
+                baseline_source = _path(args.archive_root, pair["archive_source_root"],
+                                        absolute=True) if baseline.objects else args.archive_root
             if _mount_paths(args) != initial_mounts or _roots(args) != (source_id, suffix_id):
                 raise RuntimeError("paused_archive_suffix_mount_changed")
             scope = {
@@ -230,6 +247,8 @@ def materialize(args):
                 "source_archive": str(args.source_archive), "source_inode": source_id[1], "suffix_inode": suffix_id[1],
                 "device_id": args.device_id,
             }
+            if baseline_source is not None:
+                scope["materialize_baseline"] = True
             with engine.begin() as conn:
                 conn.exec_driver_sql("SET TRANSACTION READ ONLY")
                 bound(conn)
@@ -238,7 +257,7 @@ def materialize(args):
                 held()
                 objects, work = _scope_directory(args.suffix, scope)
                 copied = _copy_catalog(conn, args, baseline, objects, work, check, lambda: bound(conn),
-                                       baseline_bytes=baseline_bytes)
+                                       baseline_bytes=baseline_bytes, baseline_source=baseline_source)
                 bound(conn)
                 if probe(conn) != before:
                     raise RuntimeError("paused_archive_suffix_endpoint_changed")
@@ -264,6 +283,8 @@ def main(argv=None):
     parser.add_argument("--expected-replay-lsn", required=True, help="Exact expected replay record end at pause.")
     parser.add_argument("--source-archive", type=Path, required=True, help="Read-only bind of the archive object root.")
     parser.add_argument("--suffix", type=Path, required=True, help="Private writable bind for this endpoint's suffix.")
+    parser.add_argument("--materialize-baseline", action="store_true",
+                        help="Also copy referenced baseline objects into the same private application archive.")
     parser.add_argument("--max-work-bytes", type=int, required=True, help="Logical bytes verified across baseline and suffix.")
     parser.add_argument("--reserve-bytes", type=int, required=True, help="Free HDD bytes to preserve.")
     try:
