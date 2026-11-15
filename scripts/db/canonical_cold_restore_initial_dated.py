@@ -24,7 +24,7 @@ from portal.backend.service.storage.repos.fact_storage import ensure_payload_con
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from scripts.db.canonical_cold_audit import _source_rows
-from scripts.db.canonical_cold_migration import INITIAL, PostgresMigrationSource
+from scripts.db.canonical_cold_migration import INITIAL, Cohort, PostgresMigrationSource
 from scripts.db.canonical_cold_receipts import RECEIPT_SET_VERSION, _forward_day, _prefix_days, _validate_common
 from scripts.db.canonical_cold_restore_legacy import _CopyWindow, _assert_initial_inventory, _checks, _indexes, _layout, _toast_placement
 from scripts.db.canonical_cold_restore_legacy_payload import _assert_native_guard, _relation, _retention
@@ -84,8 +84,42 @@ def _routing(conn, day, *, limit):
             for series, start, end in bindings]
 
 
+def _private_sealed_marker(donor, *, day, audit, child, detail, source_commit, paused_donor, seal, expected_hash):
+    """Reconcile only a reviewed seal applied after the private donor paused."""
+    target = audit["database"]
+    if (paused_donor is None or not isinstance(seal, dict) or archive_evidence_hash(seal) != expected_hash
+            or seal.get("schema") != "qt.private_rehearsal_cohort_seal.v1"
+            or seal.get("proof_sha256") != paused_donor.clone_proof_sha256
+            or (seal.get("database"), seal.get("database_identity"), seal.get("accepted_commit_seq"))
+               != (target["database"], f"{target['system_identifier']}/{target['database_oid']}", source_commit)
+            or (seal.get("storage_day"), seal.get("previous_state"), seal.get("state"), seal.get("header_oid"))
+               != (day.isoformat(), "open", "sealed", child["child_oid"])
+            or not isinstance(seal.get("sealed_at"), str) or type(seal.get("expected_rows")) is not int
+            or type(seal.get("source_payload_bytes")) is not int or seal["source_payload_bytes"] < 0
+            or type(seal.get("payload_oid")) is not int or not 0 < seal["payload_oid"] < 2**32):
+        raise ValueError(f"{_BASE}_unbound_private_seal")
+    sealed_at = datetime.fromisoformat(seal["sealed_at"])
+    if (sealed_at.utcoffset() is None or
+            (detail["source_retention_state"], detail["source_sealed_at"], detail["expected_rows"])
+            != ("sealed", sealed_at.astimezone(UTC).isoformat(), seal["expected_rows"])):
+        raise RuntimeError(f"{_BASE}_private_seal_differs_from_audit")
+    donor.exec_driver_sql("SET LOCAL TIME ZONE 'UTC'")
+    native, applied, published = donor.execute(text("""
+        SELECT to_jsonb(p), to_jsonb(p) || jsonb_build_object(
+            'state','sealed','sealed_at',CAST(:sealed_at AS timestamptz),
+            'expected_rows',CAST(:expected_rows AS bigint),'source_bytes',CAST(:source_bytes AS bigint)),
+            EXISTS (SELECT FROM market.fact_archive_manifests m WHERE m.storage_day=p.storage_day)
+        FROM market.fact_retention_partitions p WHERE storage_day=:day
+    """), {"day": day, "sealed_at": sealed_at, "expected_rows": seal["expected_rows"],
+            "source_bytes": seal["source_payload_bytes"]}).one()
+    if (native["state"], native["sealed_at"], native["expected_rows"], published) != ("open", None, None, False):
+        raise RuntimeError(f"{_BASE}_private_seal_requires_original_open_day")
+    cohort = Cohort(day, detail["source_sealed_at"], detail["expected_rows"], 0, "sealed")
+    return applied, cohort, {"seal_sha256": expected_hash, "native_donor_retention_sha256": archive_evidence_hash(native)}
+
+
 def capture_initial_dated_donor(donor, *, donor_identity, day, audit, source_commit, max_routing_rows=100_000,
-                                paused_donor=None):
+                                paused_donor=None, private_seal=None, expected_private_seal_hash=None):
     """Capture one initially retired day's original native shape and retention state."""
     source = _require_snapshot(donor, donor_identity, paused_donor=paused_donor)
     child, detail = _scope(audit, day)
@@ -98,8 +132,14 @@ def capture_initial_dated_donor(donor, *, donor_identity, day, audit, source_com
     assert_fact_storage_contract(donor)
     header = _placement(donor, "market." + child["child"], parent=_HEADER_PARENT, day=day)
     created_at = donor.scalar(text(f"SELECT created_at FROM {_REGISTRY} WHERE storage_day=:day"), {"day": day})
-    marker = _retention(donor, day)
-    cohort = source.cohort(donor, day)
+    private_evidence = None
+    if private_seal is None and expected_private_seal_hash is None:
+        marker, cohort = _retention(donor, day), source.cohort(donor, day)
+    else:
+        marker, cohort, private_evidence = _private_sealed_marker(
+            donor, day=day, audit=audit, child=child, detail=detail, source_commit=source_commit,
+            paused_donor=paused_donor, seal=private_seal, expected_hash=expected_private_seal_hash,
+        )
     if (header["physical"]["oid"] != child["child_oid"] or created_at is None
             or (cohort.state, cohort.sealed_at, cohort.expected_rows) != (
                 detail["source_retention_state"], detail["source_sealed_at"], detail["expected_rows"],
@@ -113,12 +153,16 @@ def capture_initial_dated_donor(donor, *, donor_identity, day, audit, source_com
     else:
         payload = _placement(donor, payload_relation, parent=_PAYLOAD_PARENT, day=day)
         _assert_native_guard(donor, payload_relation, cloned=True)
+        if private_evidence is not None and payload["physical"]["oid"] != private_seal["payload_oid"]:
+            raise RuntimeError(f"{_BASE}_private_seal_payload_identity_changed")
     routes = _routing(donor, day, limit=max_routing_rows)
     result = {"schema": VERSION, "donor_identity": donor_identity, "storage_day": day.isoformat(),
               "audit_set_hash": audit["audit_set_hash"], "source_commit": source_commit,
               "header": header, "payload": payload, "retention": marker,
               "registered_at": created_at.astimezone(UTC).isoformat(), "max_routing_rows": max_routing_rows,
               "routing_hash": archive_evidence_hash({"routes": routes}), "routing_count": len(routes)}
+    if private_evidence is not None:
+        result["private_seal"] = private_evidence
     return result | {"receipt_sha256": archive_evidence_hash(result)}
 
 
@@ -203,7 +247,8 @@ def _attach(target, *, relation, parent, day, placement):
 def restore_initial_dated_day(target, donor, *, fence, original, expected_original_hash, audit,
                               forward_receipts, store, donor_store, max_copy_bytes,
                               max_archive_bytes=64 * 1024**3, max_pages=4096, max_inventory_pages=100_000,
-                              max_seconds=900, limits=FactArchiveLimits(), paused_donor=None):
+                              max_seconds=900, limits=FactArchiveLimits(), paused_donor=None,
+                              private_seal=None, expected_private_seal_hash=None):
     """Restore a bounded original dated placement, leaving cold authority and login fence active."""
     _require_disposable_fence(target, fence)
     root, backup = store.root.resolve(strict=True), donor_store.root.resolve(strict=True)
@@ -221,9 +266,11 @@ def restore_initial_dated_day(target, donor, *, fence, original, expected_origin
     if (original.get("receipt_sha256") != expected_original_hash or capture_initial_dated_donor(
         donor, donor_identity=original["donor_identity"], day=day, audit=audit, source_commit=original["source_commit"],
         max_routing_rows=original["max_routing_rows"], paused_donor=paused_donor,
+        private_seal=private_seal, expected_private_seal_hash=expected_private_seal_hash,
     ) != original):
         raise RuntimeError(f"{_BASE}_donor_receipt_changed")
-    cohort = source.cohort(donor, day)
+    cohort = (source.cohort(donor, day) if private_seal is None else
+              Cohort(day, detail["source_sealed_at"], detail["expected_rows"], 0, "sealed"))
     if detail["expected_pages"] > max_pages:
         raise RuntimeError(f"{_BASE}_page_budget_exceeded")
     batches = []
@@ -373,4 +420,6 @@ def restore_initial_dated_day(target, donor, *, fence, original, expected_origin
               "registered_at": original["registered_at"], "routing_sha256": original["routing_hash"],
               "original_receipt_sha256": expected_original_hash, "copy_bytes": copy_bytes,
               "verified_archive_bytes": archive_bytes, "ordered_content_hash": content}
+    if "private_seal" in original:
+        result["private_seal"] = original["private_seal"]
     return result | {"receipt_sha256": archive_evidence_hash(result)}
