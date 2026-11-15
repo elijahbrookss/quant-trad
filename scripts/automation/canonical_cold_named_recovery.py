@@ -40,7 +40,9 @@ from scripts.db.canonical_cold_recovery_archive_transport import (
 )
 from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope, measure_pending_spool, stage_pending_spool, verify_pending_spool
 from scripts.db.canonical_cold_recovery_suffix import PreparedArchiveBaseline, prepare_archive_baseline
-from scripts.db.canonical_cold_recovery_wal_transfer import _baseline, stage_final_wal, verify_wal_prefix
+from scripts.db.canonical_cold_recovery_wal_transfer import (
+    _MAX_SEGMENTS, _baseline, _prefix_window, stage_final_wal, verify_wal_prefix,
+)
 from scripts.db.canonical_cold_prepared_custody import capture_prepared_custody
 from scripts.db.fact_header_v2_capture import _bounded_step
 
@@ -48,6 +50,7 @@ from scripts.db.fact_header_v2_capture import _bounded_step
 _REQUEST = "qt.named_recovery_site_request.v3"
 _RESPONSE = "qt.named_recovery_site_response.v3"
 PREFLIGHT_VERSION = "qt.named_recovery_receiver_preflight.v2"
+_WAL_PREFIX_VERIFICATION = "qt.named_recovery_wal_prefix_verification.v1"
 _MAX_RECEIPT = 1024 * 1024
 _MAX_PROVIDER_RECEIPT = 128 * 1024**2
 _TABLESPACE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,62}")
@@ -754,11 +757,45 @@ def verify_prepared_wal_prefix(*, prepared, after, through, prefix_sha256, timeo
     if load_receipt(prepared.root / PREPARED_READY_FILENAME, max_bytes=_MAX_RECEIPT) != ready:
         raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
     check()
-    return _sign({"schema": "qt.named_recovery_wal_prefix_verification.v1",
+    return _sign({"schema": _WAL_PREFIX_VERIFICATION,
                   "prepared_receiver_sha256": prepared.digest, "pair_receipt_sha256": verifier["pair_receipt_sha256"],
                   "baseline_verification_sha256": verifier["verification_sha256"], "wal_prefix_sha256": prefix_sha256,
                   "previous_prefix_sha256": previous_prefix_sha256, "after": after, "through": through,
                   "verified_wal_sha256": archive_evidence_hash(entries), "segments": len(entries)}, prepared.signer)
+
+
+def verify_wal_prefix_chain(*, site, prepared_sha256, prefixes):
+    """Bind contiguous native verification receipts to one prepared receiver and native backup."""
+    if (not isinstance(site, RecoverySitePolicy) or not _sha256(prepared_sha256)
+            or not isinstance(prefixes, (list, tuple)) or not prefixes):
+        raise ValueError("canonical_named_recovery_prefix_chain_required")
+    base = site.baseline_verification
+    _baseline(site.receiving, site.base_transfer_sha256, base, base["verification_sha256"])
+    binding = {"schema": _WAL_PREFIX_VERIFICATION, "prepared_receiver_sha256": prepared_sha256,
+               "pair_receipt_sha256": base["pair_receipt_sha256"],
+               "baseline_verification_sha256": base["verification_sha256"]}
+    after = base["wal_backup_stop"]
+    previous = None
+    count = 0
+    receipt_hashes = []
+    for prefix in prefixes:
+        body = verify_signed_recovery(prefix, site.receiver_public_key)
+        if (any(body.get(key) != value for key, value in binding.items()) or body.get("after") != after
+                or "previous_prefix_sha256" not in body or body["previous_prefix_sha256"] != previous
+                or not _sha256(body.get("wal_prefix_sha256")) or not _sha256(body.get("verified_wal_sha256"))):
+            raise ValueError("canonical_named_recovery_prefix_chain_changed")
+        through = body.get("through")
+        segments = _prefix_window(base, after, through, min(site.wal.files, _MAX_SEGMENTS), previous)
+        if type(body.get("segments")) is not int or body["segments"] != len(segments):
+            raise ValueError("canonical_named_recovery_prefix_chain_segment_count_changed")
+        receipt_hashes.append(archive_evidence_hash(prefix))
+        count += len(segments)
+        after, previous = through, body["wal_prefix_sha256"]
+    evidence = {"prepared_receiver_sha256": prepared_sha256, "pair_receipt_sha256": base["pair_receipt_sha256"],
+                "baseline_verification_sha256": base["verification_sha256"], "wal_first": base["wal_start"],
+                "wal_verified_through": after, "wal_segment_bytes": base["wal_segment_bytes"],
+                "prefix_batches": len(receipt_hashes), "prefix_segments": count}
+    return evidence | {"wal_verification_sha256": archive_evidence_hash(evidence | {"receipts": receipt_hashes})}
 
 
 def _verify_prepared_wal(prepared, suffix, deadline, check):

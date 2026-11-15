@@ -542,7 +542,9 @@ _SOURCE_POSTMASTER = "SELECT pg_postmaster_start_time(), timeline_id FROM pg_con
 
 
 def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, baseline):
-    from scripts.automation.canonical_cold_named_recovery import verify_prepared_wal_prefix, verify_signed_recovery
+    from scripts.automation.canonical_cold_named_recovery import (
+        _sign, verify_prepared_wal_prefix, verify_signed_recovery, verify_wal_prefix_chain,
+    )
     from scripts.db.canonical_cold_recovery_wal_transfer import (
         check_source_wal_capacity, stage_wal_prefix, verify_wal_prefix,
     )
@@ -607,10 +609,12 @@ def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, bas
     assert [item["segment"] for item in first["files"] + second["files"]] == (
         _wal_range(start, last_through, segment_bytes, prefix_limits.files + 1)[1:]
     )
+    envelopes = []
     for batch in (first, second):
         envelope = verify_prepared_wal_prefix(prepared=prepared, after=batch["wal_after"],
             through=batch["wal_transferred_through"], prefix_sha256=batch["wal_prefix_sha256"], timeout_seconds=25,
             previous_prefix_sha256=batch["previous_prefix_sha256"], limits=prefix_limits)
+        envelopes.append(envelope)
         verified = verify_signed_recovery(envelope, prepared.site.receiver_public_key)
         entries = [[row["segment"], row["wal_checksum"]] for row in batch["files"]]
         assert verified == {
@@ -627,6 +631,20 @@ def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, bas
         }
         print(f"QT_NATIVE_WAL_PREFIX after={verified['after']} through={verified['through']} segments={len(entries)} "
               f"native_bytes={segment_bytes * len(entries)} native_sha256={verified['verified_wal_sha256']}")
+    chain_options = {"site": prepared.site, "prepared_sha256": prepared.digest}
+    chain = verify_wal_prefix_chain(**chain_options, prefixes=envelopes)
+    assert (chain["wal_first"], chain["wal_verified_through"], chain["wal_segment_bytes"],
+            chain["prefix_batches"], chain["prefix_segments"]) == (baseline["wal_start"], last_through, segment_bytes, 2, 5)
+    for invalid in ([envelopes[1]], envelopes[::-1]):
+        with pytest.raises(ValueError, match="prefix_chain_changed"):
+            verify_wal_prefix_chain(**chain_options, prefixes=invalid)
+    tampered_body = envelopes[1]["body"] | {"segments": 2}
+    with pytest.raises(ValueError, match="signature_mismatch"):
+        verify_wal_prefix_chain(**chain_options, prefixes=[envelopes[0], envelopes[1] | {"body": tampered_body}])
+    with pytest.raises(ValueError, match="segment_count_changed"):
+        verify_wal_prefix_chain(**chain_options, prefixes=[envelopes[0], _sign(tampered_body, prepared.signer)])
+    print(f"QT_NATIVE_WAL_PREFIX_CHAIN batches={chain['prefix_batches']} verified_through={chain['wal_verified_through']} "
+          f"chain_sha256={chain['wal_verification_sha256']}")
     assert not (receiving / "encrypted-wal-transfer.json").exists()
     assert not prepared.armed
     print(f"QT_ROLLING_WAL_PREFIX old_cap=3 first_files={len(first['files'])} second_files={len(second['files'])} "
