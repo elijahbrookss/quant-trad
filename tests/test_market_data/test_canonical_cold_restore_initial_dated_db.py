@@ -11,12 +11,14 @@ from sqlalchemy.exc import DBAPIError
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.contracts import DatasetSeriesRequest
-from market_data.fact_archive import archive_evidence_hash
+from market_data.fact_archive import FactArchiveLimits, archive_evidence_hash
 from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES, COLD_HISTORY_LAYOUT_VERSION
 from portal.backend.db.fact_identity_schema import _assert_header_partition, fact_header_partition_name
 from portal.backend.db.fact_storage_schema import fact_partition_name
+from portal.backend.service.storage.repos import market_data
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
 from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
+from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.db import canonical_cold_activate as activation
 from scripts.db.canonical_cold_audit import audit_candidate
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
@@ -62,12 +64,27 @@ def initially_dated_rollback_clone(storage, tmp_path, monkeypatch, request):
                        if frozen is not None else [])
     expected_latest = storage.repo.read_facts(**selection)
     old_store = FilesystemRawArchiveObjectStore(tmp_path / "source-archive")
+    candidate_store = FilesystemRawArchiveObjectStore(tmp_path / "candidate-archive" / "objects")
+    checkpoint = MigrationCheckpoint(tmp_path / "dated-checkpoint.sqlite")
+    with engine.begin() as conn:
+        cluster = conn.scalar(text("SELECT system_identifier::text FROM pg_control_system()"))
+        source = PostgresMigrationSource(engine, expected_system_identifier=cluster)
+        target_identity = source.identity(conn)
+        source_commit = storage.repo._current_commit_seq_with_session(conn)
+    staged = {"source_store": old_store, "destination_store": candidate_store,
+              "temporary_directory": tmp_path / "staging"}
+    if state == "partial":
+        with pytest.raises(RuntimeError, match="source_unsealed_or_missing"):
+            stage(source, checkpoint, day=day, **staged)
     archive = PostgresCanonicalFactArchiveRepository(
         database=storage.database, object_store=old_store, temporary_directory=tmp_path / "source-stage",
+        limits=FactArchiveLimits(max_rows=1, row_group_size=1) if state == "partial" else FactArchiveLimits(),
     )
     for old_day in migrating_days:
         archive.seal_partition(old_day)
-    if state not in {"sealed", "empty"}:
+    if state == "partial":
+        assert archive.stage_next_page(day)["status"] == "page_acknowledged"
+    elif state not in {"sealed", "empty"}:
         assert archive.stage_next_page(day)["status"] == "page_acknowledged"
         assert archive.verify_next_page(day)["status"] == "page_verified"
         assert archive.verify_partition(day)["status"] == "partition_verified"
@@ -75,18 +92,12 @@ def initially_dated_rollback_clone(storage, tmp_path, monkeypatch, request):
         reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
         assert reclaimer.reclaim_partition(day, eligible_before=end, execute=True)["status"] == "partition_reclaimed"
 
-    with engine.begin() as conn:
-        cluster = conn.scalar(text("SELECT system_identifier::text FROM pg_control_system()"))
-        source = PostgresMigrationSource(engine, expected_system_identifier=cluster)
-        target_identity = source.identity(conn)
-        source_commit = storage.repo._current_commit_seq_with_session(conn)
     donor_name = f"qt_bench_dated_{uuid4().hex[:12]}"
     donor_engine = create_engine(engine.url.set(database=donor_name))
     admin = create_engine(engine.url.set(database="postgres"), isolation_level="AUTOCOMMIT")
     donor_root = tmp_path / "donor-archive"
     shutil.copytree(old_store.root, donor_root)
     donor_store = FilesystemRawArchiveObjectStore(donor_root, writable=False)
-    candidate_store = FilesystemRawArchiveObjectStore(tmp_path / "candidate-archive" / "objects")
     token = f"{cluster}/{target_identity['database_oid']}"
     try:
         engine.dispose()
@@ -105,17 +116,30 @@ def initially_dated_rollback_clone(storage, tmp_path, monkeypatch, request):
         with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
             identity = prepare_identity_suffix(conn, expected_database=token, cutoff=cutoff)
         target = TargetDatabase(cluster, target_identity["database"], target_identity["database_oid"])
-        checkpoint = MigrationCheckpoint(tmp_path / "dated-checkpoint.sqlite")
         audit_scope = {"target": target, "object_store": candidate_store, "cutoff": cutoff}
         for old_day in migrating_days:
-            assert stage(source, checkpoint, day=old_day, source_store=old_store, destination_store=candidate_store,
-                         temporary_directory=tmp_path / "staging")["cohort_complete"]
-            assert load_checkpoint(engine, checkpoint, target=target, object_store=candidate_store,
-                                   day=old_day)["checkpoint_end_reached"]
+            first = stage(source, checkpoint, day=old_day, **staged)
+            if state == "partial":
+                assert first["rows"] == first["pages"] == 1 and not first["cohort_complete"]
+                checkpoint = MigrationCheckpoint(checkpoint.path)
+                assert stage(source, checkpoint, day=old_day, **staged)["cohort_complete"]
+                reused, materialized = list(checkpoint.iter_completed_pages(day=old_day))
+                assert reused.reused and reused.source_authority is not None
+                assert not materialized.reused and materialized.source_authority is None
+                loaded = load_checkpoint(engine, checkpoint, target=target, object_store=candidate_store,
+                                         day=old_day, max_pages=2)
+            else:
+                assert first["cohort_complete"]
+                loaded = load_checkpoint(engine, checkpoint, target=target, object_store=candidate_store, day=old_day)
+            assert loaded["checkpoint_end_reached"]
         manifests = [audit_candidate(engine, checkpoint, day=old_day, **audit_scope) for old_day in migrating_days]
-        forward = manifests[0]
+        if state == "partial":
+            first = manifests[0]["day_batch"]
+            assert first["last_verified_ordinal"] == 0 and not first["day_scan_end_reached"]
+            manifests.append(audit_candidate(engine, checkpoint, day=day, after_ordinal=0, **audit_scope))
+        forward = [receipt for receipt in manifests if receipt["day_batch"]["storage_day"] == day.isoformat()]
         receipts = [audit_candidate(engine, checkpoint, **audit_scope), *manifests,
-                    audit_candidate(engine, checkpoint, inventory=True, **audit_scope)]
+                    audit_candidate(engine, checkpoint, inventory=True, max_pages=2, **audit_scope)]
         audit = validate_audit_receipts(receipts)
         donor = PostgresMigrationSource(donor_engine, expected_system_identifier=cluster)
         with donor.snapshot() as conn:
@@ -142,12 +166,15 @@ def initially_dated_rollback_clone(storage, tmp_path, monkeypatch, request):
                                                               verified_objects=verified, database_fence=fence)
             reopen_database_fence(fence, control, expected_outcome="committed", record=lambda *_: None,
                                   read_outcome=lambda db: activation.read_activation_outcome(db, **outcome))
+        monkeypatch.setattr(market_data, "canonical_fact_storage_repository", PostgresCanonicalFactStorageRepository(
+            object_store_factory=lambda: candidate_store, read_cache_factory=lambda: None,
+        ))
         yield SimpleNamespace(
             storage=storage, source=source, donor=donor, target_identity=target_identity, donor_identity=donor_identity,
-            donor_scope=donor_scope, audit=audit, forward_receipts=[forward], candidate_store=candidate_store,
+            donor_scope=donor_scope, audit=audit, forward_receipts=forward, candidate_store=candidate_store,
             donor_store=donor_store, source_commit=source_commit, dated_days=(day,), end_day=end,
             frozen=frozen, expected_frozen=expected_frozen, expected_latest=expected_latest, selection=selection,
-            checkpoint=checkpoint, state="sealed" if state == "empty" else state,
+            checkpoint=checkpoint, state="sealed" if state in {"empty", "partial"} else state,
             expected_rows=0 if state == "empty" else 2, certificate=certificate, activation_outcome=outcome,
         )
     finally:
@@ -157,12 +184,17 @@ def initially_dated_rollback_clone(storage, tmp_path, monkeypatch, request):
         admin.dispose()
 
 
-@pytest.mark.parametrize("initially_dated_rollback_clone", ["sealed", "verified", "reclaimed", "empty"], indirect=True)
+@pytest.mark.parametrize("initially_dated_rollback_clone", ["sealed", "partial", "verified", "reclaimed", "empty"], indirect=True)
 def test_restore_initial_dated_day_retains_routing_and_original_payload_placement(initially_dated_rollback_clone):
     scope = initially_dated_rollback_clone
     day = scope.dated_days[0]
     header, payload = fact_header_partition_name(day), fact_partition_name(day)
     original = scope.donor_scope
+    assert scope.storage.repo.read_facts(**scope.selection) == scope.expected_latest
+    if scope.frozen is not None:
+        assert scope.storage.repo.read_dataset_fact_revisions(
+            dataset_id=scope.frozen.dataset_id, series_id=scope.storage.series_id,
+        ) == scope.expected_frozen
     with _fence_connections(scope.storage) as (conn, control), scope.donor.snapshot() as donor:
         fence = close_database_fence(conn, control, expected_database=scope.target_identity, timeout_seconds=60,
                                      record=lambda *_: None)
