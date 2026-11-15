@@ -21,6 +21,7 @@ from time import monotonic
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
 from core.storage_mounts import configured_archive_root
@@ -31,6 +32,7 @@ from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from portal.backend.service.storage.history_policy import _read as read_saved_history_policy
 from portal.backend.service.storage.recovery_copies import _sync
 from scripts.automation.stage_encrypted_recovery_handoff import _private_root
+from scripts.db.canonical_cold_activate import _retention_sources
 from scripts.db.canonical_cold_audit import _ensure_target, _plan, audit_candidate
 from scripts.db.canonical_cold_load import TargetDatabase, _load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
@@ -38,7 +40,7 @@ from scripts.db.canonical_cold_private_activate import _pinned_bytes
 from scripts.db.canonical_cold_private_load import SharedHddLoadLimits, shared_hdd_floor, supervise_private_page
 from scripts.db.canonical_cold_private_placement import _clone_root, _mount_backing, assert_private_placement, load_private_placement
 from scripts.db.canonical_cold_private_seal import _matches_inode, load_private_clone, seal_one
-from scripts.db.canonical_cold_receipts import validate_audit_receipts
+from scripts.db.canonical_cold_receipts import manifest_inventory_hash, validate_audit_receipts
 
 
 SCHEMA = "qt.private_canonical_cold_prefix.v1"
@@ -155,8 +157,8 @@ def _seal(args, *, clone, engine, journal, plan, retirement, remaining):
               "header_oid": args.header_oid, "payload_oid": args.payload_oid, "previous_state": "open"}
     _, previous_intent = journal.latest("seal_intent", day)
     _, previous = journal.latest("seal", day)
-    with engine.begin() as conn:
-        _, policy = read_saved_history_policy(conn)
+    with Session(engine) as session, session.begin():
+        _, policy = read_saved_history_policy(session)
     recorded_intent = {"scope": intent, "policy": policy, "source_objects": str(original_objects)}
     if previous_intent is not None and previous_intent != recorded_intent:
         raise RuntimeError("private_prefix_seal_reviewed_intent_changed")
@@ -261,6 +263,37 @@ def _stage_scratch(archive, prefix_sha256, work_inode):
     return scratch
 
 
+def _assert_current_export(source, target, *, cutoff, audit, remaining):
+    """A terminal local cursor must still name the current native selection."""
+    source.statement_timeout_ms = min(30_000, remaining() * 1000)
+    with source.snapshot() as conn:
+        if _ensure_target(conn, source, target) != audit["database"]:
+            raise RuntimeError("private_prefix_export_database_changed")
+        _retention_sources(conn, cutoff, audit)
+        expected = audit["verified_pages"]
+        rows = conn.execute(text("""
+            SELECT id,manifest_hash,row_count,staged_storage_day FROM market.cold_fact_pages
+            ORDER BY id COLLATE "C" LIMIT :limit
+        """).execution_options(yield_per=256), {"limit": expected + 1})
+        count = 0
+
+        def inventory():
+            nonlocal count
+            for identity, digest, size, staged_day in rows:
+                remaining()
+                count += 1
+                if staged_day is not None or count > expected:
+                    raise RuntimeError("private_prefix_export_loaded_inventory_changed")
+                yield identity, digest, size
+
+        try:
+            digest = manifest_inventory_hash(inventory())
+        finally:
+            rows.close()
+        if (count, digest) != (expected, audit["loaded_inventory_hash"]):
+            raise RuntimeError("private_prefix_export_loaded_inventory_changed")
+
+
 def _run_batches(args, *, engine, source, target, clone, placement, plan, retirement, journal, store, limits, floor, remaining):
     checkpoint = journal.checkpoint
     cutoff = date.fromisoformat(plan["cold_before_day"])
@@ -274,7 +307,7 @@ def _run_batches(args, *, engine, source, target, clone, placement, plan, retire
             raise RuntimeError("private_prefix_audit_incomplete")
         kinds = ("audit_plan", "audit_day", "audit_inverse")
         audit_summary = validate_audit_receipts(journal.items(*kinds), expected_prefix_hash=args.prefix_sha256)
-        remaining()
+        _assert_current_export(source, target, cutoff=cutoff, audit=audit_summary, remaining=remaining)
         _free(args.work_root, minimum=floor, allowance=2 * args.max_export_bytes)
         artifacts = {"audit": _export(args.work_root / "audit-receipts.json", journal.items(*kinds),
                 max_bytes=args.max_export_bytes, remaining=remaining),
