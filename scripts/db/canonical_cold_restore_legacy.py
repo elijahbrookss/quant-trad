@@ -111,9 +111,9 @@ def _toast_placement(conn, relation):
     """), {"relation": relation}).all()]
 
 
-def measure_legacy_donor(donor, *, donor_identity, audit, source_commit):
+def measure_legacy_donor(donor, *, donor_identity, audit, source_commit, paused_donor=None):
     """Measure the exact original header catalog and authority on a physical clone."""
-    _require_snapshot(donor, donor_identity)
+    _require_snapshot(donor, donor_identity, paused_donor=paused_donor)
     if (type(source_commit) is not int or source_commit < 1 or audit.get("schema") != RECEIPT_SET_VERSION
             or archive_evidence_hash({key: value for key, value in audit.items() if key != "audit_set_hash"})
             != audit.get("audit_set_hash")):
@@ -306,7 +306,7 @@ def _assert_attached(conn, scope):
 def restore_legacy_headers(target, donor, *, fence, donor_scope, expected_donor_hash, audit, forward_receipts,
                            store, donor_store, max_copy_bytes, max_seconds=900, max_pages=100_000,
                            max_archive_bytes=1024**4,
-                           limits=FactArchiveLimits()):
+                           limits=FactArchiveLimits(), paused_donor=None):
     """COPY the exact old legacy partition. Leave cold authority fenced.
 
     Distinct archive roots retain their bytes. This step restores headers and
@@ -323,10 +323,11 @@ def restore_legacy_headers(target, donor, *, fence, donor_scope, expected_donor_
         raise ValueError("canonical_cold_restore_legacy_invalid_scope")
     deadline = min(monotonic() + max_seconds, fence.deadline)
     donor_identity = donor_scope["donor_identity"]
-    source = _require_snapshot(donor, donor_identity)
+    source = _require_snapshot(donor, donor_identity, paused_donor=paused_donor)
     source_commit = donor_scope["source_commit"]
     _bound(donor, deadline)
-    if (measure_legacy_donor(donor, donor_identity=donor_identity, audit=audit, source_commit=source_commit) != donor_scope
+    if (measure_legacy_donor(donor, donor_identity=donor_identity, audit=audit, source_commit=source_commit,
+                             paused_donor=paused_donor) != donor_scope
             or donor_scope["scope_sha256"] != expected_donor_hash):
         raise RuntimeError("canonical_cold_restore_legacy_donor_scope_changed")
     days = {day: entry for day, entry in _prefix_days(audit["prefix"]).items()

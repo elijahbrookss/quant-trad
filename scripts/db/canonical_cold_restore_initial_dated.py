@@ -84,9 +84,10 @@ def _routing(conn, day, *, limit):
             for series, start, end in bindings]
 
 
-def capture_initial_dated_donor(donor, *, donor_identity, day, audit, source_commit, max_routing_rows=100_000):
+def capture_initial_dated_donor(donor, *, donor_identity, day, audit, source_commit, max_routing_rows=100_000,
+                                paused_donor=None):
     """Capture one initially retired day's original native shape and retention state."""
-    source = _require_snapshot(donor, donor_identity)
+    source = _require_snapshot(donor, donor_identity, paused_donor=paused_donor)
     child, detail = _scope(audit, day)
     if (type(max_routing_rows) is not int or not 1 <= max_routing_rows <= 100_000
             or type(source_commit) is not int or source_commit < audit["retired_prefix_max_commit_seq"]
@@ -202,7 +203,7 @@ def _attach(target, *, relation, parent, day, placement):
 def restore_initial_dated_day(target, donor, *, fence, original, expected_original_hash, audit,
                               forward_receipts, store, donor_store, max_copy_bytes,
                               max_archive_bytes=64 * 1024**3, max_pages=4096, max_inventory_pages=100_000,
-                              max_seconds=900, limits=FactArchiveLimits()):
+                              max_seconds=900, limits=FactArchiveLimits(), paused_donor=None):
     """Restore a bounded original dated placement, leaving cold authority and login fence active."""
     _require_disposable_fence(target, fence)
     root, backup = store.root.resolve(strict=True), donor_store.root.resolve(strict=True)
@@ -215,11 +216,11 @@ def restore_initial_dated_day(target, donor, *, fence, original, expected_origin
     day = date.fromisoformat(original["storage_day"])
     child, detail = _scope(audit, day)
     deadline = min(fence.deadline, monotonic() + max_seconds)
-    source = _require_snapshot(donor, original["donor_identity"])
+    source = _require_snapshot(donor, original["donor_identity"], paused_donor=paused_donor)
     _bound(donor, deadline)
     if (original.get("receipt_sha256") != expected_original_hash or capture_initial_dated_donor(
         donor, donor_identity=original["donor_identity"], day=day, audit=audit, source_commit=original["source_commit"],
-        max_routing_rows=original["max_routing_rows"],
+        max_routing_rows=original["max_routing_rows"], paused_donor=paused_donor,
     ) != original):
         raise RuntimeError(f"{_BASE}_donor_receipt_changed")
     cohort = source.cohort(donor, day)

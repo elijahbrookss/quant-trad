@@ -66,7 +66,8 @@ def _restore_raw_index(conn, *, fence, identity, original, activation, max_copy_
 
 def finalize_rollback_layout(conn, donor, *, fence, allocator, original, original_hash, legacy, payloads,
                              direct_cold, witness, witness_hash, store, dated=(), recurring=(),
-                             raw_index_max_copy_bytes=None, custody_max_copy_bytes=None, timeout_seconds=120):
+                             raw_index_max_copy_bytes=None, custody_max_copy_bytes=None, timeout_seconds=120,
+                             paused_donor=None):
     """Restore the original read authority after exact data and retention reconstruction.
 
     The clone writer and archive fences stay held through certificate
@@ -78,7 +79,7 @@ def finalize_rollback_layout(conn, donor, *, fence, allocator, original, origina
         raise ValueError("canonical_cold_finalize_rollback_invalid_boundary")
     deadline = min(monotonic() + timeout_seconds, fence.deadline)
     donor_identity = original["database"]
-    _require_snapshot(donor, donor_identity)
+    _require_snapshot(donor, donor_identity, paused_donor=paused_donor)
     assert_fact_storage_contract(donor)
     donor_legacy_end = assert_fact_header_legacy_contract(donor)
     original_certificate = _snapshot_layout(donor)
@@ -250,4 +251,6 @@ def finalize_rollback_layout(conn, donor, *, fence, allocator, original, origina
             raise RuntimeError("canonical_cold_finalize_rollback_allocator_changed")
         check_archive()
         fence.assert_quiet(conn)
+        if paused_donor is not None:
+            paused_donor.assert_snapshot(donor, donor_identity)
     return evidence | {"receipt_sha256": archive_evidence_hash(evidence)}

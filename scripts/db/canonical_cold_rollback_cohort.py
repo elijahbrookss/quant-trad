@@ -20,6 +20,7 @@ from portal.backend.service.storage.repos.fact_storage import ensure_payload_con
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
 from scripts.db.canonical_cold_audit import _assert_page_series, _source_rows
 from scripts.db.canonical_cold_migration import DOCS, INITIAL, PostgresMigrationSource, _compare_existing
+from scripts.db.canonical_cold_paused_donor import PausedRollbackDonor
 from scripts.db.canonical_cold_receipts import (
     RECEIPT_SET_VERSION, _forward_day, _identity, _prefix_days, _validate_common, manifest_inventory_hash,
 )
@@ -28,12 +29,16 @@ from scripts.db.canonical_cold_receipts import (
 VERSION = "qt.canonical_cold_rollback_cohort.v1"
 
 
-def _require_snapshot(conn, expected):
+def _require_snapshot(conn, expected, *, paused_donor=None):
     url = conn.engine.url
-    if (not _identity(expected) or not expected["database"].startswith(("qt_bench_", "qt_migration_"))
+    if (not _identity(expected) or (paused_donor is None and not expected["database"].startswith(("qt_bench_", "qt_migration_")))
             or url.host not in {None, "timescaledb", "127.0.0.1", "::1"}
             or (url.query.get("host") is not None and not str(url.query["host"]).startswith("/"))):
         raise ValueError("canonical_cold_rollback_requires_isolated_clone")
+    if paused_donor is not None:
+        if type(paused_donor) is not PausedRollbackDonor:
+            raise ValueError("canonical_cold_rollback_invalid_paused_donor_binding")
+        paused_donor.assert_snapshot(conn, expected)
     if (not conn.in_transaction() or conn.get_isolation_level() != "REPEATABLE READ"
             or conn.scalar(text("SHOW transaction_read_only")) != "on"):
         raise ValueError("canonical_cold_rollback_requires_read_only_repeatable_snapshot")
@@ -212,7 +217,7 @@ def _compare_page(original, candidate, source, old_reader, cold_reader, *, cohor
 def verify_restored_cohort(original, candidate, *, day, original_identity, candidate_identity, audit,
                            forward_receipts, source_commit, old_store, candidate_store, expected_placement_hash,
                            max_pages=1024, max_inventory_pages=100_000, max_archive_bytes=32 * 1024**3, max_seconds=900,
-                           limits=FactArchiveLimits()):
+                           limits=FactArchiveLimits(), paused_donor=None):
     """Recheck full forward and inverse membership without writing to either clone."""
     old_root = old_store.root.resolve(strict=True)
     new_root = candidate_store.root.resolve(strict=True)
@@ -237,7 +242,7 @@ def verify_restored_cohort(original, candidate, *, day, original_identity, candi
         check_budget(conn)
         conn.exec_driver_sql("SET LOCAL lock_timeout='500ms'")
         conn.exec_driver_sql("SET LOCAL TIME ZONE 'UTC'")
-    source = _require_snapshot(original, original_identity)
+    source = _require_snapshot(original, original_identity, paused_donor=paused_donor)
     _require_snapshot(candidate, candidate_identity)
     child, detail, pages = _approved_pages(audit, forward_receipts, day, max_pages)
     if (source_commit < audit["retired_prefix_max_commit_seq"]

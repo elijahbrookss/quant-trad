@@ -208,7 +208,8 @@ def _receipt_matches(receipt, expected):
 
 
 def capture_original_payload_day(donor, *, donor_identity, day, expected_header_oid,
-                                 expected_source_commit_seq, max_rows, max_bytes, timeout_seconds=120):
+                                 expected_source_commit_seq, max_rows, max_bytes, timeout_seconds=120,
+                                 paused_donor=None):
     """Pin the old day in a disposable read-only, repeatable-read donor snapshot."""
     _limits(max_rows, max_bytes)
     if (type(day) is not date or type(expected_header_oid) is not int or expected_header_oid <= 0
@@ -220,7 +221,7 @@ def capture_original_payload_day(donor, *, donor_identity, day, expected_header_
     if not donor.in_transaction():
         raise ValueError("canonical_cold_recovery_payload_donor_transaction_required")
     with donor.begin_nested():
-        _require_snapshot(donor, donor_identity)
+        _require_snapshot(donor, donor_identity, paused_donor=paused_donor)
         _donor_budget(donor, deadline)
         _ready(donor, FACT_STORAGE_LAYOUT_VERSION)
         if (PostgresMarketDataRepository._current_commit_seq_with_session(donor) != expected_source_commit_seq):
@@ -256,7 +257,8 @@ def capture_original_payload_day(donor, *, donor_identity, day, expected_header_
 
 def restore_legacy_payload_day(target, donor, *, fence, original, expected_original_hash,
                                 legacy_header_receipt, expected_legacy_header_receipt_hash,
-                                max_rows, max_bytes, store=None, object_limits=None, timeout_seconds=120):
+                                max_rows, max_bytes, store=None, object_limits=None, timeout_seconds=120,
+                                paused_donor=None):
     """COPY the old bytes while detached, attach with the original guards, then recheck."""
     _require_disposable_fence(target, fence)
     _limits(max_rows, max_bytes)
@@ -289,7 +291,7 @@ def restore_legacy_payload_day(target, donor, *, fence, original, expected_origi
         bound(max(0, deadline - monotonic()))
         check_budget()
         fence.assert_quiet(target)
-        _require_snapshot(donor, original["donor"])
+        _require_snapshot(donor, original["donor"], paused_donor=paused_donor)
         _donor_budget(donor, deadline)
         if PostgresMigrationSource(target.engine, expected_system_identifier=expected_target["system_identifier"]).identity(target) != expected_target:
             raise RuntimeError("canonical_cold_recovery_payload_target_database_changed")
