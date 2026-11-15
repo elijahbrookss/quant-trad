@@ -15,9 +15,14 @@ else:
     import canonical_cold_ingest_benchmark as ingest
 
 
-VERSION = "qt.canonical_cold_saved_workloads.v1"
+VERSION = "qt.canonical_cold_saved_workloads.v2"
 INSTRUMENT = "0a019a46-c679-4c30-b90c-41518c68e31f"
 H05 = "mds_b7c35a1ac454e899031ec4a06dda41f3"
+H05_HASH = "b7c35a1ac454e899031ec4a06dda41f358992d67027a187ca0488f69e5158cb9"
+H05_SERIES_COMMIT = 125617550
+H05_ROWS = 44_641
+H05_START = "2021-12-31T23:59:00Z"
+H05_END = "2022-02-01T00:00:00Z"
 B1 = "mds_230a9cff937d9280043e893357842af3"
 B1_HASH = "230a9cff937d9280043e893357842af30a1be3434d3610dc511f91b924396927"
 B1_AUTHORED_SHA = "49c6fc3eff2c1820e94ab4cc8686d2845c4c0302c8c0de5353f1b949b5cec1ad"
@@ -88,7 +93,7 @@ def _catalog(conn, *, dataset_id, series_id, frame, start, end, watermark):
             or not row["dataset_hash"].startswith(dataset_id.removeprefix("mds_"))
             or not 0 < row["max_commit_seq"] <= row["dataset_commit"] <= watermark
             or (row["range_start"], row["range_end"]) != (reads._timestamp(start), reads._timestamp(end))
-            or not 0 < row["row_count"] <= 44_641):
+            or not 0 < row["row_count"] <= H05_ROWS):
         raise ValueError(f"saved dataset range, commit or contract differs: {dataset_id}/{series_id}")
     return row
 
@@ -137,9 +142,11 @@ def assemble(conn, *, scope, proof_sha256, watermark, b1_request):
     if missing:
         raise RuntimeError("restored source lacks deployed archive generation relations: " + ", ".join(missing))
 
-    end = "2022-02-01T00:00:00Z"
-    h05 = _catalog(conn, dataset_id=H05, series_id=713, frame=60, start="2021-12-31T23:59:00Z", end=end, watermark=watermark)
-    b1 = _catalog(conn, dataset_id=B1, series_id=2361, frame=900, start="2021-12-30T23:45:00Z", end=end, watermark=watermark)
+    h05 = _catalog(conn, dataset_id=H05, series_id=713, frame=60, start=H05_START, end=H05_END, watermark=watermark)
+    b1 = _catalog(conn, dataset_id=B1, series_id=2361, frame=900, start="2021-12-30T23:45:00Z", end=H05_END, watermark=watermark)
+    if ((h05["dataset_hash"], h05["max_commit_seq"], h05["row_count"]) != (H05_HASH, H05_SERIES_COMMIT, H05_ROWS)
+            or h05["source_summary"].get("record_selection") is not None):
+        raise ValueError("H05 saved dataset hash, commit, row count or legacy selection differs")
     if (b1["dataset_hash"], b1["max_commit_seq"], b1["row_count"]) != (B1_HASH, 207402044, 3073):
         raise ValueError("B1 saved dataset hash, commit or selected candle count differs")
 
@@ -155,13 +162,16 @@ def assemble(conn, *, scope, proof_sha256, watermark, b1_request):
                      source_keys=keys, frozen=frozen)
 
     h05_case = historical("h05_dense_history", H05, 713, h05)
+    h05_frozen = {key: h05_case[key] for key in ("series_id", "start", "end", "storage_witnesses")}
+    h05_frozen.update(name="h05_frozen_series", mode="frozen_series", dataset_id=H05,
+                      dataset_hash=H05_HASH, series_commit_seq=H05_SERIES_COMMIT, expected_rows=H05_ROWS)
     b1_case = historical("b1_canonical_witness", B1, 2361, b1)
     clock = conn.exec_driver_sql("SELECT transaction_timestamp()").scalar_one()
     hot_case = _case(conn, name="retained_hot", series=hot["series_id"], start=hot_start, end=hot_end,
                      clock=clock, commit=watermark, days=[day for day in days if day >= cutoff])
     boundary = {"restore_pair_hash": proof_sha256, "commit_seq": watermark, "retire_before": cutoff.isoformat(),
                 "repeats": 5, "timeout_seconds": 120, "max_rows": 500_000, "max_archive_bytes": 512 * 1024**2}
-    read_plan = reads.validate_plan(boundary | {"cases": [h05_case, b1_case, hot_case]})
+    read_plan = reads.validate_plan(boundary | {"cases": [h05_case, b1_case, hot_case, h05_frozen]})
     b1_replay = {"status": "historical_runtime_required", "producing_revision": B1_PRODUCING_REVISION,
         "dataset_id": B1, "dataset_hash": B1_HASH, "definition_hash": B1_DEFINITION_HASH, "request_hash": B1_REQUEST_HASH,
         "plan_hash": B1_PLAN_HASH, "result_hash": B1_RESULT_HASH, "authored_request": b1_request,

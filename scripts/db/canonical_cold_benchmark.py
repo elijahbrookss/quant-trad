@@ -19,11 +19,11 @@ from time import perf_counter_ns, process_time_ns
 
 VERSION = "qt.canonical_cold_read_benchmark.v1"
 LAYOUTS = {"source": "market.fact_storage_tiers.v2", "candidate": "market.canonical_cold_history.v1"}
-MODES = {"latest_as_of", "all_revisions", "frozen_revisions", "book_replay"}
+MODES = {"latest_as_of", "all_revisions", "frozen_revisions", "frozen_series", "book_replay"}
 
 
-def _json(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+def _json(value, *, default=None):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False, default=default)
 
 
 def _digest(value):
@@ -75,8 +75,15 @@ def validate_plan(plan):
                     or any(not _identity(case[key]) for key in ("definition_id", "session_id"))):
                 raise ValueError("book replay requires an exact definition and session")
             continue
-        base |= {"series_id", "start", "end", "known_at_lte", "source_identity_keys", "storage_witnesses"}
-        if case["mode"] == "frozen_revisions":
+        base |= {"series_id", "start", "end", "storage_witnesses"}
+        if case["mode"] == "frozen_series":
+            base |= {"series_commit_seq", "expected_rows"}
+            if (not _bounded_int(case.get("series_commit_seq"), 1, plan["commit_seq"])
+                    or not _bounded_int(case.get("expected_rows"), 1, plan["max_rows"])):
+                raise ValueError("frozen series requires a bounded series commit and expected row count")
+        else:
+            base |= {"known_at_lte", "source_identity_keys"}
+        if case["mode"] in {"frozen_revisions", "frozen_series"}:
             base |= {"dataset_id", "dataset_hash"}
             if (not _identity(case.get("dataset_id"))
                     or not _matches(case.get("dataset_hash"), r"[0-9a-f]{64}")):
@@ -89,10 +96,11 @@ def validate_plan(plan):
             raise ValueError("benchmark fact read scope is incomplete")
         if not timedelta(0) < _timestamp(case["end"]) - _timestamp(case["start"]) <= timedelta(days=366):
             raise ValueError("benchmark fact windows must be positive and at most 366 days")
-        _timestamp(case["known_at_lte"])
-        keys = case["source_identity_keys"]
-        if not isinstance(keys, list) or len(keys) > 16 or any(not _identity(key) for key in keys):
-            raise ValueError("benchmark source identity scope is invalid")
+        if case["mode"] != "frozen_series":
+            _timestamp(case["known_at_lte"])
+            keys = case["source_identity_keys"]
+            if not isinstance(keys, list) or len(keys) > 16 or any(not _identity(key) for key in keys):
+                raise ValueError("benchmark source identity scope is invalid")
         witnesses = case["storage_witnesses"]
         if not isinstance(witnesses, dict) or not 1 <= len(witnesses) <= 4:
             raise ValueError("benchmark fact case requires one to four retained fact/day witnesses")
@@ -269,7 +277,42 @@ def _code_revision(repo_module, expected):
     return revision
 
 
+def _frozen_series_operation(case, plan, repo):
+    from core.execution_control import execution_checkpoint
+
+    dataset = repo.get_dataset(case["dataset_id"])
+    series_id = case["series_id"]
+    commit = case["series_commit_seq"]
+    series = next((row for row in dataset.series if row["series_id"] == series_id), None)
+    if (dataset.dataset_id != case["dataset_id"] or dataset.dataset_hash != case["dataset_hash"]
+            or not 0 < commit <= dataset.max_commit_seq <= plan["commit_seq"]
+            or series is None or series["source_summary"].get("record_selection") is not None
+            or (series["range_start"], series["range_end"], series["max_commit_seq"], series["row_count"]) != (
+                _timestamp(case["start"]), _timestamp(case["end"]), commit, case["expected_rows"])):
+        raise RuntimeError("benchmark legacy frozen series manifest differs from the declared case")
+
+    def summarize(records):
+        if len(records) != case["expected_rows"]:
+            raise RuntimeError("benchmark frozen series returned a different row count than its manifest")
+        digest = sha256()
+        for row in records:
+            execution_checkpoint()
+            if row.series_id != series_id or not 0 < row.market_commit_seq <= commit:
+                raise RuntimeError("benchmark frozen series returned a record outside its watermark or series")
+            # Match the named receiver's frozen_series fingerprint on the standalone source overlay.
+            material = [row.series_id, row.revision, row.market_commit_seq, row.ingestion_run_id,
+                        row.source_identity_key, row.canonical_material_hash, row.fact.to_dict()]
+            digest.update((_json(material, default=datetime.isoformat) + "\n").encode())
+        return {"rows": len(records), "sha256": digest.hexdigest()}
+
+    scope = {"dataset_id": dataset.dataset_id, "dataset_hash": dataset.dataset_hash,
+             "series_id": series_id, "commit_seq": commit, "expected_rows": case["expected_rows"]}
+    return partial(repo.read_dataset_series, dataset_id=dataset.dataset_id, series_id=series_id), summarize, scope
+
+
 def _operation(case, plan, repo, book, archive_root):
+    if case["mode"] == "frozen_series":
+        return _frozen_series_operation(case, plan, repo)
     if case["mode"] == "book_replay":
         from market_data.archive import FilesystemRawArchiveObjectStore
 

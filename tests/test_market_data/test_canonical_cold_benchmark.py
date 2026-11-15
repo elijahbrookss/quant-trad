@@ -1,5 +1,5 @@
 from copy import deepcopy
-from datetime import date
+from datetime import UTC, date, datetime
 import os
 from types import SimpleNamespace
 
@@ -58,6 +58,49 @@ def test_exact_result_comparison_and_case_budget():
     plan["cases"][0]["storage_witnesses"].pop("old-id")
     with pytest.raises(ValueError, match="retiring fact and a retained hot fact"):
         bench.validate_plan(plan)
+
+
+def test_frozen_series_preserves_the_named_receiver_hash_and_serializes_native_clocks():
+    from scripts.automation.canonical_cold_receiver_runtime import fingerprint_frozen_records
+
+    plan = _plan()
+    plan["commit_seq"] = 3
+    case = {key: plan["cases"][0][key] for key in ("series_id", "start", "end", "storage_witnesses")}
+    case.update(name="legacy", mode="frozen_series", dataset_id="mds_fixture", dataset_hash="a" * 64,
+                series_commit_seq=3, expected_rows=1)
+    plan["cases"].append(case)
+    bench.validate_plan(plan)
+    manifest = {"series_id": 1, "range_start": bench._timestamp(case["start"]),
+                "range_end": bench._timestamp(case["end"]), "max_commit_seq": 3, "row_count": 1,
+                "source_summary": {}}
+    dataset = SimpleNamespace(dataset_id=case["dataset_id"], dataset_hash=case["dataset_hash"],
+                              max_commit_seq=3, series=[manifest])
+    clock = datetime(2026, 8, 9, 1, tzinfo=UTC)
+    material = {"known_at": clock.isoformat()}
+    row = SimpleNamespace(series_id=1, revision=2, market_commit_seq=3, ingestion_run_id="run",
+                          source_identity_key="provider", canonical_material_hash="material",
+                          fact=SimpleNamespace(to_dict=lambda: material))
+
+    def read_dataset_series(*, dataset_id, series_id):
+        assert (dataset_id, series_id) == (dataset.dataset_id, 1)
+        return [row]
+
+    repo = SimpleNamespace(get_dataset=lambda _: dataset, read_dataset_series=read_dataset_series)
+    read, summarize, _ = bench._operation(case, plan, repo, None, None)
+    expected = "819392c7e89fe519e49a50a1f7ee8abcf719383cde9c72a61d8fb9b6b07048c5"
+    for value in (clock.isoformat(), clock):
+        material["known_at"] = value
+        records = read()
+        assert summarize(records) == {"rows": 1, "sha256": expected}
+        assert fingerprint_frozen_records(records, mode="frozen_series", series_id=1, commit_seq=3) == expected
+    with pytest.raises(RuntimeError, match="different row count than its manifest"):
+        summarize([])
+    material["known_at"] = object()
+    with pytest.raises(TypeError):
+        summarize(read())
+    manifest["source_summary"]["record_selection"] = "all_canonical_revisions.v1"
+    with pytest.raises(RuntimeError, match="legacy frozen series manifest differs"):
+        bench._operation(case, plan, repo, None, None)
 
 
 def test_unsafe_connection_rejected():

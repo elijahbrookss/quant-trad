@@ -16,6 +16,7 @@ archive mapping at the restore point.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 from itertools import zip_longest
 import json
@@ -34,8 +35,8 @@ _RECEIPT_SCHEMA = "qt.named_recovery_runtime_verification.v1"
 _MODES = {"frozen_revisions", "frozen_series"}
 
 
-def _json(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+def _json(value, *, default=None):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False, default=default)
 
 
 def _match(value, pattern):
@@ -108,7 +109,7 @@ def fingerprint_frozen_records(records, *, mode, series_id, commit_seq, check=la
                         row.source_identity_key, row.canonical_material_hash, row.fact.to_dict()]
         else:
             raise ValueError("canonical_receiver_runtime_frozen_witness_invalid")
-        digest.update((_json(material) + "\n").encode())
+        digest.update((_json(material, default=datetime.isoformat) + "\n").encode())
     return digest.hexdigest()
 
 
