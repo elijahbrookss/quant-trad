@@ -680,6 +680,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     engine = storage.database._engine
     assert engine.url.host == "timescaledb" and engine.url.database.startswith("qt_migration_")
     replayed = os.getenv("QT_NAMED_REPLAYED_FIXTURE") == "1"
+    runtime_fixture = os.getenv("QT_NAMED_RUNTIME_FIXTURE") == "1"
     rolling_prefix = replayed or os.getenv("QT_TEST_ROLLING_WAL_PREFIX") == "1"
     with engine.begin() as conn:
         identity = _identity(conn)[0]
@@ -799,8 +800,36 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     source_commit = _admitted_rows(storage.database, series)[0][-1].market_commit_seq
     scope_hash = archive_evidence_hash(asdict(scope))
     package_path = receipts / "package.json"
+    verify_runtime = None
+
+    def runtime_artifact():
+        from scripts.automation.canonical_cold_receiver_runtime import (
+            WITNESS_SCHEMA, fingerprint_frozen_records, fingerprint_raw_records,
+        )
+
+        def raw_case(conn, materialized):
+            manifest = conn.execute(text("""
+                SELECT id,content_fingerprint,record_count FROM market.raw_archive_manifests WHERE id=:id
+            """), {"id": materialized[1]}).one()
+            archived = read_raw_archive_parquet(objects.local_path(materialized[2]))
+            return {"manifest_id": manifest.id, "rows": manifest.record_count,
+                    "content_fingerprint": manifest.content_fingerprint, "sha256": fingerprint_raw_records(archived)}
+
+        assert replayed
+        accepted = {row.raw_record_id: row for row in _admitted_rows(storage.database, series)[1]}
+        with engine.connect() as conn:
+            cases = [raw_case(conn, accepted[raw_id]) for raw_id in raw_ids[1:]]
+        witness = {"schema": WITNESS_SCHEMA, "database_identity": identity, "max_rows": 100,
+                   "max_archive_bytes": 16 * 1024**2, "raw": cases,
+                   "frozen": [{"dataset_id": frozen.dataset_id, "dataset_hash": frozen.dataset_hash, "series_id": series,
+                               "mode": "frozen_revisions", "rows": len(expected), "sha256": fingerprint_frozen_records(
+                                   expected, mode="frozen_revisions", series_id=series, commit_seq=frozen.max_commit_seq)}]}
+        path = receipts / "replay-equivalence.json"
+        save_receipt(path, witness, initial=True)
+        return {"filename": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
     def approve_fixture(staged=None):
+        nonlocal verify_runtime
         pins = {}
         inventory = None
         schema = PLAN_VERSION
@@ -818,8 +847,10 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         plan_path = receipts / "recovery-plan.json"
         save_receipt(plan_path, plan, initial=True)
         plan_hash = hashlib.sha256(plan_path.read_bytes()).hexdigest()
-        package = {"source_commit_floor": source_commit, "scope": {"target_database": target},
-                   "artifacts": {"independent_recovery": {"filename": plan_path.name, "sha256": plan_hash}}}
+        artifacts = {"independent_recovery": {"filename": plan_path.name, "sha256": plan_hash}}
+        if runtime_fixture:
+            artifacts["replay_equivalence"] = runtime_artifact()
+        package = {"source_commit_floor": source_commit, "scope": {"target_database": target}, "artifacts": artifacts}
         save_receipt(package_path, package, initial=True)
         package_hash = hashlib.sha256(package_path.read_bytes()).hexdigest()
         site = NamedRecoverySite(**vars(policy), approved_package_sha256=package_hash, receiver_preflight=measured, **pins)
@@ -830,6 +861,13 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             pending_key=pending_key, pending_spool=pending_root, replayed_inventory=inventory)
         with pytest.raises(ValueError, match="signing_key_unapproved"):
             bind_named_recovery_source(**source_options, signing_key=receiver_sign)
+        if runtime_fixture:
+            from scripts.automation.canonical_cold_receiver_runtime import bind_receiver_runtime
+
+            runtime = artifacts["replay_equivalence"]
+            verify_runtime = bind_receiver_runtime(witness_path=receipts / runtime["filename"], witness_sha256=runtime["sha256"],
+                source_checkout=os.environ["QT_EXACT_OLD_SOURCE_ROOT"], expected_revision="afafda39b4347adf8c88d01df6ae4b849796935a",
+                expected_source_tree_sha256=os.environ["QT_EXACT_OLD_SOURCE_HASH"], receiving=receiving, timeout_seconds=60)
         return site, package, package_hash, bind_named_recovery_source(**source_options, signing_key=source_sign)
 
     @contextmanager
@@ -851,6 +889,11 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
 
     def verify_original(target_engine, base_restore, suffix_restore, pending, check):
         check()
+        if verify_runtime is not None:
+            digest = verify_runtime(target_engine, base_restore, suffix_restore, pending, check)
+            print(f"QT_NAMED_RECEIVER_ORIGINAL_RUNTIME receipt_sha256={digest} frozen_rows={len(expected)} "
+                  f"raw_manifests=2 pending_ids={len(records)}")
+            return digest
         with target_engine.begin() as conn:
             assert _snapshot_layout(conn) == pair["storage_layout"]
             assert conn.scalar(text("SELECT current_setting('server_version_num')::int / 10000")) == 15

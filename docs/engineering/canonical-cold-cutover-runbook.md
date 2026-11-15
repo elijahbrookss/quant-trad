@@ -42,6 +42,35 @@ Include the signed receiver preflight and approved receiver public key in the v2
 
 The final receiver verifies the delivered WAL, archive suffix and pending spool, arms the prepared PostgreSQL cluster for the named endpoint, and checks isolated startup and replay. The signed reply binds the result to the same prepared attempt, final package, receiver measurement and drained provider boundary. Budget the custody metadata checks, initial consistency replay and final WAL/archive transfer inside the window. Measure the bulk preparation separately. [Signed named recovery](../../scripts/automation/canonical_cold_named_recovery.py)
 
+### Prepare a replayed receiver before approval
+
+Run the receiver on the qualified independent host as its unprivileged database owner. Use a network namespace with loopback only, exact PostgreSQL 15.6 and required Timescale libraries, the qualified Python runtime, and the pinned original QT checkout. Mount the encrypted exchange, private workspace, retained tablespaces, and archive output at the signed preflight paths. Expose the prestaged archive object tree through a separate explicit read-only mount. Keep the approval inbox and credentials private and outside the exchange. The archive output sits on the approved workspace device.
+
+Start the process with a private, mode-0600 receiver plan and its independently recorded SHA-256.
+
+```sh
+python -m scripts.automation.canonical_cold_receiver_operator \
+  --plan /private/receiver-plan.json --plan-sha256 "$RECEIVER_PLAN_SHA256"
+```
+
+The `qt.canonical_cold_receiver_operator.v1` plan contains the existing recovery site policy and signed receiver preflight, plus these fields.
+
+| Plan section | Required inputs |
+| --- | --- |
+| `paths` | `workspace`, `pgdata`, `socket`, `tablespaces` by name, `archive_source`, `archive_root`, `approval_inbox` |
+| `tools` | `postgres` and `postgres_sha256`, `pg_controldata` and `pg_controldata_sha256`, `pgbackrest`, `restic` |
+| `credentials` | Paths for `receiver_signing_key`, `database_key`, `base_archive_key`, `suffix_key`, and `pending_key` when the signed preflight expects a spool |
+| `replay` | `database`, `role`, `role_oid`, `port`, `tablespace_oids` by name, `source_device` and `source_inode` of the read-only archive input, and the measured `archive_max_work_bytes` for the complete paused archive and inventory |
+| `runtime` | `source_checkout`, `expected_revision`, `expected_source_tree_sha256`, `timeout_seconds` |
+| `lifecycle` | `prepare_seconds`, `approval_seconds`, `ready_seconds`, `recover_seconds`, `max_custody_entries` measured for the selected scope |
+
+1. After the receiver emits `awaiting_replay_selection`, place `replay-selection.json` atomically in the private inbox. Use schema `qt.canonical_cold_receiver_replay_selection.v1` with `baseline_verification_sha256`, `receiver_preflight_sha256`, `timeline`, exact `target_lsn` and `replay_lsn`, and the ordered `prefixes`. Each prefix has `after`, `through`, `prefix_sha256`, and `previous_prefix_sha256` (null for the first). These refer to the already staged encrypted prefix receipts. Select the point after the bulk base is ready so it can be as close as practicable to the eventual hold.
+2. Review the signed `replayed-candidate-<checkpoint>.json` and its detached `replayed-catalog-<digest>.jsonl` on the exchange. Verify the receiver signature, catalog hash, exact stopped database and archive scope, and measured restart range. The event is `awaiting_approval`. The stopped copy remains under the same process's custody.
+3. After final operational approval, place the exact package, host inventory, and all referenced artifacts in the private inbox. In the `independent_recovery` v3 artifact, bind the offered `replayed_checkpoint_sha256` and the measured `max_restart_segments`. The existing `replay_equivalence` artifact carries the typed frozen and raw checks run through the exact original QT checkout. Publish the marker `approval.json` last with schema `qt.canonical_cold_receiver_operator_approval.v1` and fields `package_filename`, `package_sha256`, `inventory_filename`, and `checkpoint_sha256`. Use the separately obtained approval digest.
+4. Before publishing `ready`, the receiver rechecks actual free bytes and filesystem entries after preparation. It groups the remaining requirements by device so co-located exchange, workspace, and PostgreSQL allocations count together. Continue with the source owner's existing approved command only while that exact signed readiness is valid. The source rechecks the final device and WAL limits before the hold and repeats the exact endpoint checks at the fence. Use the resulting `recovered` closure as the independent recovery evidence.
+
+The archived point can age while the package is under review. If the tail or restart range exceeds its approved cap, source admission refuses the hold. Qualify the exact operator environment and workflow before using this path on QT. [Receiver command](../../scripts/automation/canonical_cold_receiver_operator.py)
+
 Restore the named pgBackRest backup to its immediate consistent endpoint, remapping tablespaces away from production. Restore the matching Restic snapshot, verify the inventory checksum, and verify the hash and length of each referenced restored object. Start PostgreSQL with the matching extensions and pinned original application on an isolated network or socket, with production endpoints unreachable. Verify the catalog, table and manifest identities, ordered source content roots, frozen membership and digest, latest and as-of boundary reads, and raw-backed book reconstruction. Verify stream prefixes and pending-segment recovery. Detect a missing or corrupted object and interrupt a rehearsal restore without affecting the completed independent point. Record wall clock, peak allocations, verified paths and tool versions. A successful small fixture exercises the tools. Actual qualification also needs the representative paired recovery and candidate rollback on that restored data.
 
 For a candidate backup with the moved raw primary index, preserve the SQL tablespace's recorded absolute path inside the isolated restore namespace. Mount dedicated restored storage at that path and verify that the restore worker has access only to the copied repository and restore volumes. The single-tablespace encrypted fixture uses separate source and restore devices at the same logical path and checks both database identities and archive bytes before accepting the restore. A full rehearsal must map each registered tablespace explicitly. [Same-path paired restore fixture](../../tests/test_market_data/test_canonical_raw_index_paired_restore_db.py)

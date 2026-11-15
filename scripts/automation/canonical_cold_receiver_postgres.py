@@ -181,6 +181,8 @@ class ReceiverPostgres:
                                current_setting('restore_command'), current_setting('data_directory'),
                                inet_server_addr() IS NULL AND inet_client_addr() IS NULL
                                  AND current_setting('listen_addresses')='' AND current_setting('archive_mode')='off'
+                                 AND current_setting('timescaledb.max_background_workers')='0'
+                                 AND current_setting('autovacuum')='off'
                                  AND current_setting('unix_socket_directories') IS NOT NULL,
                                current_setting('unix_socket_directories'), current_setting('server_version_num')
                     """).one()
@@ -246,6 +248,7 @@ class ReceiverPostgres:
                          "logging_collector": "off", "log_statement": "none", "log_min_messages": "warning",
                          "dynamic_library_path": "$libdir", "shared_preload_libraries": "timescaledb,pg_stat_statements",
                          "session_preload_libraries": "", "local_preload_libraries": "", "timescaledb.telemetry_level": "off",
+                         "timescaledb.max_background_workers": 0, "autovacuum": "off",
                          "default_transaction_read_only": "on" if paused else "off"}
                 if paused:
                     fixed.update(recovery_target="", recovery_target_name="", recovery_target_time="", recovery_target_xid="",
