@@ -24,7 +24,8 @@ from sqlalchemy.pool import NullPool
 
 from core.storage_targets import StorageTarget
 from data_providers.streams.contracts import ProviderRawMessage
-from market_data.archive import DurableRawSpoolSegment, FilesystemRawArchiveObjectStore, read_raw_archive_parquet
+from market_data.archive import (DurableRawSpoolSegment, FilesystemRawArchiveObjectStore,
+                                 publish_spool_archive, read_raw_archive_parquet)
 from market_data.archive_namespace import archive_namespace
 from market_data.contracts import DatasetSeriesRequest
 from market_data.fact_archive import archive_evidence_hash
@@ -947,7 +948,9 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     later_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-at-anchor",
                                storage_root=archive_storage)
     raw_ids.append(later_trade.raw_record_id)
-    scope, records, _ = _pending_level2(storage, structures, pending_root)
+    archive_pending_prefix = runtime_fixture and not source_fixture
+    scope, records, _ = _pending_level2(storage, structures, pending_root,
+                                        archived_first=objects if archive_pending_prefix else None)
     start = first_trade.received_at - timedelta(seconds=10)
     end = later_trade.received_at + timedelta(seconds=10)
     frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(series, start, end)])
@@ -964,18 +967,24 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             WITNESS_SCHEMA, fingerprint_frozen_records, fingerprint_raw_records,
         )
 
-        def raw_case(conn, materialized):
+        def raw_case(conn, manifest_id, object_key):
             manifest = conn.execute(text("""
                 SELECT id,content_fingerprint,record_count FROM market.raw_archive_manifests WHERE id=:id
-            """), {"id": materialized[1]}).one()
-            archived = read_raw_archive_parquet(objects.local_path(materialized[2]))
+            """), {"id": manifest_id}).one()
+            archived = read_raw_archive_parquet(objects.local_path(object_key))
             return {"manifest_id": manifest.id, "rows": manifest.record_count,
                     "content_fingerprint": manifest.content_fingerprint, "sha256": fingerprint_raw_records(archived)}
 
         assert replayed
         accepted = {row.raw_record_id: row for row in _admitted_rows(storage.database, series)[1]}
         with engine.connect() as conn:
-            cases = [raw_case(conn, accepted[raw_id]) for raw_id in raw_ids[1:]]
+            cases = [raw_case(conn, accepted[raw_id][1], accepted[raw_id][2]) for raw_id in raw_ids[1:]]
+            if archive_pending_prefix:
+                manifest_id, object_key = conn.execute(text("""
+                    SELECT id, object_key FROM market.raw_archive_manifests WHERE spool_segment_id=:segment
+                """), {"segment": records[0].spool_segment_id}).one()
+                cases.append(raw_case(conn, manifest_id, object_key))
+                assert cases[-1]["rows"] == 2
         witness = {"schema": WITNESS_SCHEMA, "database_identity": identity, "max_rows": 100,
                    "max_archive_bytes": 16 * 1024**2, "raw": cases,
                    "frozen": [{"dataset_id": frozen.dataset_id, "dataset_hash": frozen.dataset_hash, "series_id": series,
@@ -1068,7 +1077,8 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         if verify_runtime is not None:
             digest = verify_runtime(target_engine, base_restore, suffix_restore, pending, check)
             print(f"QT_NAMED_RECEIVER_ORIGINAL_RUNTIME receipt_sha256={digest} frozen_rows={len(expected)} "
-                  f"raw_manifests=2 pending_ids={len(records)}")
+                  f"raw_manifests={2 + int(archive_pending_prefix)} pending_ids={len(records)} "
+                  f"pending_ids_with_raw_mappings={2 if archive_pending_prefix else 0}")
             return digest
         with target_engine.begin() as conn:
             assert _snapshot_layout(conn) == pair["storage_layout"]
@@ -1352,14 +1362,15 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             assert reply["archive_closure"] == report["archive_closure"]
             assert report["archive_closure"]["receiver_runtime_sha256"] == reply["runtime_sha256"]
             coverage = report["archive_closure"]["coverage"]
-            assert coverage["final_objects"] == len(raw_ids)
+            assert coverage["final_objects"] == len(raw_ids) + int(archive_pending_prefix)
             if replayed:
                 wal = load_receipt(receiving / "encrypted-wal-transfer.json", max_bytes=65536)
                 assert wal["schema"] == "qt.encrypted_recovery_wal_transfer.v2"
                 assert wal["checkpoint_sha256"] == site.replayed_checkpoint_sha256 == report["archive_closure"]["checkpoint_sha256"]
                 assert wal["wal_after"] == generated[-1] and 0 < len(wal["files"]) <= site.wal.files
-                assert coverage["baseline_objects_used"] == 2 and coverage["verified_suffix_objects"] == 1
-                print(f"QT_SIGNED_REPLAYED_FINAL archive_baseline=2 archive_suffix=1 wal_final_files={len(wal['files'])} "
+                suffix_objects = 1 + int(archive_pending_prefix)
+                assert coverage["baseline_objects_used"] == 2 and coverage["verified_suffix_objects"] == suffix_objects
+                print(f"QT_SIGNED_REPLAYED_FINAL archive_baseline=2 archive_suffix={suffix_objects} wal_final_files={len(wal['files'])} "
                       f"wal_after={wal['wal_after']} final_wal={wal['wal_transferred_through']} closure={report['archive_closure']['closure_sha256']}")
             assert report["pending_spool_verified"]["pre_anchor_sha256"] == before["source_sha256"]
             response = load_receipt(receiving / "named-recovery-response.json", max_bytes=1024**2)
@@ -1430,7 +1441,7 @@ def _prepare_native_repository(engine, identity, tmp_path, monkeypatch):
     return EncryptedRecoveryCopies(incremental=config, connection_url=engine.url, **limits)
 
 
-def _pending_level2(storage, structures, root):
+def _pending_level2(storage, structures, root, *, archived_first=None):
     product = "BIP-FIXTURE"
     definition = _definition(storage, structures, "level2", product)
     claim = structures.claim_stream(definition_id=definition, owner_id="named-pending-fixture", lease_seconds=60, bounded=True)
@@ -1452,6 +1463,10 @@ def _pending_level2(storage, structures, root):
             segment.append(record)
             records.append(record)
         total += segment.seal().stat().st_size
+        if ordinal == 0 and archived_first is not None:
+            encoded, acknowledgement, archived = publish_spool_archive(segment, object_store=archived_first)
+            structures.commit_archive(claim, encoded=encoded, acknowledgement=acknowledgement, records=archived)
+            assert segment.sealed_path.is_file() and not segment.ack_path.exists()
     failed = structures.append_session_event(claim, event_ordinal=1, connection_epoch=1, event_type="failed",
         occurred_at=datetime.now(UTC), reason="fixture unavailable before sealed tail admission")
     structures.release(claim)

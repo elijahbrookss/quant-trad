@@ -8,16 +8,19 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import text
 
+from core.execution_control import ExecutionControl
 from data_providers.streams.coinbase import CoinbaseMessageParser
 from data_providers.streams.contracts import ProviderRawMessage
-from market_data.archive import DurableRawSpoolSegment, RawArchiveReadLimits
+from market_data.archive import DurableRawSpoolSegment, RawArchiveReadLimits, publish_spool_archive
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+from market_data.fact_archive import archive_evidence_hash
 from market_data.structure import RawStreamRecord
 from portal.backend.service.market import continuous_stream_collector as collector_module
 from portal.backend.service.storage.repos import fact_references
+from scripts.automation.canonical_cold_receiver_runtime import _assert_pending_inactive, _verify_raw
 from scripts.db.canonical_cold_collector_drain import CollectorDrainLimits, InactiveLevel2, capture_collector_tail, verify_collector_drain
 from scripts.db.canonical_cold_collector_restart import CollectorRestartPending, verify_recovered_pending_spool
-from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope
+from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope, measure_pending_spool
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, storage
 
@@ -57,6 +60,85 @@ def _segment(fixture, *, claim, root, segment_ordinal, entries):
         records.append(raw)
     segment.seal()
     return segment, analyzer.finalize(), records
+
+
+def test_inactive_receiver_accepts_only_exact_verified_sealed_archive_overlap(storage, tmp_path, monkeypatch):
+    fixture = _raw_book_fixture(storage, tmp_path / "enrollment", monkeypatch)
+    root = tmp_path / "inactive"
+    earlier, _, records = _segment(fixture, claim=fixture.claim, root=root, segment_ordinal=136, entries=[
+        (82404, "heartbeats", 0, None, []),
+        (82405, "heartbeats", 1, None, []),
+    ])
+    later, _, _ = _segment(fixture, claim=fixture.claim, root=root, segment_ordinal=137, entries=[
+        (82406, "heartbeats", 2, None, []),
+    ])
+    encoded, acknowledgement, archived_records = publish_spool_archive(
+        earlier, object_store=fixture.store, temporary_directory=tmp_path / "archive-staging",
+    )
+    commit = fixture.structures.commit_archive(
+        fixture.claim, encoded=encoded, acknowledgement=acknowledgement, records=archived_records,
+    )
+    scope = PendingSpoolScope(
+        fixture.claim.definition_id, fixture.claim.session_id, 1, fixture.source.provider, fixture.source.venue,
+        fixture.claim.provider_product_id, "level2", 2,
+        earlier.sealed_path.stat().st_size + later.sealed_path.stat().st_size,
+    )
+    boundary = {"database_identity": "123/456", "source_commit_seq": 42, "anchor_sha256": "e" * 64}
+    control = ExecutionControl()
+    measurement = measure_pending_spool(
+        source=root, scope=scope, boundary=boundary, timeout_seconds=15, max_entries=30, check_held=control.check,
+    )
+    body = {key: measurement[key] for key in ("scope", "boundary", "segments")}
+    pending = {**body, "verification_sha256": archive_evidence_hash(body)}
+    first = pending["segments"][0]
+    raw_case = {"manifest_id": commit.manifest_id, "rows": first["records"], "sha256": first["records_sha256"],
+                "content_fingerprint": encoded.content_fingerprint}
+
+    with storage.database._engine.begin() as conn:
+        verified = _verify_raw(conn, raw_case, fixture.store, control, 16 * 1024**2)
+
+        def assert_inactive(witnesses):
+            return _assert_pending_inactive(conn, pending, root, max_rows=3, identity=boundary["database_identity"],
+                                            commit_seq=boundary["source_commit_seq"], verified_raw=witnesses, check=control.check)
+
+        with pytest.raises(RuntimeError, match="pending_record_already_accepted"):
+            assert_inactive(())
+        with pytest.raises(RuntimeError, match="pending_record_already_accepted"):
+            assert_inactive(({**verified, "sha256": "0" * 64},))
+        assert assert_inactive((verified,)) == {
+            "rows": 3, "archive_mapped_rows": 2, "verification_sha256": pending["verification_sha256"],
+        }
+        with pytest.raises(RuntimeError, match="pending_manifest_ambiguous"):
+            assert_inactive((verified, verified))
+
+        # Corrupt the disposable catalog inside rollback-only savepoints.
+        with conn.begin_nested() as changed:
+            conn.exec_driver_sql(
+                "ALTER TABLE market.raw_archive_record_mappings "
+                "DISABLE TRIGGER trg_reject_mutation_raw_archive_record_mappings"
+            )
+            conn.execute(text("""
+                DELETE FROM market.raw_archive_record_mappings WHERE manifest_id=:manifest AND raw_record_id=:id
+            """), {"manifest": commit.manifest_id, "id": records[-1].raw_record_id})
+            with pytest.raises(RuntimeError, match="pending_archive_mapping_changed"):
+                assert_inactive((verified,))
+            changed.rollback()
+
+        with conn.begin_nested() as changed:
+            conn.execute(text("""
+                INSERT INTO market.raw_archive_record_mappings (
+                    raw_record_id, manifest_id, spool_segment_id, session_id, connection_epoch, receive_ordinal,
+                    object_row_group, object_row_index, raw_frame_sha256, mapped_at, known_at
+                )
+                SELECT raw_record_id, :other, spool_segment_id, session_id, connection_epoch, receive_ordinal,
+                       object_row_group, 1, raw_frame_sha256, mapped_at, known_at
+                FROM market.raw_archive_record_mappings WHERE manifest_id=:manifest AND raw_record_id=:id
+            """), {"other": fixture.manifests[0], "manifest": commit.manifest_id, "id": records[0].raw_record_id})
+            with pytest.raises(RuntimeError, match="pending_archive_mapping_changed"):
+                assert_inactive((verified,))
+            changed.rollback()
+
+    assert earlier.sealed_path.is_file() and later.sealed_path.is_file()
 
 
 def test_long_invalid_epoch_resumes_exact_prefix_before_acknowledging_spool(storage, tmp_path, monkeypatch):

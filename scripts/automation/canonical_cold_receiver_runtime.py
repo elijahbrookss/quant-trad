@@ -6,6 +6,11 @@ and a raw list. Frozen cases specify dataset_id, dataset_hash, series_id, mode
 (frozen_revisions or frozen_series), rows and sha256. Raw cases specify
 manifest_id, rows, content_fingerprint and sha256. The two fingerprint helpers
 serialize these ordered witnesses for an artifact producer.
+
+If a sealed segment already has raw SQL mappings at the restore point, include
+its whole acknowledged manifest as a raw case. The recovered spool must match
+that independently verified archive exactly. Other sealed frames must have no
+archive mapping at the restore point.
 """
 
 from __future__ import annotations
@@ -311,11 +316,16 @@ def _verify_raw(conn, case, objects, control, max_archive_bytes):
     from sqlalchemy import text
 
     manifest = conn.execute(text("""
-        SELECT id,definition_id,session_id,connection_epoch,object_key,object_sha256,byte_count,record_count,
-               content_fingerprint,first_receive_ordinal,last_receive_ordinal
-        FROM market.raw_archive_manifests WHERE id=:id
-    """), {"id": case["manifest_id"]}).mappings().one()
-    if (manifest["record_count"] != case["rows"] or manifest["content_fingerprint"] != case["content_fingerprint"]
+        SELECT m.id,m.definition_id,m.session_id,m.connection_epoch,m.object_key,m.object_sha256,m.byte_count,
+               m.record_count,m.content_fingerprint,m.first_receive_ordinal,m.last_receive_ordinal
+        FROM market.raw_archive_manifests m WHERE m.id=:id AND NOT EXISTS (
+            SELECT FROM market.storage_lifecycle_events e
+            WHERE e.target_kind='raw_manifest' AND e.target_id=m.id
+              AND e.action='archive_expire' AND e.event_type='completed'
+        )
+    """), {"id": case["manifest_id"]}).mappings().one_or_none()
+    if (manifest is None or manifest["record_count"] != case["rows"]
+            or manifest["content_fingerprint"] != case["content_fingerprint"]
             or not _bounded(manifest["byte_count"], max_archive_bytes) or not _digest(manifest["object_sha256"])):
         raise RuntimeError("canonical_receiver_runtime_raw_manifest_changed")
     file = objects.local_path(manifest["object_key"])
@@ -355,7 +365,7 @@ def _verify_raw(conn, case, objects, control, max_archive_bytes):
     return {"manifest_id": manifest["id"], "rows": count, "sha256": digest.hexdigest()}
 
 
-def _assert_pending_inactive(conn, pending, root, *, max_rows, identity, commit_seq, check):
+def _assert_pending_inactive(conn, pending, root, *, max_rows, identity, commit_seq, verified_raw, check):
     from market_data.archive import DurableRawSpoolSegment
     from market_data.fact_archive import archive_evidence_hash
     from sqlalchemy import text
@@ -367,7 +377,7 @@ def _assert_pending_inactive(conn, pending, root, *, max_rows, identity, commit_
     if (archive_evidence_hash(body) != expected_hash or pending["boundary"]["database_identity"] != identity
             or pending["boundary"]["source_commit_seq"] != commit_seq):
         raise RuntimeError("canonical_receiver_runtime_pending_scope_changed")
-    count = 0
+    count = archived = 0
     for segment in pending["segments"]:
         if not _bounded(segment["records"], max_rows - count) or not _bounded(segment["bytes"], 128 * 1024**2):
             raise RuntimeError("canonical_receiver_runtime_pending_budget_exceeded")
@@ -381,14 +391,29 @@ def _assert_pending_inactive(conn, pending, root, *, max_rows, identity, commit_
             digest.update(_raw_record_bytes(record))
         if (len(ids), digest.hexdigest()) != (segment["records"], segment["records_sha256"]):
             raise RuntimeError("canonical_receiver_runtime_pending_record_changed")
+        manifests = [raw["manifest_id"] for raw in verified_raw if
+                     (raw["rows"], raw["sha256"]) == (segment["records"], segment["records_sha256"])]
+        if len(manifests) > 1:
+            raise RuntimeError("canonical_receiver_runtime_pending_manifest_ambiguous")
+        # Raw acknowledgement and book publication commit separately. A sealed
+        # copy may still be needed to recover a book even after raw admission.
         for start in range(0, len(ids), 512):
             check()
-            if conn.scalar(text("""
-                SELECT EXISTS(SELECT FROM market.raw_archive_record_mappings WHERE raw_record_id=ANY(:ids))
-            """), {"ids": ids[start:start + 512]}):
+            batch = ids[start:start + 512]
+            mapped = conn.execute(text("""
+                SELECT raw_record_id, manifest_id FROM market.raw_archive_record_mappings
+                WHERE raw_record_id=ANY(:ids) LIMIT :limit
+            """), {"ids": batch, "limit": len(batch) + 1}).all()
+            if manifests:
+                expected = {(raw_id, manifests[0]) for raw_id in batch}
+                if len(mapped) != len(batch) or set(mapped) != expected:
+                    raise RuntimeError("canonical_receiver_runtime_pending_archive_mapping_changed")
+            elif mapped:
                 raise RuntimeError("canonical_receiver_runtime_pending_record_already_accepted")
+        if manifests:
+            archived += len(ids)
         count += len(ids)
-    return {"rows": count, "verification_sha256": expected_hash}
+    return {"rows": count, "archive_mapped_rows": archived, "verification_sha256": expected_hash}
 
 
 def verify_in_deployed_runtime(request, *, phase=lambda _: None):
@@ -472,7 +497,8 @@ def verify_in_deployed_runtime(request, *, phase=lambda _: None):
                 raw.append(_verify_raw(conn, case, store, control, witness["max_archive_bytes"]))
             phase("pending_spool")
             pending = _assert_pending_inactive(conn, request["pending"], request["pending_root"], max_rows=witness["max_rows"],
-                                               identity=identity[0], commit_seq=request["commit_seq"], check=control.check)
+                                               identity=identity[0], commit_seq=request["commit_seq"],
+                                               verified_raw=raw, check=control.check)
             control.check()
     finally:
         engine.dispose()
