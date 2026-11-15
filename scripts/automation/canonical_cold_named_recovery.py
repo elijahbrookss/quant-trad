@@ -50,6 +50,7 @@ _RESPONSE = "qt.named_recovery_site_response.v3"
 PREFLIGHT_VERSION = "qt.named_recovery_receiver_preflight.v2"
 _MAX_RECEIPT = 1024 * 1024
 _MAX_PROVIDER_RECEIPT = 128 * 1024**2
+_TABLESPACE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,62}")
 
 
 @dataclass(frozen=True)
@@ -520,7 +521,7 @@ def _empty_receiver_paths(site, workspace, pgdata, tablespaces):
     pgdata, pgdata_id = _private_root(pgdata)
     if (root.is_relative_to(workspace) or workspace.is_relative_to(root) or not pgdata.is_relative_to(workspace)
             or pgdata == workspace or any(pgdata.iterdir()) or not isinstance(tablespaces, dict)
-            or not all(isinstance(name, str) and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,62}", name) for name in tablespaces)):
+            or not all(isinstance(name, str) and _TABLESPACE_NAME.fullmatch(name) for name in tablespaces)):
         raise ValueError("canonical_named_recovery_receiver_workspace_invalid")
     destinations = {name: _private_root(path) for name, path in tablespaces.items()}
     if any(any(path.iterdir()) or path.is_relative_to(pgdata) or pgdata.is_relative_to(path)

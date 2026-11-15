@@ -509,10 +509,10 @@ def signed_named_tablespace(storage):
     admin = create_engine(engine.url.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool)
     try:
         with admin.connect() as conn:
-            conn.execute(text("CREATE TABLESPACE signed_history_fixture LOCATION :path"), {"path": str(source_path)})
+            conn.execute(text('CREATE TABLESPACE "qt_history_hdd-01" LOCATION :path'), {"path": str(source_path)})
         with engine.begin() as conn:
-            conn.exec_driver_sql("ALTER TABLE market.raw_archive_record_mappings SET TABLESPACE signed_history_fixture")
-            conn.exec_driver_sql("ALTER INDEX market.ix_market_raw_archive_mapping_segment SET TABLESPACE signed_history_fixture")
+            conn.exec_driver_sql('ALTER TABLE market.raw_archive_record_mappings SET TABLESPACE "qt_history_hdd-01"')
+            conn.exec_driver_sql('ALTER INDEX market.ix_market_raw_archive_mapping_segment SET TABLESPACE "qt_history_hdd-01"')
         yield source_path
     finally:
         try:
@@ -521,7 +521,7 @@ def signed_named_tablespace(storage):
                 conn.exec_driver_sql("ALTER TABLE market.raw_archive_record_mappings SET TABLESPACE pg_default")
             engine.dispose()
             with admin.connect() as conn:
-                conn.exec_driver_sql("DROP TABLESPACE IF EXISTS signed_history_fixture")
+                conn.exec_driver_sql('DROP TABLESPACE IF EXISTS "qt_history_hdd-01"')
         finally:
             admin.dispose()
 
@@ -534,7 +534,7 @@ def _signed_tablespace_member(conn):
         JOIN pg_class heap ON heap.reltablespace=s.oid AND heap.oid='market.raw_archive_record_mappings'::regclass
         JOIN pg_class idx ON idx.reltablespace=s.oid AND idx.oid='market.ix_market_raw_archive_mapping_segment'::regclass
         JOIN pg_index def ON def.indexrelid=idx.oid AND def.indrelid=heap.oid AND def.indisvalid
-        WHERE s.spcname='signed_history_fixture'
+        WHERE s.spcname='qt_history_hdd-01'
     """)).one()
 
 
@@ -608,7 +608,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     mount = lambda path: preflight.ReceiverPath(path, receiver_uuid)
     preflight_options = dict(site=policy, receiver_signing_key=receiver_sign, expected_host_sha256="c" * 64,
         source_host_sha256="d" * 64, source_filesystem_uuids=(pair["filesystem_uuid"],), receiving=mount(receiving),
-        workspace=mount(workspace), pgdata=mount(pgdata), tablespaces={"signed_history_fixture": mount(history_path)},
+        workspace=mount(workspace), pgdata=mount(pgdata), tablespaces={"qt_history_hdd-01": mount(history_path)},
         pgbackrest=worker.pgbackrest, restic=worker.restic, database_key=worker.config.database_key_path,
         archive_key=worker.config.archive_key_path, pending_expected=True, runtime_bytes=16 * 1024**2,
         runtime_entries=128, max_manifest_entries=10_000, timeout_seconds=25)
@@ -622,7 +622,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         preflight.measure_receiver_preflight(**(preflight_options | {"runtime_bytes": 2 * 1024**3}))
     measured = preflight.measure_receiver_preflight(**preflight_options)
     sizing = measured["body"]
-    assert sizing["database_targets"]["tablespace:signed_history_fixture"]["logical_bytes"] > 0
+    assert sizing["database_targets"]["tablespace:qt_history_hdd-01"]["logical_bytes"] > 0
     assert sizing["archive_restore_files"] >= pair["archive_objects"]
     assert len(sizing["capacity_by_device"]) == 1
     capacity, = sizing["capacity_by_device"].values()
@@ -726,13 +726,13 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
 
     prepare_options = dict(site=site, signing_key=receiver_sign, pgbackrest=worker.pgbackrest,
         restic=worker.restic, database_key=worker.config.database_key_path, base_archive_key=worker.config.archive_key_path,
-        workspace=workspace, pgdata=pgdata, tablespaces={"signed_history_fixture": history_path},
+        workspace=workspace, pgdata=pgdata, tablespaces={"qt_history_hdd-01": history_path},
         timeout_seconds=100, ready_seconds=120, max_custody_entries=10_000)
     receiver_options = dict(suffix_key=suffix_key, pending_key=pending_key, boot_isolated=boot_isolated,
         verify_original_runtime=verify_original, timeout_seconds=100)
 
-    for supplied, failure in (({"signed_history_fixture": alias}, "directory_invalid"), ({}, "preflight_receiver_changed"),
-                              ({"signed_history_fixture": history_path}, "preflight_mount_changed")):
+    for supplied, failure in (({"qt_history_hdd-01": alias}, "directory_invalid"), ({}, "preflight_receiver_changed"),
+                              ({"qt_history_hdd-01": history_path}, "preflight_mount_changed")):
         with pytest.raises(ValueError, match=failure), prepare_named_receiver(**(prepare_options | {
                 "workspace": negative, "pgdata": negative_data, "tablespaces": supplied})):
             pytest.fail("unapproved preparation was admitted")

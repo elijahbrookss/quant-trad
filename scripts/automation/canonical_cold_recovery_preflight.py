@@ -145,7 +145,8 @@ def measure_receiver_preflight(*, site, receiver_signing_key, expected_host_sha2
             or type(max_manifest_entries) is not int or not 1 <= max_manifest_entries <= 10_000_000
             or not isinstance(source_filesystem_uuids, (tuple, list, set)) or not source_filesystem_uuids
             or any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9-]{4,128}", value) for value in source_filesystem_uuids)
-            or not isinstance(tablespaces, dict) or any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", key) for key in tablespaces)
+            or not isinstance(tablespaces, dict)
+            or any(not isinstance(name, str) or not named._TABLESPACE_NAME.fullmatch(name) for name in tablespaces)
             or not all(isinstance(path, ReceiverPath) for path in (receiving, workspace, pgdata, *tablespaces.values()))):
         raise ValueError("canonical_recovery_preflight_invalid_limits_or_roots")
     host = named.receiver_host_sha256()
