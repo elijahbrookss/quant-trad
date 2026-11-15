@@ -128,10 +128,15 @@ def verify_private_mounts(url, archive, proof, archive_scope):
 
 
 def verify_candidate(engine, *, url, proof, archive_scope, retire_before):
+    with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
+        assert_candidate(conn, url=url, proof=proof, archive_scope=archive_scope, retire_before=retire_before)
+
+
+def assert_candidate(conn, *, url, proof, archive_scope, retire_before):
+    """Check the candidate in the caller's read-only snapshot."""
     from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
 
-    with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
-        observed = conn.exec_driver_sql("""
+    observed = conn.exec_driver_sql("""
             SELECT system_identifier::text || '/' || (SELECT oid FROM pg_database WHERE datname=current_database()),
                    current_database(), session_user::text, (SELECT oid FROM pg_roles WHERE rolname=session_user),
                    extract(epoch FROM pg_postmaster_start_time())::text, pg_last_wal_replay_lsn()::text,
@@ -144,21 +149,21 @@ def verify_candidate(engine, *, url, proof, archive_scope, retire_before):
                        AND NOT EXISTS (SELECT 1 FROM pg_stat_activity
                            WHERE starts_with(backend_type, 'TimescaleDB Background Worker '))
             FROM pg_control_system()
-        """).one()
-        if observed != (proof["database_identity"], url.database, proof["role"], proof["role_oid"],
-                         proof["postmaster_epoch"], proof["replay_lsn"], 2, "150006", "2.14.2", True):
-            raise ValueError("B1 native promoted clone identity or idle worker profile changed")
-        state = conn.exec_driver_sql("""
+    """).one()
+    if observed != (proof["database_identity"], url.database, proof["role"], proof["role_oid"],
+                     proof["postmaster_epoch"], proof["replay_lsn"], 2, "150006", "2.14.2", True):
+        raise ValueError("B1 native promoted clone identity or idle worker profile changed")
+    state = conn.exec_driver_sql("""
             SELECT layout_version, evidence->>'cold_before_day', evidence->>'execution_hash',
                    evidence->>'loaded_inventory_hash', evidence->>'source_commit_seq'
             FROM market.fact_storage_state
             WHERE state='ready' AND completed_at IS NOT NULL
-        """).one()
-        if state != (bench.LAYOUTS["candidate"], retire_before, archive_scope["execution_hash"],
-                     archive_scope["loaded_inventory_hash"], str(proof["accepted_commit_seq"])):
-            raise ValueError("B1 candidate activation certificate differs from mounted archive evidence")
-        if PostgresMarketDataRepository._current_commit_seq_with_session(conn) != proof["accepted_commit_seq"]:
-            raise ValueError("B1 candidate accepted watermark changed")
+    """).one()
+    if state != (bench.LAYOUTS["candidate"], retire_before, archive_scope["execution_hash"],
+                 archive_scope["loaded_inventory_hash"], str(proof["accepted_commit_seq"])):
+        raise ValueError("B1 candidate activation certificate differs from mounted archive evidence")
+    if PostgresMarketDataRepository._current_commit_seq_with_session(conn) != proof["accepted_commit_seq"]:
+        raise ValueError("B1 candidate accepted watermark changed")
 
 
 def run(args):
