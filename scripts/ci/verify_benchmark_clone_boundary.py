@@ -111,7 +111,8 @@ def _binding(args, pair, mounts):
     expected_archive = {"schema": "qt.paused_archive_suffix.v1", "pair_receipt_sha256": args.receipt_sha256,
                         "database_identity": pair["database_identity"], "storage_layout": pair["storage_layout"],
                         "timeline": args.timeline, "device_id": args.device_id, "target_lsn": args.target_lsn,
-                        "replay_lsn": args.expected_replay_lsn, "pgdata": source["pgdata"],
+                        "replay_lsn": args.expected_replay_lsn, "accepted_commit_seq": args.expected_commit_seq,
+                        "pgdata": source["pgdata"],
                         "pgdata_inode": source["pgdata_inode"], "suffix_inode": mounts["archive"][1],
                         "materialize_baseline": True, "archive_snapshot": pair["archive_snapshot"],
                         "baseline_inventory_sha256": pair["inventory_sha256"]}

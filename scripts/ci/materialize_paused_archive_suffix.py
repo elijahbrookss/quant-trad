@@ -25,6 +25,7 @@ from core.storage_targets import StorageLocation
 from market_data.archive_namespace import archive_namespace
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.service.storage.recovery_copies import _archive_rows, _json_write, _sync
+from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
 from scripts.automation.stage_encrypted_recovery_handoff import _identity, _private_root
 from scripts.automation.verify_canonical_recovery_archive import _path, _sha256, _sha_file
 from scripts.automation.verify_encrypted_recovery_handoff import _bound_json, _directory
@@ -222,7 +223,10 @@ def materialize(args):
         _bound_statement(conn, check, args.statement_timeout_seconds)
 
     def probe(conn):
-        return _probe(conn, args, pair, target_lsn=args.target_lsn, replay_lsn=args.expected_replay_lsn)
+        state = _probe(conn, args, pair, target_lsn=args.target_lsn, replay_lsn=args.expected_replay_lsn)
+        bound(conn)
+        watermark = PostgresMarketDataRepository._current_commit_seq_with_session(conn)
+        return state | {"accepted_commit_seq": watermark}
 
     engine = _readonly_engine(args, check)
     try:
@@ -243,6 +247,7 @@ def materialize(args):
                 "schema": "qt.paused_archive_suffix.v1", "pair_receipt_sha256": args.receipt_sha256,
                 "database_identity": baseline.database_identity, "storage_layout": baseline.layout.copy(),
                 "timeline": args.timeline, "target_lsn": "%X/%X" % target, "replay_lsn": before["replay_lsn"],
+                "accepted_commit_seq": before["accepted_commit_seq"],
                 "pgdata": str(args.pgdata), "pgdata_inode": args.pgdata_inode,
                 "source_archive": str(args.source_archive), "source_inode": source_id[1], "suffix_inode": suffix_id[1],
                 "device_id": args.device_id,
