@@ -18,16 +18,19 @@ from sqlalchemy import text
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.service.storage.recovery_copies import _snapshot_layout, _sync
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
+from scripts.automation.canonical_cold_receiver_ready import verify_replayed_checkpoint_baseline
 from scripts.automation.stage_encrypted_recovery_handoff import (
     TransferLimits, _PUBLISHED, _SCHEMA, _encode, _file, _identity, _private_root, _safe_member, _source_generation,
     _source_hold, _stamp,
 )
 from scripts.automation.verify_encrypted_recovery_handoff import _WAL, _anchor_wal, _archive_filenames, _bound_json, _wal_range
 from scripts.db.canonical_cold_database_fence import DatabaseFence, _DATABASE, _database, native_transaction_mode
+from scripts.db.canonical_cold_replayed_checkpoint import _lsn, _segment_number
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
 _VERSION = "qt.encrypted_recovery_wal_transfer.v1"
+_CHECKPOINT_VERSION = "qt.encrypted_recovery_wal_transfer.v2"
 _RECEIPT = "encrypted-wal-transfer.json"
 _PREFIX_VERSION = "qt.encrypted_recovery_wal_prefix.v1"
 _MAX_SEGMENTS = 128
@@ -65,20 +68,82 @@ def _baseline(receiving, transfer_sha256, baseline, expected_baseline):
     return pair
 
 
-def _suffix(stop, last, segment_bytes, max_segments):
+def _segments_per_log(segment_bytes):
     if (type(segment_bytes) is not int or not 2**20 <= segment_bytes <= 2**30
             or segment_bytes & (segment_bytes - 1)):
         raise ValueError("canonical_recovery_wal_segment_size_invalid")
+    return (1 << 32) // segment_bytes
+
+
+def _suffix(stop, last, segment_bytes, max_segments):
+    _segments_per_log(segment_bytes)
     return _wal_range(stop, last, segment_bytes, max_segments + 1)[1:]
 
 
-def check_source_wal_capacity(control, *, expected_database, backup_stop, segment_bytes, max_segments, timeout_seconds):
+def _count_restart_segments(redo, terminal, segment_bytes, max_restart_segments):
+    if type(max_restart_segments) is not int or max_restart_segments < 1:
+        raise ValueError("canonical_recovery_wal_restart_segment_budget_invalid")
+    if not isinstance(terminal, str) or not _WAL.fullmatch(terminal) or int(terminal[:8], 16) == 0:
+        raise ValueError("canonical_recovery_wal_restart_range_invalid")
+    timeline = int(terminal[:8], 16)
+    per_log = _segments_per_log(segment_bytes)
+    first = _segment_number(redo, timeline, per_log)
+    last = _segment_number(terminal, timeline, per_log)
+    count = last - first + 1
+    if not 1 <= count <= max_restart_segments:
+        raise ValueError("canonical_recovery_wal_restart_range_outside_budget")
+    return count
+
+
+def final_wal_origin(baseline, *, checkpoint=None, checkpoint_sha256=None):
+    """Return the transport floor from the original pinned backup or trusted restart evidence."""
+    if checkpoint is None and checkpoint_sha256 is None:
+        return baseline["wal_backup_stop"]
+    return verify_replayed_checkpoint_baseline(
+        checkpoint, baseline_verification=baseline, expected_checkpoint_sha256=checkpoint_sha256,
+    )
+
+
+def _final_scope(baseline, *, base_transfer_sha256, anchor_sha256, anchor, last, checkpoint, checkpoint_sha256,
+                 max_restart_segments=None):
+    origin = final_wal_origin(baseline, checkpoint=checkpoint, checkpoint_sha256=checkpoint_sha256)
+    segment_bytes = baseline["wal_segment_bytes"]
+    scope = {"schema": _VERSION, "base_transfer_sha256": base_transfer_sha256,
+             "baseline_verification_sha256": baseline["verification_sha256"], "anchor_sha256": anchor_sha256,
+             "wal_backup_stop": baseline["wal_backup_stop"], "wal_transferred_through": last,
+             "wal_segment_bytes": segment_bytes, "database_archive_id": baseline["database_archive_id"]}
+    if checkpoint is not None:
+        end = _lsn(anchor.get("anchor_lsn"))
+        if (last[:8] != origin[:8] or last <= origin or anchor["timeline"] != checkpoint["timeline"]
+                or end <= _lsn(checkpoint["replay_lsn"])
+                or _segment_number(last, checkpoint["timeline"], _segments_per_log(segment_bytes)) != (end - 1) // segment_bytes
+                or anchor["source_commit_seq"] < checkpoint["accepted_commit_seq"]):
+            raise ValueError("canonical_recovery_wal_anchor_not_after_checkpoint")
+        scope.update({"schema": _CHECKPOINT_VERSION, "wal_after": origin, "checkpoint_sha256": checkpoint_sha256,
+                      "wal_verification_sha256": checkpoint["wal_verification_sha256"]})
+    if max_restart_segments is not None:
+        if checkpoint is None:
+            raise ValueError("canonical_recovery_wal_restart_checkpoint_required")
+        scope.update({"max_restart_segments": max_restart_segments,
+                      "wal_restart_segments": _count_restart_segments(
+                          checkpoint["redo_wal_segment"], last, segment_bytes, max_restart_segments,
+                      )})
+    return origin, scope
+
+
+def check_source_wal_capacity(control, *, expected_database, backup_stop, segment_bytes, max_segments, timeout_seconds,
+                              restart_from=None, max_restart_segments=None):
     """Reject a span that already exceeds the named receiver's WAL file cap."""
     if type(max_segments) is not int or not 1 <= max_segments <= _MAX_SEGMENTS:
         raise ValueError("canonical_recovery_wal_segment_budget_invalid")
+    if (restart_from is None) != (max_restart_segments is None):
+        raise ValueError("canonical_recovery_wal_restart_segment_budget_invalid")
     row = _source_wal_snapshot(control, expected_database, segment_bytes, timeout_seconds)
     # The current WAL is a lower bound. The exact fenced anchor is checked after the stop.
-    return len(_suffix(backup_stop, row["segment"], segment_bytes, max_segments))
+    count = len(_suffix(backup_stop, row["segment"], segment_bytes, max_segments))
+    if restart_from is not None:
+        _count_restart_segments(restart_from, row["segment"], segment_bytes, max_restart_segments)
+    return count
 
 
 def _source_wal_snapshot(control, expected_database, segment_bytes, timeout_seconds):
@@ -320,8 +385,9 @@ def verify_wal_prefix(*, receiving, base_transfer_sha256, baseline, baseline_ver
 
 
 def stage_final_wal(*, fence, control, source, receiving, base_transfer_sha256, baseline, anchor_path,
-                    baseline_verification_sha256, anchor_sha256, limits):
-    """Read the archiver and write only selected encrypted files on the receiving mount."""
+                    baseline_verification_sha256, anchor_sha256, limits, checkpoint=None, checkpoint_sha256=None,
+                    max_restart_segments=None):
+    """Transfer the exact encrypted tail while the trusted earlier restart WAL remains in custody."""
     started = monotonic()
     source, source_id = _private_root(source)
     receiving, receiver_id = _private_root(receiving)
@@ -354,8 +420,11 @@ def stage_final_wal(*, fence, control, source, receiving, base_transfer_sha256, 
         if (source_pair != pair or anchor["database"] != fence.database or _snapshot_layout(conn) != anchor["storage_layout"]
                 or PostgresMarketDataRepository._current_commit_seq_with_session(conn) != anchor["source_commit_seq"]):
             raise RuntimeError("canonical_recovery_wal_live_anchor_changed")
+        origin, scope = _final_scope(baseline, base_transfer_sha256=base_transfer_sha256, anchor_sha256=anchor_sha256,
+                                     anchor=anchor, last=last, checkpoint=checkpoint, checkpoint_sha256=checkpoint_sha256,
+                                     max_restart_segments=max_restart_segments)
         segment_bytes = baseline["wal_segment_bytes"]
-        suffix = _suffix(stop, last, segment_bytes, limits.files)
+        suffix = _suffix(origin, last, segment_bytes, limits.files)
         _check_wal_archiver(control, fence, last, segment_bytes, timeout, check)
         observed = _observe_wal(source, source_id[0], baseline["database_archive_id"], suffix, check)
         total = sum(expected[2] for _, _, _, expected in observed)
@@ -365,10 +434,7 @@ def stage_final_wal(*, fence, control, source, receiving, base_transfer_sha256, 
             raise RuntimeError("canonical_recovery_wal_transfer_space_insufficient")
         files = _copy_wal(observed, source=source, receiving=receiving, device=receiver_id[0], total=total, check=check)
         fence.assert_quiet(conn)
-        report = {"schema": _VERSION, "base_transfer_sha256": base_transfer_sha256,
-                  "baseline_verification_sha256": baseline["verification_sha256"], "anchor_sha256": anchor_sha256,
-                  "wal_backup_stop": stop, "wal_transferred_through": last, "wal_segment_bytes": segment_bytes,
-                  "database_archive_id": baseline["database_archive_id"], "encrypted_bytes": total, "files": files}
+        report = scope | {"encrypted_bytes": total, "files": files}
         digest = _publish_wal_receipt(receiving / _RECEIPT, report, check)
         return report | {"wal_transfer_sha256": digest}
 
@@ -391,8 +457,9 @@ def _verify_ciphertext(receiving, device, archive_id, segments, report, limits, 
 
 
 def verify_final_wal(*, receiving, expected_hash, baseline, baseline_verification_sha256,
-                     base_transfer_sha256, anchor_path, anchor_sha256, limits):
-    """Check installed ciphertext binding before native archive-get and named restore."""
+                     base_transfer_sha256, anchor_path, anchor_sha256, limits, checkpoint=None, checkpoint_sha256=None,
+                     max_restart_segments=None):
+    """Recheck final ciphertext against the named anchor and independently pinned restart evidence."""
     started = monotonic()
     receiving, device = _private_root(receiving)
 
@@ -406,13 +473,14 @@ def verify_final_wal(*, receiving, expected_hash, baseline, baseline_verificatio
         raise ValueError("canonical_recovery_wal_segment_budget_invalid")
     pair = _baseline(receiving, base_transfer_sha256, baseline, baseline_verification_sha256)
     last = _anchor_wal(anchor_path, anchor_sha256, pair, baseline["wal_backup_stop"])
+    anchor = _bound_json(anchor_path, anchor_sha256) if checkpoint is not None else None
+    origin, expected = _final_scope(baseline, base_transfer_sha256=base_transfer_sha256, anchor_sha256=anchor_sha256,
+                                    anchor=anchor, last=last, checkpoint=checkpoint, checkpoint_sha256=checkpoint_sha256,
+                                    max_restart_segments=max_restart_segments)
     report = _bound_json(receiving / _RECEIPT, expected_hash)
-    expected = {"schema": _VERSION, "base_transfer_sha256": base_transfer_sha256,
-                "baseline_verification_sha256": baseline["verification_sha256"], "anchor_sha256": anchor_sha256,
-                "wal_backup_stop": baseline["wal_backup_stop"], "wal_transferred_through": last,
-                "wal_segment_bytes": baseline["wal_segment_bytes"], "database_archive_id": baseline["database_archive_id"]}
-    if any(report.get(key) != value for key, value in expected.items()):
+    if (not isinstance(report, dict) or any(report.get(key) != value for key, value in expected.items())
+            or (checkpoint is not None and report.keys() != expected.keys() | {"encrypted_bytes", "files"})):
         raise ValueError("canonical_recovery_wal_receipt_binding_changed")
-    suffix = _suffix(report["wal_backup_stop"], last, report["wal_segment_bytes"], limits.files)
+    suffix = _suffix(origin, last, report["wal_segment_bytes"], limits.files)
     _verify_ciphertext(receiving, device, report["database_archive_id"], suffix, report, limits, check)
     return report | {"wal_transfer_sha256": expected_hash}

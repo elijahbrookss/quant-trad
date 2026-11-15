@@ -62,7 +62,7 @@ def _restic_run(binary, key_path, repository, work, deadline, check, *, read_onl
 
 
 def _binding(pair, anchor, wal, *, baseline_verification_sha256, archive):
-    return {
+    report = {
         "schema": _SCHEMA, "pair_receipt_sha256": wal["pair_receipt_sha256"],
         "database_identity": pair["database_identity"], "storage_layout": anchor["storage_layout"],
         "source_commit_seq": anchor["source_commit_seq"], "restore_name": anchor["restore_name"],
@@ -72,6 +72,9 @@ def _binding(pair, anchor, wal, *, baseline_verification_sha256, archive):
         "wal_transfer_sha256": wal["wal_transfer_sha256"],
         "wal_segment": wal["wal_transferred_through"], "archive": archive,
     }
+    if "checkpoint_sha256" in wal:
+        report.update(checkpoint_sha256=wal["checkpoint_sha256"], wal_verification_sha256=wal["wal_verification_sha256"])
+    return report
 
 
 def _boundary(receiving, wal_options, expected_wal_sha256, deadline):
@@ -153,7 +156,8 @@ def stage_encrypted_archive_suffix(*, fence, baseline, source_root, plaintext_st
         if published.exists() or published.is_symlink() or private.exists() or private.is_symlink():
             raise ValueError("canonical_recovery_archive_transport_requires_unused_destination")
         pair, anchor, wal = _boundary(receiving, wal_options, expected_wal_sha256, deadline)
-        if anchor["database"] != fence.database or baseline.receipt_sha256 != wal["pair_receipt_sha256"]:
+        if (anchor["database"] != fence.database or baseline.receipt_sha256 != wal["pair_receipt_sha256"]
+                or baseline.checkpoint_sha256 != wal.get("checkpoint_sha256")):
             raise RuntimeError("canonical_recovery_archive_transport_live_boundary_changed")
         archive = capture_final_archive_suffix(fence, anchor, baseline, source_root=source_root,
             stage=plaintext_stage, max_objects=max_objects, max_suffix_bytes=max_plaintext_bytes, check_archive=check)
@@ -222,7 +226,11 @@ def _require_named_replay(conn, anchor):
 def _require_native_named(native_named, native_named_sha256, baseline, pair, report):
     named = {key: value for key, value in native_named.items() if key != "verification_sha256"}
     schema = native_named.get("schema")
+    checkpoint = report.get("checkpoint_sha256")
     if (schema not in {"qt.encrypted_recovery_repository_verification.v1", PREPARED_NATIVE_VERSION}
+            or baseline.checkpoint_sha256 != checkpoint or named.get("checkpoint_sha256") != checkpoint
+            or named.get("wal_verification_sha256") != report.get("wal_verification_sha256")
+            or (checkpoint is not None and schema != PREPARED_NATIVE_VERSION)
             or (schema == PREPARED_NATIVE_VERSION and (
                 not _sha256(named.get("prepared_receiver_sha256")) or not _sha256(named.get("verified_wal_sha256"))
                 or named.get("wal_transfer_sha256") != report["wal_transfer_sha256"]
@@ -317,6 +325,8 @@ def close_named_archive_suffix(conn, *, suffix, baseline, native_named, native_n
               "pair_receipt_sha256": baseline.receipt_sha256, "database_identity": pair["database_identity"],
               "source_commit_seq": anchor["source_commit_seq"], "restore_name": anchor["restore_name"],
               "replay_lsn": anchor["anchor_lsn"], "coverage": coverage}
+    if "checkpoint_sha256" in report:
+        result["checkpoint_sha256"] = report["checkpoint_sha256"]
     return result | {"closure_sha256": archive_evidence_hash(result)}
 
 

@@ -16,6 +16,7 @@ from scripts.automation import canonical_cold_receiver_ready as ready
 from scripts.automation import canonical_cold_recovery_checks as recovery
 from scripts.automation.storage_host_boundary import digest, load_receipt
 from scripts.db.canonical_cold_witness import VERSION as WITNESS_VERSION
+from tests.test_canonical_cold_receiver_ready import replayed_receiver_evidence
 
 
 def _write(path, content):
@@ -111,11 +112,18 @@ def test_approved_collector_plan_persists_both_boundary_receipts(tmp_path, monke
 
 
 @pytest.mark.parametrize("pending", (False, True))
-def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(tmp_path, pending):
+@pytest.mark.parametrize("replayed", (False, True))
+def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(tmp_path, monkeypatch, pending, replayed):
     root = tmp_path / "private-receipts"
     root.mkdir(mode=0o700)
     plan = {"schema": recovery.PLAN_VERSION, "base_transfer_sha256": "a" * 64,
             "baseline_verification_sha256": "b" * 64, "pair_receipt_sha256": "c" * 64}
+    checkpoint = baseline = None
+    if replayed:
+        _, baseline, checkpoint = replayed_receiver_evidence()
+        plan.update(schema=recovery.REPLAYED_PLAN_VERSION, baseline_verification_sha256=baseline["verification_sha256"],
+                    pair_receipt_sha256=baseline["pair_receipt_sha256"],
+                    replayed_checkpoint_sha256=checkpoint["verification_sha256"], max_restart_segments=3)
     scope = {"definition_id": "fixture-level2", "session_id": "old", "sealed_files": 2}
     plan["pending_spool_scope_sha256"] = digest(scope) if pending else None
     receiver = Ed25519PrivateKey.generate()
@@ -128,7 +136,7 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
         "receiver_mounts": {role: {"device_id": "1:2", "block_size": 4} for role in roles},
         "requirements": {role: {"checkpoint_bytes": 2, "entries": 1, "reserve_bytes": 4} for role in roles},
         "capacity_by_device": {"1:2": capacity},
-        "site_policy": {"database_identity": "123/42", "receiver_public_key": public,
+        "site_policy": {"database_identity": "123/42", "receiver_public_key": public, "wal": {"files": 1},
                         **{key: plan[key] for key in recovery._BASE_PINS}}}
     measured = digest(measurement)
     plan.update(receiver_public_key=public, receiver_preflight=named._sign(measurement | {"measurement_sha256": measured}, receiver))
@@ -136,7 +144,8 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
     with pytest.raises(ValueError, match="invalid_preflight_capacity"):
         named.verify_receiver_preflight(named._sign(impossible | {"measurement_sha256": digest(impossible)}, receiver), public)
     path = tmp_path / "independent.json"
-    accepted = {"source_commit_floor": 40, "scope": {"target_database": {"system_identifier": "123", "database_oid": 42}},
+    target_database = {"database": "fixture", "system_identifier": "123", "database_oid": 42}
+    accepted = {"source_commit_floor": 40, "scope": {"target_database": target_database},
                 "artifacts": {"independent_recovery": {"filename": path.name, "sha256": _write(path, json.dumps(plan).encode())}}}
     package_path = tmp_path / "package.json"
     package_hash = _write(package_path, json.dumps(accepted).encode())
@@ -145,6 +154,7 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
     )
     prepared = ready.make_prepared_receiver_ready(
         scope=readiness_scope, materialized_sha256="b" * 64, expires_at=int(time()) + 3600,
+        replayed_checkpoint=checkpoint, baseline_verification=baseline,
     )
     signed_prepared = named._sign(prepared, receiver)
     active_preparation = signed_prepared
@@ -160,6 +170,8 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
         "coverage": {"archive_snapshot": "2" * 64, "final_inventory_sha256": "3" * 64, "final_objects": 20,
                      "final_bytes": 30000, "baseline_objects_used": 19, "verified_suffix_objects": 1},
     }
+    if replayed:
+        archive["checkpoint_sha256"] = plan["replayed_checkpoint_sha256"]
     observed = {"schema": "qt.pending_raw_spool_source.v1", "scope": scope, "boundary": boundary, "segments": segments}
     before_anchor = {"schema": "qt.pending_raw_spool_source_before_anchor.v1", "scope": scope,
                      "boundary": {key: value for key, value in boundary.items() if key != "anchor_sha256"}, "segments": segments}
@@ -186,6 +198,8 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
         return report
 
     restore.assert_receiver_ready = lambda: active_preparation
+    restore.wal_baseline = baseline
+    restore.restart_budget = plan.get("max_restart_segments")
     options = dict(package_path=package_path, package=accepted, approved_package_hash=package_hash,
                    receipt_root=root, verify_site_restore=restore,
                    expected_pending_scope_sha256=plan["pending_spool_scope_sha256"])
@@ -193,11 +207,27 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
     arguments = (None, None, 45, provider_digest, lambda: 30, lambda: None)
     with pytest.raises(RuntimeError, match="receiver_not_prepared_before_stop"):
         checker(*arguments)
+    if replayed:
+        original = ready.make_prepared_receiver_ready(scope=readiness_scope, materialized_sha256="b" * 64,
+                                                       expires_at=int(time()) + 3600)
+        active_preparation = named._sign(original, receiver)
+        with pytest.raises(ValueError, match="unapproved_checkpoint"):
+            checker.assert_receiver_ready()
     active_preparation = named._sign({**prepared, "expires_at": int(time()) - 1}, receiver)
     with pytest.raises(TimeoutError, match="prepared_receiver_expired"):
         checker.assert_receiver_ready()
     active_preparation = signed_prepared
     assert checker.assert_receiver_ready() == digest(prepared)
+    if replayed:
+        def capacity(control, *, expected_database, backup_stop, restart_from, max_restart_segments,
+                     segment_bytes, max_segments, timeout_seconds):
+            assert expected_database == target_database and timeout_seconds == 5
+            assert (backup_stop, restart_from) == (checkpoint["wal_verified_through"], checkpoint["redo_wal_segment"])
+            assert max_restart_segments == 3 and segment_bytes == 2**24 and max_segments == 1
+            return 1
+
+        monkeypatch.setattr(recovery, "check_source_wal_capacity", capacity)
+        assert checker.assert_source_wal_capacity(None, expected_database=target_database, timeout_seconds=5) == 1
     active_preparation = named._sign({**prepared, "attempt_id": "f" * 32}, receiver)
     with pytest.raises(RuntimeError, match="prepared_attempt_changed"):
         checker.assert_receiver_ready()
@@ -222,6 +252,12 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
     acknowledge()
     with pytest.raises(RuntimeError, match="named_boundary_changed"):
         checker(*arguments)
+    if replayed:
+        omitted = {key: value for key, value in archive.items() if key != "checkpoint_sha256"}
+        report["archive_closure"] = {**omitted, "closure_sha256": digest(omitted)}
+        acknowledge()
+        with pytest.raises(RuntimeError, match="named_boundary_changed"):
+            checker(*arguments)
     report["archive_closure"] = {**archive, "closure_sha256": digest(archive)}
     changed = {**received, "segments": segments[:1]}
     report["pending_spool_verified"] = {**changed, "verification_sha256": digest(changed)}

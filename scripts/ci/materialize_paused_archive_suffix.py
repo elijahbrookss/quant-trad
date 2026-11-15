@@ -5,6 +5,7 @@ attempt root, the pair receipt read-only, and the archive input and writable
 private suffix as separate binds. A matching object already in the suffix is
 verified and reused even if its source has since expired. Optionally place the
 required baseline objects in the same private archive for application reads.
+Materializing the baseline also publishes the paused catalog as canonical JSONL.
 Current serving SQL, WAL replay, backup keys, and archive deletion are outside
 this tool's scope.
 """
@@ -12,6 +13,7 @@ this tool's scope.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -34,6 +36,9 @@ from scripts.ci.verify_paused_recovery_pair import (
     _add_scope_arguments, _bound_statement, _check_scope, _lsn, _mount_paths, _probe, _read_pair, _readonly_engine,
 )
 from scripts.db.canonical_cold_recovery_suffix import _copy_object, _encode, prepare_archive_baseline
+
+
+_CATALOG_INVENTORY = "catalog.jsonl"
 
 
 def _roots(args):
@@ -63,10 +68,13 @@ def _scope_directory(suffix, scope):
         raise RuntimeError("paused_archive_suffix_work_device_changed")
     # The exclusive root lock excludes another copier. Refuse unknown files
     # and keep final names even if a crash left an extra staging hard link.
+    allowed_leftovers = {"object", marker.name}
+    if scope.get("materialize_baseline"):
+        allowed_leftovers.add(_CATALOG_INVENTORY)
     leftovers = []
     for entry in work.iterdir():
         info = entry.lstat()
-        if (entry.name not in {"object", marker.name} or not stat.S_ISREG(info.st_mode)
+        if (entry.name not in allowed_leftovers or not stat.S_ISREG(info.st_mode)
                 or info.st_uid != os.getuid() or info.st_dev != device):
             raise RuntimeError("paused_archive_suffix_unknown_work_file")
         if not existing:
@@ -139,10 +147,12 @@ def _place_object(key, descriptor, *, source, objects, work, reserve_bytes, chec
     return True
 
 
-def _copy_catalog(conn, args, baseline, objects, work, check, bound, *, baseline_bytes, baseline_source=None):
+def _copy_catalog(conn, args, baseline, objects, work, check, bound, *, baseline_bytes, baseline_source=None,
+                  catalog_inventory=None):
     catalog_hash, suffix_hash = hashlib.sha256(), hashlib.sha256()
     seen = set()
     total_bytes = suffix_bytes = copied = reused = baseline_copied = baseline_reused = 0
+    inventory_bytes = 0
     for row in _archive_rows(conn, max_objects=args.max_objects, check=bound):
         check()
         key, digest, size = row["object_key"], row["object_sha256"], row["byte_count"]
@@ -155,6 +165,11 @@ def _copy_catalog(conn, args, baseline, objects, work, check, bound, *, baseline
         total_bytes += size
         encoded = _encode(key, descriptor)
         catalog_hash.update(encoded)
+        if catalog_inventory is not None:
+            inventory_bytes += len(encoded)
+            if baseline_bytes + suffix_bytes + inventory_bytes > args.max_work_bytes:
+                raise RuntimeError("paused_archive_suffix_work_byte_budget_exceeded")
+            catalog_inventory.write(encoded)
         known = baseline.objects.get(key)
         if known is not None:
             if known != descriptor:
@@ -167,7 +182,7 @@ def _copy_catalog(conn, args, baseline, objects, work, check, bound, *, baseline
             baseline_reused += not added
             continue
         suffix_bytes += size
-        if baseline_bytes + suffix_bytes > args.max_work_bytes:
+        if baseline_bytes + suffix_bytes + inventory_bytes > args.max_work_bytes:
             raise RuntimeError("paused_archive_suffix_work_byte_budget_exceeded")
         added = _place_object(key, descriptor, source=args.source_archive, objects=objects, work=work,
                               reserve_bytes=args.reserve_bytes, check=check)
@@ -183,8 +198,24 @@ def _copy_catalog(conn, args, baseline, objects, work, check, bound, *, baseline
     if baseline_source is not None:
         result.update(archive_root=str(objects.parent), materialized_inventory_sha256=catalog_hash.hexdigest(),
                       materialized_objects=len(seen), materialized_bytes=total_bytes,
-                      copied_baseline_objects=baseline_copied, reused_baseline_objects=baseline_reused)
+                      copied_baseline_objects=baseline_copied, reused_baseline_objects=baseline_reused,
+                      catalog_inventory_bytes=inventory_bytes)
     return result
+
+
+def _publish_catalog_inventory(suffix, work, digest, check):
+    staged = work / _CATALOG_INVENTORY
+    published = suffix / _CATALOG_INVENTORY
+    if published.exists() or published.is_symlink():
+        existing, _ = _sha_file(_path(suffix, _CATALOG_INVENTORY, absolute=False), check=check)
+        if existing != digest:
+            raise RuntimeError("paused_archive_suffix_catalog_inventory_changed")
+    else:
+        os.link(staged, published)
+    _sync(suffix)
+    staged.unlink()
+    _sync(work)
+    return published
 
 
 def materialize(args):
@@ -261,8 +292,17 @@ def materialize(args):
                     raise RuntimeError("paused_archive_suffix_endpoint_changed")
                 held()
                 objects, work = _scope_directory(args.suffix, scope)
-                copied = _copy_catalog(conn, args, baseline, objects, work, check, lambda: bound(conn),
-                                       baseline_bytes=baseline_bytes, baseline_source=baseline_source)
+                inventory = nullcontext()
+                if args.materialize_baseline:
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                    inventory = os.fdopen(os.open(work / _CATALOG_INVENTORY, flags, 0o600), "wb")
+                with inventory as catalog:
+                    copied = _copy_catalog(conn, args, baseline, objects, work, check, lambda: bound(conn),
+                                           baseline_bytes=baseline_bytes, baseline_source=baseline_source,
+                                           catalog_inventory=catalog)
+                    if catalog is not None:
+                        catalog.flush()
+                        os.fsync(catalog.fileno())
                 bound(conn)
                 if probe(conn) != before:
                     raise RuntimeError("paused_archive_suffix_endpoint_changed")
@@ -271,11 +311,15 @@ def materialize(args):
                     or _read_pair(args) != pair):
                 raise RuntimeError("paused_archive_suffix_final_scope_changed")
             check()
+            if args.materialize_baseline:
+                copied["catalog_inventory_path"] = str(_publish_catalog_inventory(
+                    args.suffix, work, copied["catalog_inventory_sha256"], check))
     finally:
         engine.dispose()
     receipt = scope | copied | {
         "archive_snapshot": pair["archive_snapshot"], "baseline_inventory_sha256": pair["inventory_sha256"],
-        "suffix_root": str(objects), "work_logical_bytes": baseline_bytes + copied["suffix_bytes"],
+        "suffix_root": str(objects),
+        "work_logical_bytes": baseline_bytes + copied["suffix_bytes"] + copied.get("catalog_inventory_bytes", 0),
         "elapsed_seconds": round(monotonic() - started, 3),
     }
     return receipt | {"verification_sha256": archive_evidence_hash(receipt)}
@@ -290,7 +334,8 @@ def main(argv=None):
     parser.add_argument("--suffix", type=Path, required=True, help="Private writable bind for this endpoint's suffix.")
     parser.add_argument("--materialize-baseline", action="store_true",
                         help="Also copy referenced baseline objects into the same private application archive.")
-    parser.add_argument("--max-work-bytes", type=int, required=True, help="Logical bytes verified across baseline and suffix.")
+    parser.add_argument("--max-work-bytes", type=int, required=True,
+                        help="Logical bytes across the baseline, suffix objects and any materialized catalog.")
     parser.add_argument("--reserve-bytes", type=int, required=True, help="Free HDD bytes to preserve.")
     try:
         receipt = materialize(parser.parse_args(argv))

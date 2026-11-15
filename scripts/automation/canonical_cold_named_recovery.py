@@ -39,7 +39,9 @@ from scripts.db.canonical_cold_recovery_archive_transport import (
     PREPARED_NATIVE_VERSION, close_named_archive_suffix, restore_named_archive_suffix, stage_encrypted_archive_suffix,
 )
 from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope, measure_pending_spool, stage_pending_spool, verify_pending_spool
-from scripts.db.canonical_cold_recovery_suffix import PreparedArchiveBaseline, prepare_archive_baseline
+from scripts.db.canonical_cold_recovery_suffix import (
+    PreparedArchiveBaseline, prepare_archive_baseline, prepare_replayed_archive_baseline,
+)
 from scripts.db.canonical_cold_recovery_wal_transfer import (
     _MAX_SEGMENTS, _baseline, _prefix_window, stage_final_wal, verify_wal_prefix,
 )
@@ -97,9 +99,16 @@ class NamedRecoverySite(RecoverySitePolicy):
 
     approved_package_sha256: str
     receiver_preflight: dict
+    replayed_checkpoint_sha256: str | None = None
+    max_restart_segments: int | None = None
 
     def __post_init__(self):
         super().__post_init__()
+        if ((self.replayed_checkpoint_sha256 is None) != (self.max_restart_segments is None)
+                or self.replayed_checkpoint_sha256 is not None and (
+                    not _sha256(self.replayed_checkpoint_sha256) or type(self.max_restart_segments) is not int
+                    or not 1 <= self.max_restart_segments <= 2**44)):
+            raise ValueError("canonical_named_recovery_checkpoint_pin_invalid")
         self.checked_preflight()
 
     def checked_preflight(self):
@@ -246,10 +255,22 @@ def _ready_scope(site, measured):
         receiver_preflight_sha256=measured["measurement_sha256"], site_policy=measured["site_policy"])
 
 
-def _wal_options(site, anchor_path, anchor_sha256, check):
-    return {"base_transfer_sha256": site.base_transfer_sha256, "baseline": site.baseline_verification,
-            "baseline_verification_sha256": site.baseline_verification["verification_sha256"],
-            "anchor_path": anchor_path, "anchor_sha256": anchor_sha256, "limits": _limit(site.wal, check)}
+def _wal_options(site, anchor_path, anchor_sha256, check, *, checkpoint=None):
+    options = {"base_transfer_sha256": site.base_transfer_sha256, "baseline": site.baseline_verification,
+               "baseline_verification_sha256": site.baseline_verification["verification_sha256"],
+               "anchor_path": anchor_path, "anchor_sha256": anchor_sha256, "limits": _limit(site.wal, check)}
+    if checkpoint is not None:
+        options.update(checkpoint=checkpoint, checkpoint_sha256=site.replayed_checkpoint_sha256,
+                       max_restart_segments=site.max_restart_segments)
+    return options
+
+
+def _verify_site_ready(site, body, *, scope):
+    digest = verify_prepared_receiver_ready(body, scope=scope, baseline_verification=site.baseline_verification)
+    checkpoint = body.get("replayed_checkpoint")
+    if (None if checkpoint is None else checkpoint["verification_sha256"]) != site.replayed_checkpoint_sha256:
+        raise ValueError("canonical_named_recovery_checkpoint_outside_approval")
+    return digest
 
 
 def _private_credential(path, *, receiving, workspace=None):
@@ -260,14 +281,16 @@ def _private_credential(path, *, receiving, workspace=None):
 
 
 def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, database_repository, archive_objects,
-                               scratch, baseline, restic, archive_key, pending_key=None, pending_spool=None):
+                               scratch, baseline, restic, archive_key, pending_key=None, pending_spool=None,
+                               replayed_inventory=None):
     """Make the launcher callback. Actual recovery still requires the approved live fence."""
     measured = site.checked_preflight()
     root, root_id = _private_root(site.receiving)
     scratch, scratch_id = _private_root(scratch)
     receipts, receipts_id = _private_root(provider_receipt_root)
     if scratch_id[0] == root_id[0] or not isinstance(baseline, PreparedArchiveBaseline) or (
-            baseline.receipt_sha256 != site.baseline_verification["pair_receipt_sha256"]):
+            baseline.receipt_sha256 != site.baseline_verification["pair_receipt_sha256"] or baseline.checkpoint_sha256 is not None
+            or (replayed_inventory is None) != (site.replayed_checkpoint_sha256 is None)):
         raise ValueError("canonical_named_recovery_source_storage_invalid")
     archive_key = _private_credential(archive_key, receiving=root)
     signer = _signer(signing_key, site.source_public_key, root)
@@ -275,9 +298,10 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
         pending_key = _private_credential(pending_key, receiving=root)
     ready_scope = _ready_scope(site, measured)
     admitted = None
+    admitted_archive = baseline
 
     def assert_receiver_ready():
-        nonlocal admitted
+        nonlocal admitted, admitted_archive
         if _identity(root.lstat()) != root_id:
             raise RuntimeError("canonical_named_recovery_source_mount_changed")
         try:
@@ -285,9 +309,21 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
         except FileNotFoundError:
             raise RuntimeError("canonical_named_recovery_prepared_receiver_unavailable") from None
         body = verify_signed_recovery(ready, site.receiver_public_key)
-        digest = verify_prepared_receiver_ready(body, scope=ready_scope)
+        digest = _verify_site_ready(site, body, scope=ready_scope)
         if admitted is not None and admitted != digest:
             raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
+        if admitted is None and replayed_inventory is not None:
+            until = monotonic() + min(site.archive.seconds, body["expires_at"] - time())
+
+            def check_inventory():
+                if monotonic() >= until:
+                    raise TimeoutError("canonical_named_recovery_checkpoint_inventory_deadline")
+                if _identity(root.lstat()) != root_id:
+                    raise RuntimeError("canonical_named_recovery_source_mount_changed")
+
+            admitted_archive = prepare_replayed_archive_baseline(replayed_inventory,
+                checkpoint=body["replayed_checkpoint"], max_objects=site.max_archive_objects, check=check_inventory)
+            check_inventory()
         admitted = digest
         return ready
 
@@ -334,11 +370,11 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
             anchor = create_original_recovery_anchor(fence, control, expected_source_commit_seq=source_commit)
             _publish(anchor_path, anchor)
             anchor_hash = _file_hash(anchor_path)
-            wal_options = _wal_options(site, anchor_path, anchor_hash, check)
+            wal_options = _wal_options(site, anchor_path, anchor_hash, check, checkpoint=ready.get("replayed_checkpoint"))
             wal = stage_final_wal(fence=fence, control=control, source=database_repository, receiving=root, **wal_options)
             stage = Path(work) / "accepted"
             stage.mkdir(mode=0o700)
-            archived = stage_encrypted_archive_suffix(fence=fence, baseline=baseline, source_root=archive_objects,
+            archived = stage_encrypted_archive_suffix(fence=fence, baseline=admitted_archive, source_root=archive_objects,
                 plaintext_stage=stage, receiving=root, wal_options=wal_options, expected_wal_sha256=wal["wal_transfer_sha256"],
                 restic=restic, encryption_key=archive_key, max_objects=site.max_archive_objects,
                 max_plaintext_bytes=site.archive.bytes, limits=_limit(site.archive, check), check_archive=check)
@@ -386,6 +422,8 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
                 "base_transfer_sha256", "baseline_verification_sha256",))
                 or closure.get("receiver_runtime_sha256") != reply["runtime_sha256"]):
             raise RuntimeError("canonical_named_recovery_response_boundary_changed")
+        if closure.get("checkpoint_sha256") != site.replayed_checkpoint_sha256:
+            raise RuntimeError("canonical_named_recovery_response_checkpoint_changed")
         with conn.begin(), _bounded_step(conn, min(5, check())):
             fence.assert_quiet(conn)
         check()
@@ -394,6 +432,7 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
 
     recover.assert_receiver_ready = assert_receiver_ready
     recover.wal_baseline = site.baseline_verification
+    recover.restart_budget = site.max_restart_segments
     return recover
 
 
@@ -571,6 +610,8 @@ def prepare_named_receiver(*, site, signing_key, pgbackrest, restic, database_ke
     """Prepare the exact native base and hold its private custody until named recovery."""
     if not isinstance(site, NamedRecoverySite) or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86_400:
         raise ValueError("canonical_named_recovery_invalid_preparation")
+    if site.replayed_checkpoint_sha256 is not None:
+        raise ValueError("canonical_named_recovery_replayed_custody_required")
     if type(ready_seconds) is not int or not 1 <= ready_seconds <= MAX_MIGRATION_SECONDS:
         raise ValueError("canonical_named_recovery_invalid_readiness_lease")
     root, workspace, pgdata, destinations, roots = _empty_receiver_paths(site, workspace, pgdata, tablespaces)
@@ -807,6 +848,8 @@ def _verify_prepared_wal(prepared, suffix, deadline, check):
               "baseline_verification_sha256": wal["baseline_verification_sha256"], "pair_receipt_sha256": wal["pair_receipt_sha256"],
               "anchor_sha256": wal["anchor_sha256"], "wal_verified_through": wal["wal_transferred_through"],
               **{key: pair[key] for key in ("database_identity", "database_label", "archive_snapshot", "storage_layout")}}
+    if "checkpoint_sha256" in wal:
+        report.update(checkpoint_sha256=wal["checkpoint_sha256"], wal_verification_sha256=wal["wal_verification_sha256"])
     return report | {"verification_sha256": archive_evidence_hash(report)}
 
 
@@ -824,7 +867,7 @@ def recover_named_site(*, prepared, suffix_key, pending_key, boot_isolated, veri
     if ready != prepared.ready:
         raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
     ready_body = verify_signed_recovery(ready, site.receiver_public_key)
-    if verify_prepared_receiver_ready(ready_body, scope=_ready_scope(site, measured)) != prepared.digest:
+    if _verify_site_ready(site, ready_body, scope=_ready_scope(site, measured)) != prepared.digest:
         raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
     suffix_key = _private_credential(suffix_key, receiving=root, workspace=workspace)
     if pending_key is not None:
@@ -847,7 +890,7 @@ def recover_named_site(*, prepared, suffix_key, pending_key, boot_isolated, veri
     deadline = min(deadline, monotonic() + request["expires_at"] - time())
     if response_path.exists() or response_path.is_symlink():
         raise RuntimeError("canonical_named_recovery_exchange_already_used")
-    wal_options = _wal_options(site, anchor_path, request["anchor_sha256"], check)
+    wal_options = _wal_options(site, anchor_path, request["anchor_sha256"], check, checkpoint=ready_body.get("replayed_checkpoint"))
     base_restore = prepared.base_restore
     suffix_restore = workspace / "final-archive"
     suffix_restore.mkdir(mode=0o700)

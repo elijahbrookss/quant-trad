@@ -15,10 +15,11 @@ from scripts.automation.canonical_cold_named_recovery import _RESPONSE, verify_r
 from scripts.automation.canonical_cold_package import _hash_file, _pin, _unique_fields
 from scripts.automation.canonical_cold_receiver_ready import prepared_receiver_scope, verify_prepared_receiver_ready
 from scripts.db.canonical_cold_recovery_archive_transport import _CLOSURE
-from scripts.db.canonical_cold_recovery_wal_transfer import check_source_wal_capacity
+from scripts.db.canonical_cold_recovery_wal_transfer import check_source_wal_capacity, final_wal_origin
 
 
 PLAN_VERSION = "qt.canonical_cold_independent_plan.v2"
+REPLAYED_PLAN_VERSION = "qt.canonical_cold_independent_plan.v3"
 RECEIPT_VERSION = "qt.canonical_cold_independent_execution.v2"
 _BASE_PINS = {"base_transfer_sha256", "baseline_verification_sha256", "pair_receipt_sha256"}
 
@@ -60,8 +61,14 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
     if plan_hash != binding["sha256"]:
         raise RuntimeError("canonical_cold_independent_recovery_plan_digest_changed")
     plan = json.loads(content, object_pairs_hook=_unique_fields)
-    if (not isinstance(plan, dict) or set(plan) != _BASE_PINS | {"schema", "pending_spool_scope_sha256", "receiver_public_key", "receiver_preflight"}
-            or plan["schema"] != PLAN_VERSION or not all(_pin(plan[field]) for field in _BASE_PINS)
+    base_fields = _BASE_PINS | {"schema", "pending_spool_scope_sha256", "receiver_public_key", "receiver_preflight"}
+    replayed = isinstance(plan, dict) and plan.get("schema") == REPLAYED_PLAN_VERSION
+    replayed_fields = {"replayed_checkpoint_sha256", "max_restart_segments"}
+    if (not isinstance(plan, dict) or set(plan) != (base_fields | replayed_fields if replayed else base_fields)
+            or plan["schema"] not in (PLAN_VERSION, REPLAYED_PLAN_VERSION) or not all(_pin(plan[field]) for field in _BASE_PINS)
+            or (replayed and (not _pin(plan["replayed_checkpoint_sha256"])
+                or type(plan["max_restart_segments"]) is not int or not 1 <= plan["max_restart_segments"] <= 2**44
+                or getattr(verify_site_restore, "restart_budget", None) != plan["max_restart_segments"]))
             or not _pin(plan["receiver_public_key"])
             or (plan["pending_spool_scope_sha256"] is not None and not _pin(plan["pending_spool_scope_sha256"]))):
         raise ValueError("canonical_cold_independent_recovery_invalid_plan")
@@ -81,6 +88,16 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
     )
     prepared = None
 
+    def checked_baseline():
+        baseline = getattr(verify_site_restore, "wal_baseline", None)
+        _verify_digest(baseline, field="verification_sha256", schema="qt.encrypted_recovery_repository_verification.v1")
+        if (baseline["verification_sha256"] != plan["baseline_verification_sha256"]
+                or baseline.get("pair_receipt_sha256") != plan["pair_receipt_sha256"]
+                or baseline.get("database_identity") != identity or baseline.get("anchor_sha256") is not None
+                or baseline.get("wal_verified_through") != baseline.get("wal_backup_stop")):
+            raise RuntimeError("canonical_cold_independent_recovery_wal_baseline_changed")
+        return baseline
+
     def assert_receiver_ready():
         nonlocal prepared
         if _directory(root) != root_identity:
@@ -89,27 +106,31 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
         if not callable(check_ready):
             raise RuntimeError("canonical_cold_independent_recovery_prepared_receiver_required")
         envelope = check_ready()
-        ready_sha256 = verify_prepared_receiver_ready(
-            verify_signed_recovery(envelope, plan["receiver_public_key"]), scope=readiness_scope,
-        )
+        body = verify_signed_recovery(envelope, plan["receiver_public_key"])
+        checkpoint = body.get("replayed_checkpoint")
+        checkpoint_sha256 = plan.get("replayed_checkpoint_sha256")
+        if (checkpoint is not None) != replayed:
+            raise ValueError("canonical_cold_independent_recovery_unapproved_checkpoint")
+        baseline = checked_baseline() if replayed else None
+        ready_sha256 = verify_prepared_receiver_ready(body, scope=readiness_scope, baseline_verification=baseline)
+        if replayed:
+            final_wal_origin(baseline, checkpoint=checkpoint, checkpoint_sha256=checkpoint_sha256)
         if prepared is not None and prepared[0] != ready_sha256:
             raise RuntimeError("canonical_cold_independent_recovery_prepared_attempt_changed")
-        prepared = ready_sha256, envelope
+        prepared = ready_sha256, envelope, checkpoint
         return ready_sha256
 
     def assert_source_wal_capacity(control, *, expected_database, timeout_seconds):
-        baseline = getattr(verify_site_restore, "wal_baseline", None)
-        _verify_digest(baseline, field="verification_sha256", schema="qt.encrypted_recovery_repository_verification.v1")
-        if (prepared is None or baseline["verification_sha256"] != plan["baseline_verification_sha256"]
-                or baseline.get("pair_receipt_sha256") != plan["pair_receipt_sha256"]
-                or baseline.get("database_identity") != identity
-                or baseline.get("anchor_sha256") is not None
-                or baseline.get("wal_verified_through") != baseline.get("wal_backup_stop")
+        if (prepared is None
                 or any(expected_database[key] != target[key] for key in ("database", "system_identifier", "database_oid"))):
             raise RuntimeError("canonical_cold_independent_recovery_wal_baseline_changed")
+        baseline = checked_baseline()
+        after = final_wal_origin(baseline, checkpoint=prepared[2], checkpoint_sha256=plan.get("replayed_checkpoint_sha256"))
+        restart = {"restart_from": prepared[2]["redo_wal_segment"], "max_restart_segments": plan["max_restart_segments"]} if replayed else {}
         return check_source_wal_capacity(
-            control, expected_database=expected_database, backup_stop=baseline["wal_backup_stop"],
+            control, expected_database=expected_database, backup_stop=after,
             segment_bytes=baseline["wal_segment_bytes"], max_segments=site["wal"]["files"], timeout_seconds=timeout_seconds,
+            **restart,
         )
 
     def verify(fence, control, source_commit, provider_boundary, remaining, check_archive):
@@ -152,6 +173,7 @@ def bind_approved_recovery_checks(*, package_path, package, approved_package_has
         coverage = closure.get("coverage")
         layout = closure.get("storage_layout")
         if (any(closure.get(field) != plan[field] for field in _BASE_PINS)
+                or closure.get("checkpoint_sha256") != plan.get("replayed_checkpoint_sha256")
                 or not _pin(reply.get("runtime_sha256")) or closure.get("receiver_runtime_sha256") != reply["runtime_sha256"]
                 or closure.get("database_identity") != identity or closure.get("source_commit_seq") != source_commit
                 or not isinstance(layout, dict) or layout.get("layout_version") != FACT_STORAGE_LAYOUT_VERSION

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from types import MappingProxyType
 from typing import Mapping
@@ -15,6 +16,7 @@ from core.storage_targets import StorageLocation
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.service.storage.recovery_copies import _archive_rows, _identity, _snapshot_layout, _sync
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
+from scripts.automation.stage_encrypted_recovery_handoff import _private_root, _stamp
 from scripts.automation.verify_canonical_recovery_archive import (
     _encrypted_receipt, _path, _restore_root, _sha256, _sha_file, _verify_encrypted_inventory,
     _verify_inventory,
@@ -27,6 +29,7 @@ class PreparedArchiveBaseline:
     database_identity: str
     layout: Mapping
     objects: Mapping[str, tuple[str, int]]
+    checkpoint_sha256: str | None = None
 
 
 def prepare_archive_baseline(receipt_path, restored_root, *, expected_receipt_sha256, max_objects,
@@ -61,6 +64,82 @@ def _encode(key, descriptor):
     digest, size = descriptor
     return (json.dumps({"object_key": key, "bytes": size, "sha256": digest},
                        sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def prepare_replayed_archive_baseline(inventory_path, *, checkpoint, max_objects, archive_objects=None,
+                                      check=lambda: None):
+    """Read an authenticated checkpoint's complete catalog before the writer fence.
+
+    The caller verifies the checkpoint with the signed readiness evidence. The
+    source needs only the manifest. The receiver also verifies its exact files.
+    """
+    if type(max_objects) is not int or not 1 <= max_objects <= 10_000_000:
+        raise ValueError("canonical_recovery_archive_object_budget_invalid")
+    if not isinstance(checkpoint, Mapping):
+        raise ValueError("canonical_recovery_replayed_archive_checkpoint_invalid")
+    body = dict(checkpoint)
+    checkpoint_hash = body.pop("verification_sha256", None)
+    pair_hash, identity, layout = (body.get(key) for key in ("pair_receipt_sha256", "database_identity", "storage_layout"))
+    inventory_hash, count, total = (body.get(key) for key in ("catalog_inventory_sha256", "catalog_objects", "catalog_bytes"))
+    if (body.get("schema") != "qt.replayed_recovery_checkpoint.v1"
+            or not all(_sha256(value) for value in (checkpoint_hash, pair_hash, inventory_hash))
+            or not isinstance(identity, str) or not re.fullmatch(r"[1-9][0-9]{0,19}/[1-9][0-9]{0,9}", identity)
+            or not isinstance(layout, dict) or set(layout) != {"layout_version", "certificate_sha256"}
+            or not isinstance(layout["layout_version"], str) or not layout["layout_version"]
+            or not _sha256(layout["certificate_sha256"])
+            or type(count) is not int or not 0 <= count <= max_objects
+            or type(total) is not int or not 0 <= total < 2**63
+            or archive_evidence_hash(body) != checkpoint_hash):
+        raise ValueError("canonical_recovery_replayed_archive_checkpoint_invalid")
+
+    inventory = Path(inventory_path)
+    if not inventory.is_absolute() or inventory.resolve(strict=True) != inventory:
+        raise ValueError("canonical_recovery_replayed_archive_inventory_path_invalid")
+    before = inventory.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise ValueError("canonical_recovery_replayed_archive_inventory_path_invalid")
+    stamp = _stamp(before)
+    objects, digest = {}, hashlib.sha256()
+    bytes_seen = 0
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    with os.fdopen(os.open(inventory, flags), "rb") as stream:
+        if _stamp(os.fstat(stream.fileno())) != stamp:
+            raise RuntimeError("canonical_recovery_replayed_archive_inventory_changed")
+        while line := stream.readline(65537):
+            check()
+            if len(line) > 65536 or len(objects) >= count or not line.endswith(b"\n"):
+                raise ValueError("canonical_recovery_replayed_archive_inventory_row_invalid")
+            row = json.loads(line)
+            if not isinstance(row, dict) or set(row) != {"object_key", "sha256", "bytes"}:
+                raise ValueError("canonical_recovery_replayed_archive_inventory_row_invalid")
+            key, sha, size = row["object_key"], row["sha256"], row["bytes"]
+            StorageLocation("archive", key)
+            if (len(key) > 2048 or len(key.split("/")) > 64 or key in objects
+                    or not _sha256(sha) or type(size) is not int or size <= 0
+                    or line != _encode(key, (sha, size))):
+                raise ValueError("canonical_recovery_replayed_archive_inventory_row_invalid")
+            bytes_seen += size
+            if bytes_seen > total:
+                raise ValueError("canonical_recovery_replayed_archive_inventory_mismatch")
+            digest.update(line)
+            objects[key] = (sha, size)
+        if _stamp(os.fstat(stream.fileno())) != stamp or _stamp(inventory.lstat()) != stamp:
+            raise RuntimeError("canonical_recovery_replayed_archive_inventory_changed")
+    if (digest.hexdigest(), len(objects), bytes_seen) != (inventory_hash, count, total):
+        raise ValueError("canonical_recovery_replayed_archive_inventory_mismatch")
+
+    if archive_objects is not None:
+        archive, archive_identity = _private_root(Path(archive_objects))
+        for key, descriptor in objects.items():
+            check()
+            path = _path(archive, key, absolute=False)
+            if _sha_file(path, check=check) != descriptor:
+                raise ValueError(f"restored archive object failed size or hash check: {key}")
+        if _private_root(archive)[1] != archive_identity:
+            raise RuntimeError("canonical_recovery_replayed_archive_root_changed")
+    check()
+    return PreparedArchiveBaseline(pair_hash, identity, MappingProxyType(layout.copy()),
+                                   MappingProxyType(objects), checkpoint_hash)
 
 
 def _final_descriptors(conn, anchor, baseline, *, max_objects, check):
@@ -176,13 +255,16 @@ def capture_final_archive_suffix(fence, anchor, baseline, *, source_root, stage,
         _sync(directory)
     fence.assert_quiet(conn)
     check()
-    return {
+    result = {
         "schema_version": "qt.named_recovery_archive_suffix.v1",
         "anchor_sha256": archive_evidence_hash(anchor), "baseline_receipt_sha256": baseline.receipt_sha256,
         "final_inventory_sha256": final_digest, "final_objects": len(final), "final_bytes": final_bytes,
         "inventory_sha256": suffix_digest, "archive_objects": len(suffix), "archive_bytes": suffix_bytes,
         "inventory_snapshot_path": str(inventory), "archive_source_root": str(stage / "objects"),
     }
+    if baseline.checkpoint_sha256 is not None:
+        result["baseline_checkpoint_sha256"] = baseline.checkpoint_sha256
+    return result
 
 
 def verify_final_archive_suffix(conn, anchor, baseline, evidence, restored_root, *, max_objects,
@@ -191,7 +273,8 @@ def verify_final_archive_suffix(conn, anchor, baseline, evidence, restored_root,
     if (not _sha256(suffix_snapshot_id) or evidence["archive_snapshot"] != suffix_snapshot_id
             or evidence["schema_version"] != "qt.named_recovery_archive_suffix.v1"
             or evidence["anchor_sha256"] != archive_evidence_hash(anchor)
-            or evidence["baseline_receipt_sha256"] != baseline.receipt_sha256):
+            or evidence["baseline_receipt_sha256"] != baseline.receipt_sha256
+            or evidence.get("baseline_checkpoint_sha256") != baseline.checkpoint_sha256):
         raise RuntimeError("canonical_recovery_archive_suffix_binding_mismatch")
     if not conn.in_transaction():
         raise RuntimeError("canonical_recovery_archive_verification_transaction_required")
