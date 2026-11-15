@@ -113,24 +113,56 @@ def test_archive_byte_budget_includes_decoder_threads():
                 executor.submit(handle.read, 2).result()
 
 
-def test_range_prunes_only_impossible_pages_and_fails_when_selected_bytes_are_missing(store, tmp_path):
+def test_admitted_range_matches_filtered_rows_and_authenticates_the_whole_page(store, tmp_path):
+    limits = FactArchiveLimits(max_rows=32, row_group_size=7)
+    rows = [_row(revision=index + 1, commit=index + 1) for index in range(22)]
+    manifest = publish_cold_page(rows, object_store=store, temporary_directory=tmp_path, limits=limits)
+    scope = dict(series_id=1, start=BASE, end=BASE + timedelta(seconds=1), as_of_commit_seq=2)
+    reader = ColdHistoryReader(store, limits=limits)
+
+    control = ExecutionControl()
+    with controlled_execution(control):
+        assert list(reader.iter_range([manifest], **scope, admitted=True)) == rows[:2]
+    consumed = control.snapshot()["consumed"]
+    assert consumed["archive_predicate_rows"] == len(rows)
+    assert consumed["archive_decoded_rows"] == 7
+    assert consumed["archive_source_bytes"] >= manifest.byte_count
+    assert list(reader.iter_range([manifest], **scope, admitted=True, source_identity_keys=["unknown"])) == []
+    assert list(ColdHistoryReader(store, limits=replace(limits, row_group_size=4)).iter_range(
+        [manifest], **scope, admitted=True,
+    )) == rows[:2]
+
+    path = store.local_path(manifest.object_key)
+    damaged = bytearray(path.read_bytes())
+    damaged[-9] ^= 1
+    path.write_bytes(damaged)
+    with pytest.raises(ArchiveChecksumMismatch):
+        list(reader.iter_range([manifest], **scope, admitted=True, source_identity_keys=["unknown"]))
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+def test_range_prunes_only_impossible_pages_and_fails_when_selected_bytes_are_missing(store, tmp_path, admitted):
     relevant = _row()
     unrelated = _row(series_id=2, commit=2)
     first = publish_cold_page([relevant], object_store=store, temporary_directory=tmp_path)
     other = publish_cold_page([unrelated], object_store=store, temporary_directory=tmp_path)
     store.local_path(other.object_key).unlink()
     reader = ColdHistoryReader(store)
-    assert list(reader.iter_range(
+
+    def read(manifests, **scope):
+        return list(reader.iter_range(manifests, admitted=admitted, **scope))
+
+    assert read(
         [first, other], start=BASE, end=BASE + timedelta(microseconds=1), series_id=1,
-    )) == [relevant]
-    assert list(reader.iter_range(
+    ) == [relevant]
+    assert read(
         [first, other], start=BASE - timedelta(microseconds=1), end=BASE, series_id=1,
-    )) == []
-    assert list(reader.iter_range(
+    ) == []
+    assert read(
         [first], start=BASE, end=BASE + timedelta(seconds=1), series_id=1, as_of_commit_seq=0,
-    )) == []
+    ) == []
     with pytest.raises(FileNotFoundError):
-        list(reader.iter_range([other], start=BASE, end=BASE + timedelta(seconds=1), series_id=2))
+        read([other], start=BASE, end=BASE + timedelta(seconds=1), series_id=2)
     store.local_path(first.object_key).write_bytes(b"broken")
     with pytest.raises(ArchiveChecksumMismatch):
         reader.read_by_ids({relevant["id"]: ColdFactLocation(first, 0)})
@@ -151,7 +183,8 @@ def test_publish_reads_only_one_bounded_input_page(store, tmp_path):
     assert not list(store.root.rglob("*.parquet"))
 
 
-def test_mixed_selection_filters_before_ranking_and_applies_tombstone_afterward(store, tmp_path):
+@pytest.mark.parametrize("admitted", [False, True])
+def test_mixed_selection_filters_before_ranking_and_applies_tombstone_afterward(store, tmp_path, admitted):
     active = _row()
     corrected = _row(2)
     invalidated = _row(3, state="invalidated")
@@ -170,7 +203,7 @@ def test_mixed_selection_filters_before_ranking_and_applies_tombstone_afterward(
                    if key in ("known_at_lte", "as_of_commit_seq", "source_identity_keys")}
         return select_fact_rows(
             [dict(invalidated, storage_day=date(2026, 10, 9))],
-            reader.iter_range([manifest], **scope, **filters), **scope, **options,
+            reader.iter_range([manifest], **scope, **filters, admitted=admitted), **scope, **options,
         )
 
     assert read() == []

@@ -42,6 +42,7 @@ FACT_ARCHIVE_RECORD_SELECTION = "all_canonical_revisions.v1"
 _INTEGER_COLUMNS = ("series_id", "source_id", "revision", "market_commit_seq")
 _TIME_COLUMNS = ("observation_time", "source_published_at", "received_at", "accepted_at", "known_at")
 _JSON_COLUMNS = ("payload", "provenance", "quality", "series_dimensions")
+_RANGE_COLUMNS = ("series_id", "observation_time", "market_commit_seq", "known_at", "source_identity_key")
 _STRING_COLUMNS = (
     "id", "ingestion_run_id", "observation_key", "fact_type", "payload_schema_id",
     "payload_contract_hash", "observation_time_method", "known_at_method",
@@ -482,16 +483,28 @@ def read_admitted_canonical_fact_rows(
             or any(type(value) is not int or not 0 <= value < expected.row_count for value in ordinals)):
         raise ValueError("canonical_archive_ordinals_invalid")
     positions = tuple(sorted(set(ordinals)))
-    if expected.row_count > limits.max_rows or expected.logical_byte_count > limits.max_logical_bytes:
-        raise ValueError("canonical_archive_limit_exceeded: admitted manifest rows or logical bytes")
     return _read_archive(path, expected=expected, limits=limits, cache=cache, ordinals=positions)
 
 
-def _read_archive(path, *, expected, limits, cache, decoded_page=None, ordinals=None):
+def read_admitted_canonical_fact_range(
+    path: Path, *, expected: FactArchiveManifest, matches: Callable[[Mapping[str, Any]], bool],
+    limits: FactArchiveLimits = FactArchiveLimits(), cache=None,
+) -> tuple[dict[str, Any], ...]:
+    """Read matching revisions from an admitted page in its original ordinal order."""
+    if not callable(matches):
+        raise ValueError("canonical_archive_range_predicate_invalid")
+    rows = _read_archive(path, expected=expected, limits=limits, cache=cache, matches=matches)
+    return tuple(rows.values())
+
+
+def _read_archive(path, *, expected, limits, cache, decoded_page=None, ordinals=None, matches=None):
+    admitted = ordinals is not None or matches is not None
+    if admitted and (expected.row_count > limits.max_rows or expected.logical_byte_count > limits.max_logical_bytes):
+        raise ValueError("canonical_archive_limit_exceeded: admitted manifest rows or logical bytes")
     require_configured_archive_mount(path, require_writable=False)
     if expected.byte_count > limits.max_file_bytes:
         raise ValueError("canonical_archive_file_limit_exceeded: manifest bytes")
-    arguments = dict(expected=expected, limits=limits, decoded_page=decoded_page, ordinals=ordinals)
+    arguments = dict(expected=expected, limits=limits, decoded_page=decoded_page, ordinals=ordinals, matches=matches)
     if cache is not None:
         corrupt = False
         with cache.open_copy(path, digest=expected.object_sha256, size=expected.byte_count) as handle:
@@ -505,7 +518,7 @@ def _read_archive(path, *, expected, limits, cache, decoded_page=None, ordinals=
                 "history_cache_corrupt | object_sha256=%s fallback=authoritative_archive", expected.object_sha256)
             cache.invalidate(expected.object_sha256)
     path = Path(path)
-    if ordinals is None:
+    if not admitted:
         with path.open("rb") as handle:
             return _read_canonical_fact_archive_handle(handle, tier="source", **arguments)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -561,6 +574,23 @@ def _decode_json(row):
     return row
 
 
+def _matching_ordinals(parquet, matches, *, limits):
+    ordinals = []
+    offset = 0
+    for batch in parquet.iter_batches(batch_size=limits.row_group_size, columns=_RANGE_COLUMNS, use_threads=False):
+        if offset + batch.num_rows > parquet.metadata.num_rows:
+            raise RuntimeError("canonical_archive_incomplete: footer/projection row count disagreement")
+        consume_execution_resource("archive_predicate_rows", batch.num_rows)
+        for ordinal, row in enumerate(batch.to_pylist(), start=offset):
+            execution_checkpoint()
+            if matches(row):
+                ordinals.append(ordinal)
+        offset += batch.num_rows
+    if offset != parquet.metadata.num_rows:
+        raise RuntimeError("canonical_archive_incomplete: footer/projection row count disagreement")
+    return ordinals
+
+
 def _read_admitted_groups(parquet, selected, *, expected):
     result = {}
     logical_bytes = 0
@@ -596,9 +626,9 @@ def _read_admitted_groups(parquet, selected, *, expected):
 
 
 def _read_canonical_fact_archive_handle(source, *, expected, limits, tier, decoded_page=None,
-                                        ordinals=None, source_path=None):
+                                        ordinals=None, matches=None, source_path=None):
     stamp = None
-    if ordinals is not None:
+    if ordinals is not None or matches is not None:
         observed = os.fstat(source.fileno())
         if not S_ISREG(observed.st_mode) or observed.st_size != expected.byte_count:
             raise ArchiveChecksumMismatch(f"canonical_archive_checksum_mismatch: manifest_id={expected.manifest_id}")
@@ -623,10 +653,14 @@ def _read_canonical_fact_archive_handle(source, *, expected, limits, tier, decod
         metadata = parquet.metadata
         if metadata.num_rows > limits.max_rows:
             raise ValueError("canonical_archive_limit_exceeded: footer row count")
-        if ordinals is not None and metadata.num_rows != expected.row_count:
+        if stamp is not None and metadata.num_rows != expected.row_count:
             raise RuntimeError(f"canonical_archive_manifest_mismatch: manifest_id={expected.manifest_id}")
         selected = _selected_groups(metadata, ordinals, limits=limits)
         with measure_execution_stage("archive_decode"):
+            if matches is not None:
+                ordinals = _matching_ordinals(parquet, matches, limits=limits)
+                if ordinals:
+                    selected = _selected_groups(metadata, ordinals, limits=limits)
             if (ordinals is not None and len(ordinals) < metadata.num_rows
                     and all(count <= limits.row_group_size for count, _ in selected.values())):
                 result = _read_admitted_groups(parquet, selected, expected=expected)

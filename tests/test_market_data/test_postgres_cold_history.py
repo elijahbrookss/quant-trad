@@ -187,6 +187,7 @@ def test_staged_page_appears_only_after_retirement_receipt(database, tmp_path):
     scope = {"series_id": 1, "start": BASE, "end": BASE + timedelta(seconds=1)}
     key = row["observation_key"]
     assert list(repository.candidate_pages(database, **scope)) == [visible_page]
+    assert list(repository.iter_range(database, **scope)) == [row]
     assert repository.read_by_ids(database, [staged["id"]], require_all=False) == {}
     assert repository.latest_for_keys(database, series_id=1, keys=[key]) == {key: row}
     assert repository.key_candidate_ids(database, series_id=1, key=key, max_candidates=1) == (row["id"],)
@@ -205,11 +206,15 @@ def test_staged_page_appears_only_after_retirement_receipt(database, tmp_path):
         with database.begin_nested():
             database.execute(retirement, receipt)
             assert repository.latest_for_keys(database, series_id=1, keys=[key]) == {key: staged}
+            assert list(repository.iter_range(database, **scope)) == [row, staged]
             raise RuntimeError("test interrupted")
     assert repository.latest_for_keys(database, series_id=1, keys=[key]) == {key: row}
+    assert list(repository.iter_range(database, **scope)) == [row]
 
     database.execute(retirement, receipt)
     assert list(repository.candidate_pages(database, **scope)) == [visible_page, staged_page]
+    assert list(repository.iter_range(database, **scope)) == [row, staged]
+    assert list(repository.iter_range(database, **scope, as_of_commit_seq=1)) == [row]
     assert repository.read_by_ids(database, [staged["id"]]) == {staged["id"]: staged}
     assert repository.latest_for_keys(database, series_id=1, keys=[key]) == {key: staged}
     assert repository.commit_candidate_id(database, series_id=1, commit_seq=4) == staged["id"]

@@ -266,6 +266,15 @@ class PostgresColdHistory:
         finally:
             result.close()
 
+    def iter_range(self, session, *, series_id, start, end, as_of_commit_seq=None,
+                   known_at_lte=None, source_identity_keys=()):
+        """Read matching revisions from the catalog's visible, admitted pages."""
+        scope = dict(series_id=series_id, start=start, end=end, as_of_commit_seq=as_of_commit_seq)
+        return self.reader.iter_range(
+            self.candidate_pages(session, **scope), **scope, known_at_lte=known_at_lte,
+            source_identity_keys=source_identity_keys, admitted=True,
+        )
+
     def causal_window_pages(self, session, requests, *, max_candidates: int):
         """Resolve bounded candidate pages for one batch of declared source scopes."""
         rows = session.execute(text(f"""

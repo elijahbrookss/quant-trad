@@ -157,8 +157,7 @@ def _lookups(engine, repository, rows, page_rows, repeats, deadline, directories
                 end=expected["observation_time"] + timedelta(seconds=1), as_of_commit_seq=expected["market_commit_seq"],
                 known_at_lte=expected["known_at"])
             start = perf_counter()
-            pages = repository.candidate_pages(s, **{key: value for key, value in scope.items() if key != "known_at_lte"})
-            result = select_fact_rows((), repository.reader.iter_range(pages, **scope), **scope)
+            result = select_fact_rows((), repository.iter_range(s, **scope), **scope)
             times["as_of_with_parquet"].append(perf_counter() - start)
             if result != ([expected] if expected["state"] == "active" else []):
                 raise RuntimeError("fixture native as-of visibility differs")

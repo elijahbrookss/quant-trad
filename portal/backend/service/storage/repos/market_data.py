@@ -3161,9 +3161,8 @@ class PostgresMarketDataRepository:
         if cold_active:
             repository = storage_repository.cold_history(session)
             page_scope = dict(series_id=series_id, start=start, end=end, as_of_commit_seq=as_of_commit_seq)
-            candidates = repository.candidate_pages(session, **page_scope)
-            cold_rows = repository.reader.iter_range(
-                candidates, **page_scope, known_at_lte=known_at_lte, source_identity_keys=source_identity_keys,
+            cold_rows = repository.iter_range(
+                session, **page_scope, known_at_lte=known_at_lte, source_identity_keys=source_identity_keys,
             )
             yield from select_fact_rows(
                 eligible, cold_rows, **page_scope, known_at_lte=known_at_lte,

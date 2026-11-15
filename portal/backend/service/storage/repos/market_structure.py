@@ -4359,8 +4359,7 @@ class PostgresMarketStructureRepository:
                     if series_id <= 0:
                         continue
                     window = dict(series_id=series_id, start=start_at, end=end_at)
-                    pages = cold.candidate_pages(session, **window)
-                    rows = cold.reader.iter_range(pages, **window, known_at_lte=decision_time)
+                    rows = cold.iter_range(session, **window, known_at_lte=decision_time)
                     value = max(value, max((row["market_commit_seq"] for row in rows if row[field] == expected), default=0))
         return int(value)
 

@@ -24,6 +24,7 @@ from .fact_archive import (
     FactArchiveManifest,
     _json_bytes,
     publish_canonical_fact_archive,
+    read_admitted_canonical_fact_range,
     read_admitted_canonical_fact_rows,
     read_canonical_fact_archive,
 )
@@ -158,18 +159,34 @@ class ColdHistoryReader:
         as_of_commit_seq: int | None = None,
         known_at_lte: datetime | None = None,
         source_identity_keys: Sequence[str] = (),
+        admitted: bool = False,
     ) -> Iterator[dict[str, Any]]:
-        """Stream candidate revisions for one series, without ranking or dropping invalidations."""
+        """Stream matching revisions without ranking or dropping invalidations.
+
+        Selective decoding is for pages already verified during catalog admission.
+        """
         selection = _Selection.create(series_id, start, end, as_of_commit_seq, known_at_lte, source_identity_keys)
         for manifest in manifests:
             execution_checkpoint()
-            if selection.may_match(manifest):
-                for row in self.read_page(manifest):
-                    execution_checkpoint()
-                    if selection.matches(row):
-                        consume_execution_resource("input_rows", 1)
-                        consume_execution_json("input_bytes", row)
-                        yield row
+            if not selection.may_match(manifest):
+                continue
+            if admitted:
+                self._validate_contracts(manifest)
+                rows = read_admitted_canonical_fact_range(
+                    self.object_store.local_path(manifest.object_key), expected=manifest,
+                    matches=selection.matches, limits=self.limits, cache=self.cache,
+                )
+            else:
+                rows = self.read_page(manifest)
+            for row in rows:
+                execution_checkpoint()
+                if not selection.matches(row):
+                    if admitted:
+                        raise RuntimeError(f"canonical_cold_range_selection_mismatch: manifest_id={manifest.manifest_id}")
+                    continue
+                consume_execution_resource("input_rows", 1)
+                consume_execution_json("input_bytes", row)
+                yield row
 
     def read_by_ids(self, locators: Mapping[str, ColdFactLocation]) -> dict[str, dict[str, Any]]:
         """Verify whole pages before resolving IDs for audit or retirement evidence."""
