@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, date, datetime
 import os
 from types import SimpleNamespace
@@ -108,6 +109,41 @@ def test_unsafe_connection_rejected():
         bench._db_url("postgresql+psycopg2://dbreader@127.0.0.1:5432/qt_bench_fake")
     with pytest.raises(ValueError, match="explicit Unix socket"):
         bench._db_url("postgresql+psycopg2://dbreader@/production?host=/tmp&port=5432")
+
+
+def test_original_frozen_hashes_detect_missing_provenance_and_changed_quality_body():
+    from market_data.contracts import (
+        CandleFact, CandleRecord, SourceIdentity, build_candle_material_hash, build_dataset_identity_hash,
+        build_provenance_hash, build_quality_hash, dataset_series_identity_payload,
+    )
+
+    plan = _plan()
+    case = {key: plan["cases"][0][key] for key in ("series_id", "start", "end", "storage_witnesses")}
+    start, end = (bench._timestamp(case[key]) for key in ("start", "end"))
+    source = SourceIdentity(provider="COINBASE", venue="COINBASE_DIRECT", source_kind="poll_api", adapter_version="fixture")
+    candle = CandleFact(open_time=start, close_time=end, open=1, high=2, low=1, close=2, volume=10,
+                        known_at=end, accepted_at=end, known_at_method="platform_acceptance")
+    record = CandleRecord(1, 1, 2, "ingest", source.identity_key, source, {"response_hash": "fixture"}, candle)
+    identity = {"identity_key": "series", "instrument_id": "instrument", "fact_type": "candle.ohlcv",
+                "contract_version": "candle.ohlcv.v1", "timeframe_seconds": 60}
+    quality = [{"classification": "provider_missing_data"}]
+    hashes = {"material_hash": build_candle_material_hash(series_identity=identity, records=[record]),
+              "provenance_hash": build_provenance_hash([record]), "quality_hash": build_quality_hash(quality)}
+    manifest = identity | hashes | {"series_id": 1, "range_start": start, "range_end": end, "max_commit_seq": 2,
+                                   "row_count": 1, "source_summary": {}, "quality_evidence": quality, "dimensions": {}}
+    dataset_hash = build_dataset_identity_hash([dataset_series_identity_payload(manifest)])
+    case.update(name="legacy-proof", mode="frozen_series", dataset_id=f"mds_{dataset_hash[:32]}",
+                dataset_hash=dataset_hash, series_commit_seq=2, dataset_commit_seq=2, expected_rows=1, frozen_hashes=hashes)
+    dataset = SimpleNamespace(dataset_id=case["dataset_id"], dataset_hash=dataset_hash, max_commit_seq=2, series=[manifest])
+    repo = SimpleNamespace(get_dataset=lambda _: dataset, read_dataset_series=lambda **_: [record])
+
+    read, summarize, _ = bench._operation(case, plan, repo, None, None)
+    assert summarize(read())["frozen_hashes"] == hashes
+    with pytest.raises(RuntimeError, match="do not match the original material or provenance hash"):
+        summarize([replace(record, provenance={})])
+    manifest["quality_evidence"] = []
+    with pytest.raises(RuntimeError, match="frozen quality evidence does not match"):
+        bench._operation(case, plan, repo, None, None)
 
 
 @pytest.mark.db

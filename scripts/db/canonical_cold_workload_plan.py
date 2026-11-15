@@ -15,14 +15,20 @@ else:
     import canonical_cold_ingest_benchmark as ingest
 
 
-VERSION = "qt.canonical_cold_saved_workloads.v2"
+VERSION = "qt.canonical_cold_saved_workloads.v3"
 INSTRUMENT = "0a019a46-c679-4c30-b90c-41518c68e31f"
 H05 = "mds_b7c35a1ac454e899031ec4a06dda41f3"
 H05_HASH = "b7c35a1ac454e899031ec4a06dda41f358992d67027a187ca0488f69e5158cb9"
 H05_SERIES_COMMIT = 125617550
+H05_DATASET_COMMIT = 204704718
 H05_ROWS = 44_641
 H05_START = "2021-12-31T23:59:00Z"
 H05_END = "2022-02-01T00:00:00Z"
+H05_FROZEN_HASHES = {
+    "material_hash": "961146da717bbbd3266ed6ed8cbc3571d4cf07637b20949642d5564deb8d4358",
+    "provenance_hash": "b2087c4f611391a1f4283386c25cdce7f124ba6ea9ced0d82dd97e78f6994e08",
+    "quality_hash": "6927b8cacc119a3e3b312f51839c37e300882d5c622cc39c0c5cd0fcafe5f0bb",
+}
 B1 = "mds_230a9cff937d9280043e893357842af3"
 B1_HASH = "230a9cff937d9280043e893357842af30a1be3434d3610dc511f91b924396927"
 B1_AUTHORED_SHA = "49c6fc3eff2c1820e94ab4cc8686d2845c4c0302c8c0de5353f1b949b5cec1ad"
@@ -145,8 +151,10 @@ def assemble(conn, *, scope, proof_sha256, watermark, b1_request):
     h05 = _catalog(conn, dataset_id=H05, series_id=713, frame=60, start=H05_START, end=H05_END, watermark=watermark)
     b1 = _catalog(conn, dataset_id=B1, series_id=2361, frame=900, start="2021-12-30T23:45:00Z", end=H05_END, watermark=watermark)
     if ((h05["dataset_hash"], h05["max_commit_seq"], h05["row_count"]) != (H05_HASH, H05_SERIES_COMMIT, H05_ROWS)
-            or h05["source_summary"].get("record_selection") is not None):
-        raise ValueError("H05 saved dataset hash, commit, row count or legacy selection differs")
+            or h05["dataset_commit"] != H05_DATASET_COMMIT
+            or h05["source_summary"].get("record_selection") is not None
+            or any(h05[key] != expected for key, expected in H05_FROZEN_HASHES.items())):
+        raise ValueError("H05 saved dataset binding or original frozen hashes differ")
     if (b1["dataset_hash"], b1["max_commit_seq"], b1["row_count"]) != (B1_HASH, 207402044, 3073):
         raise ValueError("B1 saved dataset hash, commit or selected candle count differs")
 
@@ -164,7 +172,8 @@ def assemble(conn, *, scope, proof_sha256, watermark, b1_request):
     h05_case = historical("h05_dense_history", H05, 713, h05)
     h05_frozen = {key: h05_case[key] for key in ("series_id", "start", "end", "storage_witnesses")}
     h05_frozen.update(name="h05_frozen_series", mode="frozen_series", dataset_id=H05,
-                      dataset_hash=H05_HASH, series_commit_seq=H05_SERIES_COMMIT, expected_rows=H05_ROWS)
+                      dataset_hash=H05_HASH, series_commit_seq=H05_SERIES_COMMIT, expected_rows=H05_ROWS,
+                      dataset_commit_seq=H05_DATASET_COMMIT, frozen_hashes=H05_FROZEN_HASHES)
     b1_case = historical("b1_canonical_witness", B1, 2361, b1)
     clock = conn.exec_driver_sql("SELECT transaction_timestamp()").scalar_one()
     hot_case = _case(conn, name="retained_hot", series=hot["series_id"], start=hot_start, end=hot_end,

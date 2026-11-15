@@ -20,6 +20,7 @@ from time import perf_counter_ns, process_time_ns
 VERSION = "qt.canonical_cold_read_benchmark.v1"
 LAYOUTS = {"source": "market.fact_storage_tiers.v2", "candidate": "market.canonical_cold_history.v1"}
 MODES = {"latest_as_of", "all_revisions", "frozen_revisions", "frozen_series", "book_replay"}
+FROZEN_HASH_FIELDS = ("material_hash", "provenance_hash", "quality_hash")
 
 
 def _json(value, *, default=None):
@@ -81,6 +82,13 @@ def validate_plan(plan):
             if (not _bounded_int(case.get("series_commit_seq"), 1, plan["commit_seq"])
                     or not _bounded_int(case.get("expected_rows"), 1, plan["max_rows"])):
                 raise ValueError("frozen series requires a bounded series commit and expected row count")
+            if "frozen_hashes" in case:
+                base |= {"frozen_hashes", "dataset_commit_seq"}
+                hashes = case["frozen_hashes"]
+                if (not isinstance(hashes, dict) or set(hashes) != set(FROZEN_HASH_FIELDS)
+                        or not all(_matches(value, r"[0-9a-f]{64}") for value in hashes.values())
+                        or not _bounded_int(case.get("dataset_commit_seq"), case["series_commit_seq"], plan["commit_seq"])):
+                    raise ValueError("frozen series proof requires its dataset commit and original material, provenance and quality hashes")
         else:
             base |= {"known_at_lte", "source_identity_keys"}
         if case["mode"] in {"frozen_revisions", "frozen_series"}:
@@ -279,6 +287,10 @@ def _code_revision(repo_module, expected):
 
 def _frozen_series_operation(case, plan, repo):
     from core.execution_control import execution_checkpoint
+    from market_data.contracts import (
+        build_candle_material_hash, build_dataset_identity_hash, build_provenance_hash, build_quality_hash,
+        dataset_series_identity_payload,
+    )
 
     dataset = repo.get_dataset(case["dataset_id"])
     series_id = case["series_id"]
@@ -290,6 +302,20 @@ def _frozen_series_operation(case, plan, repo):
             or (series["range_start"], series["range_end"], series["max_commit_seq"], series["row_count"]) != (
                 _timestamp(case["start"]), _timestamp(case["end"]), commit, case["expected_rows"])):
         raise RuntimeError("benchmark legacy frozen series manifest differs from the declared case")
+
+    frozen_hashes = case.get("frozen_hashes")
+    if frozen_hashes is not None:
+        if (series["contract_version"] != "candle.ohlcv.v1"
+                or dataset.max_commit_seq != case["dataset_commit_seq"]
+                or any(series[key] != frozen_hashes[key] for key in FROZEN_HASH_FIELDS)
+                or build_dataset_identity_hash(map(dataset_series_identity_payload, dataset.series)) != dataset.dataset_hash):
+            raise RuntimeError("benchmark persisted frozen candle manifest does not match the original hashes")
+        identity = {key: series[key] for key in ("identity_key", "instrument_id", "fact_type", "timeframe_seconds", "contract_version")}
+        if series["dimensions"]:
+            identity["dimensions"] = series["dimensions"]
+        quality_hash = build_quality_hash(series["quality_evidence"])
+        if quality_hash != frozen_hashes["quality_hash"]:
+            raise RuntimeError("benchmark frozen quality evidence does not match its original hash")
 
     def summarize(records):
         if len(records) != case["expected_rows"]:
@@ -303,10 +329,19 @@ def _frozen_series_operation(case, plan, repo):
             material = [row.series_id, row.revision, row.market_commit_seq, row.ingestion_run_id,
                         row.source_identity_key, row.canonical_material_hash, row.fact.to_dict()]
             digest.update((_json(material, default=datetime.isoformat) + "\n").encode())
-        return {"rows": len(records), "sha256": digest.hexdigest()}
+        result = {"rows": len(records), "sha256": digest.hexdigest()}
+        if frozen_hashes is not None:
+            proof = {"material_hash": build_candle_material_hash(series_identity=identity, records=records),
+                     "provenance_hash": build_provenance_hash(records), "quality_hash": quality_hash}
+            if proof != frozen_hashes:
+                raise RuntimeError("benchmark frozen candle rows do not match the original material or provenance hash")
+            result["frozen_hashes"] = proof
+        return result
 
     scope = {"dataset_id": dataset.dataset_id, "dataset_hash": dataset.dataset_hash,
              "series_id": series_id, "commit_seq": commit, "expected_rows": case["expected_rows"]}
+    if frozen_hashes is not None:
+        scope["dataset_commit_seq"] = dataset.max_commit_seq
     return partial(repo.read_dataset_series, dataset_id=dataset.dataset_id, series_id=series_id), summarize, scope
 
 
