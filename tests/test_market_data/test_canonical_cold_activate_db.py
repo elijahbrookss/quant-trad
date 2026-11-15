@@ -587,6 +587,30 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     assert activation.assert_original_custody_placement(retained, execution) == custody_before
                 phases.clear()
             if retain_reader:
+                def block_raw_copy(fence, *args):
+                    receipt = recovery_boundary(fence, *args)
+                    fence.reader.connection.exec_driver_sql(f"LOCK TABLE ONLY {TABLE} IN ACCESS SHARE MODE")
+                    return receipt
+
+                def unexpected_copy(*args, **kwargs):
+                    pytest.fail("copy started before admitting every owning-table lock")
+
+                with engine.connect() as standby, monkeypatch.context() as patch:
+                    patch.setattr(activation, "move_custody_tablespace", unexpected_copy)
+                    patch.setattr(activation, "move_raw_mapping_index", unexpected_copy)
+                    with pytest.raises(DBAPIError, match="canceling statement due to lock timeout") as blocked:
+                        run_fenced_transition(
+                            retained, control, **{**owner, "verify_recovery_boundary": block_raw_copy},
+                            verified_objects=verified, read_connection=standby,
+                        )
+                    assert blocked.value.orig.pgcode == "55P03"
+                    assert events["database_reopened"]["outcome"] == "original"
+                    assert "activation_precommit_verified" not in phases
+                    with retained.begin():
+                        assert inspect_raw_mapping_index_member(retained)["tablespace_oid"] == 1663
+                        assert activation.assert_original_custody_placement(retained, execution) == custody_before
+                phases.clear()
+
                 def lose_writer_before_commit(connection, _result):
                     assert connection is retained
                     with pytest.raises(DBAPIError, match="read-only transaction"):

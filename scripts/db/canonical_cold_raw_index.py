@@ -149,7 +149,7 @@ def _move(conn, *, fence, scope, max_copy_bytes, timeout_seconds, to_history, fo
             SELECT layout_version,state,completed_at IS NOT NULL FROM market.fact_storage_state LIMIT 2
         """)).all() != [(layout, "ready", True)]:
             raise RuntimeError("canonical_raw_index_authority_changed")
-        conn.exec_driver_sql(f"LOCK TABLE ONLY {TABLE} IN ACCESS EXCLUSIVE MODE NOWAIT")
+        conn.exec_driver_sql(f"LOCK TABLE ONLY {TABLE} IN ACCESS EXCLUSIVE MODE")
         before = assert_raw_mapping_index_placement(conn, **scope, on_history=not to_history)
         member = before["member"]
         target = before["target"]

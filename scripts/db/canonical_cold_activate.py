@@ -35,6 +35,7 @@ from scripts.db.canonical_cold_database_fence import DatabaseFence
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, _SWAP_RECEIPT, _oid, swap_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase
 from scripts.db.canonical_cold_migration import PREPARED_CATALOG_TABLES, PostgresMigrationSource
+from scripts.db.canonical_cold_raw_index import TABLE as RAW_MAPPING_TABLE
 from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement, move_raw_mapping_index
 from scripts.db.canonical_cold_receipts import manifest_inventory_hash, validate_audit_receipts
 
@@ -364,8 +365,10 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         raise RuntimeError("canonical_cold_activation_loaded_inventory_hash_mismatch")
     _assert_source_authority_inventory(conn, cutoff, audit, check_budget=database_fence.check_clock)
     _assert_verified_archive(conn, verified_objects)
-    for table in COLD_CUSTODY_TABLE_NAMES:
-        conn.exec_driver_sql(f"LOCK TABLE ONLY market.{table} IN SHARE MODE NOWAIT")
+    approved_custody_move = execution.get("custody_move")
+    if approved_custody_move is None:
+        for table in COLD_CUSTODY_TABLE_NAMES:
+            conn.exec_driver_sql(f"LOCK TABLE ONLY market.{table} IN SHARE MODE NOWAIT")
     conn.exec_driver_sql("LOCK TABLE public.portal_storage_targets, public.portal_storage_header_tablespaces "
                          "IN SHARE MODE NOWAIT")
     assert_original_custody_placement(conn, execution)
@@ -376,11 +379,21 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
           WHERE storage_day<:cutoff AND state IN ('building','ready'))
     """), {"cutoff": cutoff}):
         raise RuntimeError("canonical_cold_activation_unfinished_archive_preparations")
+
+    # Acquire the owning table locks before either copy can allocate files
+    # or generate WAL. The activation's existing lock and statement timeouts
+    # bound brief contention with native maintenance under the closed fence.
+    database_fence.assert_quiet(conn)
+    copy_tables = [RAW_MAPPING_TABLE]
+    if approved_custody_move is not None:
+        copy_tables.extend(f"market.{table}" for table in COLD_CUSTODY_TABLE_NAMES)
+    copy_relations = ", ".join(f"ONLY {table}" for table in sorted(copy_tables))
+    conn.exec_driver_sql(f"LOCK TABLE {copy_relations} IN ACCESS EXCLUSIVE MODE")
+
     custody_move = None
-    if "custody_move" in execution:
-        database_fence.assert_quiet(conn)
+    if approved_custody_move is not None:
         moved = move_custody_tablespace(
-            conn, **custody_placement_scope(execution), **execution["custody_move"],
+            conn, **custody_placement_scope(execution), **approved_custody_move,
         )
         custody_move = moved | {"receipt_hash": archive_evidence_hash(moved)}
     approved_move = execution["raw_mapping_index"]
