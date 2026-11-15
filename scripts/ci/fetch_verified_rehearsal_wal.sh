@@ -20,18 +20,24 @@ if ! printf '%s\n' "$first" "$last" "$segment" | awk '
     exit 1
 fi
 
-case "${QT_REHEARSAL_WAL_PHASE:-initial}" in
+phase=${QT_REHEARSAL_WAL_PHASE:-initial}
+case "$phase" in
     initial) ledger=/qt-work/control/fetched-wal.sha1 ;;
     later) ledger=/qt-work/control/later-fetched-wal.sha1 ;;
     *) exit 1 ;;
 esac
 required_failure() {
-    if [ "${QT_REHEARSAL_WAL_PHASE:-initial}" = later ]; then
+    if [ "$phase" = later ]; then
         printf '%s\n' "$segment" >>/qt-work/control/later-wal-failure || true
         exit 126
     fi
     exit 1
 }
+if [ "$phase" = later ]; then
+    terminal_sha1=${QT_REHEARSAL_TERMINAL_WAL_SHA1:-}
+    test "${#terminal_sha1}" -eq 40 || required_failure
+    case "$terminal_sha1" in *[!0-9a-f]*) required_failure ;; esac
+fi
 wal=/qt-work/pgdata/pg_wal
 destination=$wal/RECOVERYXLOG
 case "$requested" in pg_wal/RECOVERYXLOG|"$destination") ;; *) required_failure ;; esac
@@ -50,6 +56,9 @@ for source in "$directory/$segment"-*; do
 done
 test -n "$match" || required_failure
 expected=${match%%.*}
+if [ "$phase" = later ] && [ "$segment" = "$last" ]; then
+    test "$expected" = "$terminal_sha1" || required_failure
+fi
 
 key=
 test "$(stat -c '%u %a %h' /database-key)" = '70 600 1' && test ! -L /database-key || required_failure
