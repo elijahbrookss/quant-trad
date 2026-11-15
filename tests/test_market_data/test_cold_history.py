@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 import os
 
@@ -138,6 +138,45 @@ def test_admitted_range_matches_filtered_rows_and_authenticates_the_whole_page(s
     path.write_bytes(damaged)
     with pytest.raises(ArchiveChecksumMismatch):
         list(reader.iter_range([manifest], **scope, admitted=True, source_identity_keys=["unknown"]))
+
+
+def test_admitted_range_preserves_typed_filter_edges(store, tmp_path):
+    commit = 2**53 + 1
+    first, second = _row(commit=commit), _row(revision=2, commit=commit + 1)
+    later = record_from_storage_row(_row(commit=commit + 2))
+    edge = BASE + timedelta(microseconds=1)
+    later = record_to_storage_row(replace(
+        later, fact=replace(later.fact, observation_time=edge, observation_key="later"),
+        row_hash=None, fact_version_id=None,
+    ), series_dimensions={"currency": "USD"})
+    unrelated = _row(series_id=2, commit=commit + 3)
+    manifest = publish_cold_page([first, second, later, unrelated], object_store=store, temporary_directory=tmp_path)
+    offset = timezone(timedelta(hours=5, minutes=45))
+    scope = dict(series_id=1, start=BASE.astimezone(offset), end=edge.astimezone(offset))
+    key = first["source_identity_key"]
+    known = first["known_at"].astimezone(offset)
+    reader = ColdHistoryReader(store)
+
+    class DerivedDatetime(datetime):
+        pass
+
+    for filters, expected in (
+        ({}, [first, second]),
+        ({"as_of_commit_seq": commit}, [first]),
+        ({"as_of_commit_seq": 2**63 - 1}, [first, second]),
+        ({"as_of_commit_seq": 10**100}, [first, second]),
+        ({"as_of_commit_seq": -1}, []),
+        ({"as_of_commit_seq": -10**100}, []),
+        ({"known_at_lte": known}, [first]),
+        ({"known_at_lte": known - timedelta(microseconds=1)}, []),
+        ({"known_at_lte": DerivedDatetime.fromisoformat(known.isoformat())}, [first]),
+        ({"source_identity_keys": (f"\u2003{key}\u00a0", key, "", " 猫 ")}, [first, second]),
+        ({"source_identity_keys": (" ", "\u2003\u00a0")}, [first, second]),
+        ({"source_identity_keys": ("\ud800", key)}, [first, second]),
+        ({"source_identity_keys": ("\ud800",)}, []),
+    ):
+        assert list(reader.iter_range([manifest], **scope, **filters)) == expected
+        assert list(reader.iter_range([manifest], **scope, **filters, admitted=True)) == expected
 
 
 @pytest.mark.parametrize("admitted", [False, True])

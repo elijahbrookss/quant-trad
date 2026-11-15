@@ -487,24 +487,25 @@ def read_admitted_canonical_fact_rows(
 
 
 def read_admitted_canonical_fact_range(
-    path: Path, *, expected: FactArchiveManifest, matches: Callable[[Mapping[str, Any]], bool],
+    path: Path, *, expected: FactArchiveManifest, matching_positions: Callable[[pa.RecordBatch], Sequence[int]],
     limits: FactArchiveLimits = FactArchiveLimits(), cache=None,
 ) -> tuple[dict[str, Any], ...]:
     """Read matching revisions from an admitted page in its original ordinal order."""
-    if not callable(matches):
+    if not callable(matching_positions):
         raise ValueError("canonical_archive_range_predicate_invalid")
-    rows = _read_archive(path, expected=expected, limits=limits, cache=cache, matches=matches)
+    rows = _read_archive(path, expected=expected, limits=limits, cache=cache, matching_positions=matching_positions)
     return tuple(rows.values())
 
 
-def _read_archive(path, *, expected, limits, cache, decoded_page=None, ordinals=None, matches=None):
-    admitted = ordinals is not None or matches is not None
+def _read_archive(path, *, expected, limits, cache, decoded_page=None, ordinals=None, matching_positions=None):
+    admitted = ordinals is not None or matching_positions is not None
     if admitted and (expected.row_count > limits.max_rows or expected.logical_byte_count > limits.max_logical_bytes):
         raise ValueError("canonical_archive_limit_exceeded: admitted manifest rows or logical bytes")
     require_configured_archive_mount(path, require_writable=False)
     if expected.byte_count > limits.max_file_bytes:
         raise ValueError("canonical_archive_file_limit_exceeded: manifest bytes")
-    arguments = dict(expected=expected, limits=limits, decoded_page=decoded_page, ordinals=ordinals, matches=matches)
+    arguments = dict(expected=expected, limits=limits, decoded_page=decoded_page, ordinals=ordinals,
+                     matching_positions=matching_positions)
     if cache is not None:
         corrupt = False
         with cache.open_copy(path, digest=expected.object_sha256, size=expected.byte_count) as handle:
@@ -574,17 +575,22 @@ def _decode_json(row):
     return row
 
 
-def _matching_ordinals(parquet, matches, *, limits):
+def _matching_ordinals(parquet, matching_positions, *, limits):
     ordinals = []
     offset = 0
     for batch in parquet.iter_batches(batch_size=limits.row_group_size, columns=_RANGE_COLUMNS, use_threads=False):
         if offset + batch.num_rows > parquet.metadata.num_rows:
             raise RuntimeError("canonical_archive_incomplete: footer/projection row count disagreement")
+        if any(column.null_count for column in batch.columns):
+            raise RuntimeError("canonical_archive_incomplete: null range projection")
         consume_execution_resource("archive_predicate_rows", batch.num_rows)
-        for ordinal, row in enumerate(batch.to_pylist(), start=offset):
-            execution_checkpoint()
-            if matches(row):
-                ordinals.append(ordinal)
+        execution_checkpoint()
+        previous = -1
+        for position in matching_positions(batch):
+            if type(position) is not int or not previous < position < batch.num_rows:
+                raise RuntimeError("canonical_archive_range_positions_invalid")
+            ordinals.append(offset + position)
+            previous = position
         offset += batch.num_rows
     if offset != parquet.metadata.num_rows:
         raise RuntimeError("canonical_archive_incomplete: footer/projection row count disagreement")
@@ -626,9 +632,9 @@ def _read_admitted_groups(parquet, selected, *, expected):
 
 
 def _read_canonical_fact_archive_handle(source, *, expected, limits, tier, decoded_page=None,
-                                        ordinals=None, matches=None, source_path=None):
+                                        ordinals=None, matching_positions=None, source_path=None):
     stamp = None
-    if ordinals is not None or matches is not None:
+    if ordinals is not None or matching_positions is not None:
         observed = os.fstat(source.fileno())
         if not S_ISREG(observed.st_mode) or observed.st_size != expected.byte_count:
             raise ArchiveChecksumMismatch(f"canonical_archive_checksum_mismatch: manifest_id={expected.manifest_id}")
@@ -657,13 +663,15 @@ def _read_canonical_fact_archive_handle(source, *, expected, limits, tier, decod
             raise RuntimeError(f"canonical_archive_manifest_mismatch: manifest_id={expected.manifest_id}")
         selected = _selected_groups(metadata, ordinals, limits=limits)
         with measure_execution_stage("archive_decode"):
-            if matches is not None:
-                ordinals = _matching_ordinals(parquet, matches, limits=limits)
+            if matching_positions is not None:
+                with measure_execution_stage("archive_predicate"):
+                    ordinals = _matching_ordinals(parquet, matching_positions, limits=limits)
                 if ordinals:
                     selected = _selected_groups(metadata, ordinals, limits=limits)
             if (ordinals is not None and len(ordinals) < metadata.num_rows
                     and all(count <= limits.row_group_size for count, _ in selected.values())):
-                result = _read_admitted_groups(parquet, selected, expected=expected)
+                with measure_execution_stage("archive_selected_payload"):
+                    result = _read_admitted_groups(parquet, selected, expected=expected)
                 _assert_exact_file_unchanged(source, source_path, stamp, expected.manifest_id)
                 return result
             contents, rows = _Contents(limits), []

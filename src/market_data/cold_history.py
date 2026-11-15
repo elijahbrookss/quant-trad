@@ -15,6 +15,9 @@ from itertools import chain
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
 from core.execution_control import consume_execution_json, consume_execution_resource, execution_checkpoint
 
 from .archive import RawArchiveObjectStore
@@ -28,6 +31,8 @@ from .fact_archive import (
     read_admitted_canonical_fact_rows,
     read_canonical_fact_archive,
 )
+
+_MAX_ARCHIVE_INTEGER = (1 << 63) - 1
 
 
 def _logical_row(source: Mapping[str, Any]) -> dict[str, Any]:
@@ -104,6 +109,36 @@ class _Selection:
             and (not self.source_identity_keys or row["source_identity_key"] in self.source_identity_keys)
         )
 
+    def matching_positions(self, batch: pa.RecordBatch) -> Sequence[int]:
+        commit = self.as_of_commit_seq
+        if self.span.series_id > _MAX_ARCHIVE_INTEGER or (commit is not None and commit < 1):
+            return ()
+        bounds = (self.span.start, self.span.end, self.known_at_lte)
+        if any(bound is not None and type(bound) is not datetime for bound in bounds):
+            return self._scalar_matching_positions(batch)
+        instants = batch.column("observation_time")
+        mask = pc.equal(batch.column("series_id"), self.span.series_id)
+        mask = pc.and_(mask, pc.greater_equal(instants, pa.scalar(self.span.start, type=instants.type)))
+        mask = pc.and_(mask, pc.less(instants, pa.scalar(self.span.end, type=instants.type)))
+        if commit is not None and commit < _MAX_ARCHIVE_INTEGER:
+            mask = pc.and_(mask, pc.less_equal(batch.column("market_commit_seq"), commit))
+        if self.known_at_lte is not None:
+            known_at = batch.column("known_at")
+            ceiling = pa.scalar(self.known_at_lte, type=known_at.type)
+            mask = pc.and_(mask, pc.less_equal(known_at, ceiling))
+        if self.source_identity_keys:
+            sources = batch.column("source_identity_key")
+            try:
+                keys = pa.array(tuple(self.source_identity_keys), type=sources.type)
+            except UnicodeEncodeError:
+                # Preserve Python string comparison for probes Arrow cannot encode.
+                return self._scalar_matching_positions(batch)
+            mask = pc.and_(mask, pc.is_in(sources, value_set=keys))
+        return pc.indices_nonzero(mask).to_pylist()
+
+    def _scalar_matching_positions(self, batch: pa.RecordBatch) -> list[int]:
+        return [index for index, row in enumerate(batch.to_pylist()) if self.matches(row)]
+
     def may_match(self, manifest: FactArchiveManifest) -> bool:
         if self.as_of_commit_seq is not None and manifest.first_cursor[0] > self.as_of_commit_seq:
             return False
@@ -174,7 +209,7 @@ class ColdHistoryReader:
                 self._validate_contracts(manifest)
                 rows = read_admitted_canonical_fact_range(
                     self.object_store.local_path(manifest.object_key), expected=manifest,
-                    matches=selection.matches, limits=self.limits, cache=self.cache,
+                    matching_positions=selection.matching_positions, limits=self.limits, cache=self.cache,
                 )
             else:
                 rows = self.read_page(manifest)
