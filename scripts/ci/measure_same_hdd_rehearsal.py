@@ -30,7 +30,7 @@ from scripts.automation.stage_encrypted_recovery_handoff import _identity, _sour
 from scripts.automation.verify_canonical_recovery_archive import _sha256
 from scripts.automation.verify_encrypted_recovery_handoff import _directory, _selected_backup_manifest, _snapshot_owner
 
-def _require_isolated_mounts(repository, scratch, device_id):
+def _require_isolated_mounts(repository, scratch, device_id, *, scratch_read_only=False):
     # Compare backing roots as well as container paths. A writable bind can
     # otherwise alias an empty subdirectory of the read-only repository.
     with Path("/proc/self/mountinfo").open("rb") as stream:
@@ -49,8 +49,8 @@ def _require_isolated_mounts(repository, scratch, device_id):
     if any(len(matches) != 1 for matches in mounts.values()):
         raise ValueError("same_hdd_rehearsal_explicit_mounts_required")
     (repo_device, repo_root, repo_read_only), = mounts[repository]
-    (scratch_device, scratch_root, scratch_read_only), = mounts[scratch]
-    if (repo_read_only is not True or scratch_read_only or {repo_device, scratch_device} != {device_id}
+    (scratch_device, scratch_root, observed_scratch_read_only), = mounts[scratch]
+    if (repo_read_only is not True or observed_scratch_read_only != scratch_read_only or {repo_device, scratch_device} != {device_id}
             or scratch_root.is_relative_to(repo_root) or repo_root.is_relative_to(scratch_root)):
         raise ValueError("same_hdd_rehearsal_requires_readonly_repository_and_disjoint_scratch")
 

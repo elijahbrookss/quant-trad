@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import tempfile
 from time import monotonic
 
 from market_data.fact_archive import archive_evidence_hash
@@ -25,6 +26,8 @@ from scripts.ci.measure_same_hdd_rehearsal import _require_isolated_mounts
 
 
 _SCHEMA = "qt.stopped_rehearsal_database_copy.v1"
+_MEASUREMENT_SCHEMA = "qt.stopped_rehearsal_database_size.v1"
+_MAX_INVENTORY_ENTRIES = 1_000_000
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _EMPTY_CHUNK = bytes(1024 * 1024)
 
@@ -99,14 +102,28 @@ def _control(args, device, check):
     return path, _stamp(info), evidence
 
 
-def _source_inventory(args, device, check):
+def _source_inventory(args, device, fragment, check, *, collect=False):
     entries = {"pgdata": {}, "history": {}}
-    logical_bytes = count = 0
+    footprint = {role: dict.fromkeys(("logical_bytes", "allocated_bytes", "rounded_file_bytes",
+                                    "files", "directories", "links"), 0)
+                 for role in ("pgdata", "history", "resident_wal")}
+    count = 0
+    found_link = found_wal = False
     link = ("pg_tblspc", str(args.tablespace_oid))
     digest = hashlib.sha256()
 
+    def account(total, info, kind):
+        total["allocated_bytes"] += info.st_blocks * 512
+        if kind == "directory":
+            total["directories"] += 1
+        else:
+            total[f"{kind}s"] += 1
+        if kind == "file":
+            total["logical_bytes"] += info.st_size
+            total["rounded_file_bytes"] += (info.st_size + fragment - 1) // fragment * fragment
+
     def visit(path, parts, role):
-        nonlocal logical_bytes, count
+        nonlocal count, found_link, found_wal
         check()
         info = _member(path, device)
         mode = stat.S_IMODE(info.st_mode)
@@ -116,18 +133,22 @@ def _source_inventory(args, device, check):
                     or _identity(path.stat()) != _identity(args.history.lstat())):
                 raise RuntimeError("stopped_clone_unknown_tablespace_link")
             kind, target = "link", str(args.clone_history_path)
+            found_link = True
         elif stat.S_ISDIR(info.st_mode):
             _directory(path, device)
             kind = "directory"
+            if role == "pgdata" and parts == ("pg_wal",):
+                found_wal = True
         elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and parts != ("pg_tblspc",):
             kind = "file"
-            logical_bytes += info.st_size
-            if logical_bytes > args.max_bytes:
-                raise RuntimeError("stopped_clone_logical_byte_budget_exceeded")
         else:
             raise RuntimeError(f"stopped_clone_unsafe_source_member: {path.name}")
+        account(footprint[role], info, kind)
+        if role == "pgdata" and parts[:1] == ("pg_wal",):
+            account(footprint["resident_wal"], info, kind)
         metadata = (kind, _stamp(info), mode, target)
-        entries[role][parts] = metadata
+        if collect:
+            entries[role][parts] = metadata
         digest.update(_canonical((role, parts, metadata)))
         if kind == "directory":
             children = []
@@ -136,21 +157,22 @@ def _source_inventory(args, device, check):
                     check()
                     count += 1
                     name = item.name
-                    if (count > args.max_entries or len(parts) >= 64 or "\\" in name
+                    if (count > _MAX_INVENTORY_ENTRIES or len(parts) >= 64 or "\\" in name
                             or not name.isascii() or not name.isprintable()):
                         raise RuntimeError("stopped_clone_entry_or_path_budget_exceeded")
                     children.append(name)
             for name in sorted(children):
                 visit(path / name, (*parts, name), role)
-        if _stamp(path.lstat()) != _stamp(info):
+        final = path.lstat()
+        if _stamp(final) != _stamp(info) or final.st_blocks != info.st_blocks:
             raise RuntimeError(f"stopped_clone_source_member_changed: {path.name}")
 
     for role in entries:
         root = getattr(args, role)
         visit(root, (), role)
-    if link not in entries["pgdata"] or entries["pgdata"].get(("pg_wal",), (None,))[0] != "directory":
+    if not found_link or not found_wal:
         raise RuntimeError("stopped_clone_missing_tablespace_or_resident_wal")
-    return entries, logical_bytes, count, digest.hexdigest()
+    return entries, footprint, count, digest.hexdigest()
 
 
 def _workspace(root, scope, device):
@@ -265,7 +287,7 @@ def _copy_file(source, destination, work, *, size, stamp, mode, device, check, r
     return checksum, True
 
 
-def copy_database(args):
+def _validate_scope(args):
     if (not re.fullmatch(r"[0-9]+:[0-9]+", args.device_id)
             or not re.fullmatch(r"[1-9][0-9]{0,19}", args.system_identifier)
             or int(args.system_identifier) >= 2**64
@@ -274,13 +296,119 @@ def copy_database(args):
             or not all(0 < oid < 2**32 for oid in (args.tablespace_oid, args.timeline))
             or not args.clone_history_path.is_absolute() or ".." in args.clone_history_path.parts
             or args.clone_history_path == Path("/") or min(args.pgdata_inode, args.history_inode) <= 0
-            or not 1 <= args.max_entries <= 1000000 or not 1 <= args.timeout_seconds <= 604800
+            or not 1 <= args.max_entries <= _MAX_INVENTORY_ENTRIES or not 1 <= args.timeout_seconds <= 604800
             or not 0 < args.max_bytes < 2**63
             or not all(0 <= value < 2**63 for value in (args.reserve_bytes, args.reserve_inodes))):
         raise ValueError("stopped_clone_invalid_scope_or_budget")
+
+
+def _source_binding(args, control_pin, metadata_sha):
+    return {"pgdata": str(args.pgdata), "history": str(args.history), "pgdata_inode": args.pgdata_inode,
+            "history_inode": args.history_inode, "metadata_sha256": metadata_sha, "control": control_pin[2]}
+
+
+def _space(path):
+    space = os.statvfs(path)
+    if space.f_frsize <= 0 or space.f_files <= 0:
+        raise RuntimeError("stopped_clone_filesystem_counters_unavailable")
+    return {"fragment_bytes": space.f_frsize, "free_bytes": space.f_bavail * space.f_frsize,
+            "free_inodes": space.f_favail}
+
+
+def _measurement(args, source, footprint, count, before, after, started):
+    fragment = before["fragment_bytes"]
+    if after["fragment_bytes"] != fragment:
+        raise RuntimeError("stopped_clone_filesystem_fragment_size_changed")
+    logical = sum(footprint[role]["logical_bytes"] for role in ("pgdata", "history"))
+    rounded = sum(footprint[role]["rounded_file_bytes"] for role in ("pgdata", "history"))
+    # New directories and links, per-member metadata, plus the copier's staging root and receipt.
+    estimated_allocation = rounded + (count + 8) * fragment
+    estimated_inodes = count + 8
+    margins = {"copy_logical_bytes": args.max_bytes - logical, "copy_entries": args.max_entries - count,
+               "filesystem_modeled_bytes": min(before["free_bytes"], after["free_bytes"]) - args.reserve_bytes - estimated_allocation,
+               "filesystem_modeled_inodes": min(before["free_inodes"], after["free_inodes"]) - args.reserve_inodes - estimated_inodes}
+    body = {"schema": _MEASUREMENT_SCHEMA, "binding_sha256": args.binding_sha256, "device_id": args.device_id,
+            "system_identifier": args.system_identifier, "timeline": args.timeline, "tablespace_oid": args.tablespace_oid,
+            "source": source, "trees": footprint, "logical_bytes": logical,
+            "allocated_bytes": sum(footprint[role]["allocated_bytes"] for role in ("pgdata", "history")),
+            "entries": count, "filesystem_before": before, "filesystem_after": after,
+            "full_copy_modeled_bytes": estimated_allocation, "full_copy_modeled_inodes": estimated_inodes,
+            "allocation_model": "rounded_logical_files_plus_one_fragment_per_entry_and_eight_for_roots_and_staging",
+            "limits": {"max_bytes": args.max_bytes, "max_entries": args.max_entries,
+                       "reserve_bytes": args.reserve_bytes, "reserve_inodes": args.reserve_inodes},
+            "margins": margins, "full_copy_fits_inputs": min(margins.values()) >= 0,
+            "elapsed_seconds": round(monotonic() - started, 3)}
+    return body | {"verification_sha256": archive_evidence_hash(body)}
+
+
+def _record_measurement(path, report):
+    if not path.is_absolute() or path.resolve() != path or not path.parent.is_dir():
+        raise ValueError("stopped_clone_invalid_measurement_output")
+    if os.path.lexists(path):
+        with os.fdopen(os.open(path, _READ_FLAGS), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or not 1 <= info.st_size <= 65536:
+                raise RuntimeError("stopped_clone_recorded_measurement_file_invalid")
+            prior = json.loads(stream.read(65537))
+        pin = prior.pop("verification_sha256")
+        stable = ("schema", "binding_sha256", "source", "trees", "limits", "device_id", "tablespace_oid", "timeline")
+        if pin != archive_evidence_hash(prior) or any(prior[key] != report[key] for key in stable):
+            raise RuntimeError("stopped_clone_recorded_measurement_scope_changed")
+        return
+    with tempfile.NamedTemporaryFile(mode="wb", prefix=".stopped-copy-size-", dir=path.parent) as staged:
+        staged.write(_canonical(report))
+        staged.flush()
+        os.fchmod(staged.fileno(), 0o640)
+        os.fsync(staged.fileno())
+        os.link(staged.name, path)
+        _sync(path.parent)
+
+
+def measure_database(args):
+    _validate_scope(args)
+    started = monotonic()
+    deadline = started + args.timeout_seconds
+    roots = args.pgdata, args.history
+    identities = tuple(_private_root(path)[1] for path in roots)
+    device = identities[0][0]
+    if identities != ((device, args.pgdata_inode), (device, args.history_inode)) or args.pgdata_inode == args.history_inode:
+        raise RuntimeError("stopped_clone_root_identity_or_overlap_changed")
+    _require_isolated_mounts(*roots, args.device_id, scratch_read_only=True)
+    before = _space(args.pgdata)
+    next_check = started
+    control_pin = None
+
+    def check():
+        nonlocal next_check
+        now = monotonic()
+        if now >= deadline:
+            raise TimeoutError("stopped_clone_deadline")
+        if now >= next_check:
+            next_check = now + 0.25
+            if (tuple(_private_root(path)[1] for path in roots) != identities
+                    or any(not os.statvfs(path).f_flag & os.ST_RDONLY for path in roots)
+                    or os.path.lexists(args.pgdata / "postmaster.pid")
+                    or control_pin is not None and _stamp(control_pin[0].lstat()) != control_pin[1]):
+                raise RuntimeError("stopped_clone_mount_or_donor_changed")
+        return deadline - now
+
+    control_pin = _control(args, device, check)
+    _, footprint, count, metadata = _source_inventory(args, device, before["fragment_bytes"], check)
+    if _control(args, device, check) != control_pin:
+        raise RuntimeError("stopped_clone_final_donor_changed")
+    _require_isolated_mounts(*roots, args.device_id, scratch_read_only=True)
+    check()
+    return _measurement(args, _source_binding(args, control_pin, metadata), footprint, count,
+                        before, _space(args.pgdata), started)
+
+
+def copy_database(args):
+    _validate_scope(args)
     started = monotonic()
     deadline = started + args.timeout_seconds
     roots = (args.pgdata, args.history, args.destination)
+    if args.measurement_output is not None and any(args.measurement_output.is_relative_to(path) for path in roots):
+        raise ValueError("stopped_clone_measurement_must_be_outside_database_paths")
     identities = tuple(_private_root(path)[1] for path in roots)
     device = identities[0][0]
     if (len(set(identities)) != 3 or {identity[0] for identity in identities} != {device}
@@ -301,6 +429,7 @@ def copy_database(args):
 
     control_pin = None
     next_check = started
+    copying = False
 
     def check():
         nonlocal next_check
@@ -315,7 +444,8 @@ def copy_database(args):
                     or os.path.lexists(args.pgdata / "postmaster.pid")
                     or control_pin is not None and _stamp(control_pin[0].lstat()) != control_pin[1]):
                 raise RuntimeError("stopped_clone_mount_or_donor_changed")
-            reserve()
+            if copying:
+                reserve()
         return deadline - now
 
     descriptor = os.open(args.destination, _READ_FLAGS | os.O_DIRECTORY)
@@ -325,12 +455,26 @@ def copy_database(args):
             raise RuntimeError("stopped_clone_destination_root_changed")
         check()
         control_pin = _control(args, device, check)
-        inventory, logical_bytes, count, metadata_sha = _source_inventory(args, device, check)
+        before = _space(args.destination)
+        fragment = before["fragment_bytes"]
+        inventory, footprint, count, metadata_sha = _source_inventory(args, device, fragment, check, collect=True)
+        if _control(args, device, check) != control_pin:
+            raise RuntimeError("stopped_clone_preallocation_donor_changed")
+        source = _source_binding(args, control_pin, metadata_sha)
+        measured = _measurement(args, source, footprint, count, before, _space(args.destination), started)
+        if args.measurement_output is not None:
+            _record_measurement(args.measurement_output, measured)
+        for bound in ("copy_logical_bytes", "copy_entries"):
+            if measured["margins"][bound] < 0:
+                raise RuntimeError(f"stopped_clone_{bound}_budget_exceeded")
+        if not os.path.lexists(args.destination / "scope.json") and not measured["full_copy_fits_inputs"]:
+            raise RuntimeError("stopped_clone_modeled_full_copy_does_not_fit_before_workspace_allocation")
+        reserve()
+        copying = True
+        logical_bytes = measured["logical_bytes"]
         scope = {"schema": _SCHEMA, "binding_sha256": args.binding_sha256,
                  "system_identifier": args.system_identifier, "timeline": args.timeline, "device_id": args.device_id,
-                 "source": {"pgdata": str(args.pgdata), "history": str(args.history),
-                            "pgdata_inode": args.pgdata_inode, "history_inode": args.history_inode,
-                            "metadata_sha256": metadata_sha, "control": control_pin[2]},
+                 "source": source,
                  "destination_inode": identities[2][1], "tablespace_oid": args.tablespace_oid,
                  "clone_history_path": str(args.clone_history_path)}
         work = _workspace(args.destination, scope, device)
@@ -368,8 +512,8 @@ def copy_database(args):
                 digest.update(_canonical((role, parts, kind, mode, target, checksum)))
             _existing_tree(target_root, members, device, check)
         del inventory
-        _, final_bytes, final_count, final_sha = _source_inventory(args, device, check)
-        if ((final_bytes, final_count, final_sha) != (logical_bytes, count, metadata_sha)
+        _, final_footprint, final_count, final_sha = _source_inventory(args, device, fragment, check)
+        if ((final_footprint, final_count, final_sha) != (footprint, count, metadata_sha)
                 or _control(args, device, check) != control_pin):
             raise RuntimeError("stopped_clone_final_donor_changed")
         for source in roots[:2]:
@@ -377,6 +521,7 @@ def copy_database(args):
         check()
         report = scope | {"logical_bytes": logical_bytes, "entries": count, "files": files, "copied_files": copied,
                           "reused_files": files - copied, "file_inventory_sha256": digest.hexdigest(),
+                          "stopped_source_size": measured,
                           "elapsed_seconds": round(monotonic() - started, 3)}
         return report | {"verification_sha256": archive_evidence_hash(report)}
     finally:
@@ -385,8 +530,12 @@ def copy_database(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("pgdata", "history", "destination", "clone-history-path"):
+    for name in ("pgdata", "history", "clone-history-path"):
         parser.add_argument(f"--{name}", required=True, type=Path)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--destination", type=Path)
+    mode.add_argument("--measure-only", action="store_true", help="Measure the stopped donor without a destination bind.")
+    parser.add_argument("--measurement-output", type=Path, help="Publish a preallocation receipt before copying payloads.")
     for name in ("device-id", "system-identifier", "binding-sha256"):
         parser.add_argument(f"--{name}", required=True)
     control = parser.add_mutually_exclusive_group(required=True)
@@ -395,12 +544,16 @@ def main(argv=None):
     for name in ("pgdata-inode", "history-inode", "tablespace-oid", "timeline", "max-bytes", "max-entries",
                  "reserve-bytes", "reserve-inodes", "timeout-seconds"):
         parser.add_argument(f"--{name}", required=True, type=int)
+    args = parser.parse_args(argv)
+    if args.measure_only and args.measurement_output is not None:
+        parser.error("read-only measurement writes its report only to stdout")
     try:
-        receipt = copy_database(parser.parse_args(argv))
+        receipt = measure_database(args) if args.measure_only else copy_database(args)
     except (KeyError, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         parser.exit(1, f"{type(error).__name__}: {error}\n")
     print(json.dumps(receipt, sort_keys=True, indent=2))
+    return 3 if args.measure_only and not receipt["full_copy_fits_inputs"] else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
