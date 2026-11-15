@@ -92,6 +92,29 @@ def prepare_replayed_archive_baseline(inventory_path, *, checkpoint, max_objects
             or archive_evidence_hash(body) != checkpoint_hash):
         raise ValueError("canonical_recovery_replayed_archive_checkpoint_invalid")
 
+    objects = read_archive_catalog_inventory(inventory_path, inventory_sha256=inventory_hash, count=count, total=total,
+                                             max_objects=max_objects, check=check)
+    if archive_objects is not None:
+        archive, archive_identity = _private_root(Path(archive_objects))
+        for key, descriptor in objects.items():
+            check()
+            path = _path(archive, key, absolute=False)
+            if _sha_file(path, check=check) != descriptor:
+                raise ValueError(f"restored archive object failed size or hash check: {key}")
+        if _private_root(archive)[1] != archive_identity:
+            raise RuntimeError("canonical_recovery_replayed_archive_root_changed")
+    check()
+    return PreparedArchiveBaseline(pair_hash, identity, MappingProxyType(layout.copy()),
+                                   MappingProxyType(objects), checkpoint_hash)
+
+
+def read_archive_catalog_inventory(inventory_path, *, inventory_sha256, count, total, max_objects, check):
+    """Read the canonical catalog used by both paused and replayed recovery evidence."""
+    if type(max_objects) is not int or not 1 <= max_objects <= 10_000_000:
+        raise ValueError("canonical_recovery_archive_object_budget_invalid")
+    if (not _sha256(inventory_sha256) or type(count) is not int or not 0 <= count <= max_objects
+            or type(total) is not int or not 0 <= total < 2**63):
+        raise ValueError("canonical_recovery_replayed_archive_inventory_mismatch")
     inventory = Path(inventory_path)
     if not inventory.is_absolute() or inventory.resolve(strict=True) != inventory:
         raise ValueError("canonical_recovery_replayed_archive_inventory_path_invalid")
@@ -125,21 +148,9 @@ def prepare_replayed_archive_baseline(inventory_path, *, checkpoint, max_objects
             objects[key] = (sha, size)
         if _stamp(os.fstat(stream.fileno())) != stamp or _stamp(inventory.lstat()) != stamp:
             raise RuntimeError("canonical_recovery_replayed_archive_inventory_changed")
-    if (digest.hexdigest(), len(objects), bytes_seen) != (inventory_hash, count, total):
+    if (digest.hexdigest(), len(objects), bytes_seen) != (inventory_sha256, count, total):
         raise ValueError("canonical_recovery_replayed_archive_inventory_mismatch")
-
-    if archive_objects is not None:
-        archive, archive_identity = _private_root(Path(archive_objects))
-        for key, descriptor in objects.items():
-            check()
-            path = _path(archive, key, absolute=False)
-            if _sha_file(path, check=check) != descriptor:
-                raise ValueError(f"restored archive object failed size or hash check: {key}")
-        if _private_root(archive)[1] != archive_identity:
-            raise RuntimeError("canonical_recovery_replayed_archive_root_changed")
-    check()
-    return PreparedArchiveBaseline(pair_hash, identity, MappingProxyType(layout.copy()),
-                                   MappingProxyType(objects), checkpoint_hash)
+    return objects
 
 
 def _final_descriptors(conn, anchor, baseline, *, max_objects, check):
