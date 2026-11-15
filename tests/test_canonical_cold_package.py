@@ -4,10 +4,12 @@ from hashlib import sha256
 import json
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION
 from scripts.automation import canonical_cold_collector_checks as collectors
+from scripts.automation import canonical_cold_named_recovery as named
 from scripts.automation import canonical_cold_package as package
 from scripts.automation import canonical_cold_recovery_checks as recovery
 from scripts.automation.storage_host_boundary import digest, load_receipt
@@ -114,9 +116,28 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
             "baseline_verification_sha256": "b" * 64, "pair_receipt_sha256": "c" * 64}
     scope = {"definition_id": "fixture-level2", "session_id": "old", "sealed_files": 2}
     plan["pending_spool_scope_sha256"] = digest(scope) if pending else None
+    receiver = Ed25519PrivateKey.generate()
+    public = receiver.public_key().public_bytes_raw().hex()
+    roles = ("exchange", "workspace", "pgdata")
+    capacity = {"roles": list(roles), "required_bytes": 18, "required_entries": 3, "reserve_bytes": 4,
+                "available_bytes": 100, "available_entries": 10}
+    measurement = {"schema": named.PREFLIGHT_VERSION, "receiver_host_sha256": "1" * 64,
+        "source_host_sha256": "2" * 64, "pending_expected": pending,
+        "receiver_mounts": {role: {"device_id": "1:2", "block_size": 4} for role in roles},
+        "requirements": {role: {"checkpoint_bytes": 2, "entries": 1, "reserve_bytes": 4} for role in roles},
+        "capacity_by_device": {"1:2": capacity},
+        "site_policy": {"database_identity": "123/42", "receiver_public_key": public,
+                        **{key: plan[key] for key in recovery._BASE_PINS}}}
+    measured = digest(measurement)
+    plan.update(receiver_public_key=public, receiver_preflight=named._sign(measurement | {"measurement_sha256": measured}, receiver))
+    impossible = {**measurement, "capacity_by_device": {"1:2": {**capacity, "available_entries": 2}}}
+    with pytest.raises(ValueError, match="invalid_preflight_capacity"):
+        named.verify_receiver_preflight(named._sign(impossible | {"measurement_sha256": digest(impossible)}, receiver), public)
     path = tmp_path / "independent.json"
     accepted = {"source_commit_floor": 40, "scope": {"target_database": {"system_identifier": "123", "database_oid": 42}},
                 "artifacts": {"independent_recovery": {"filename": path.name, "sha256": _write(path, json.dumps(plan).encode())}}}
+    package_path = tmp_path / "package.json"
+    package_hash = _write(package_path, json.dumps(accepted).encode())
     boundary = {"database_identity": "123/42", "source_commit_seq": 45, "anchor_sha256": "d" * 64}
     segments = [{"id": "first", "records_sha256": "1" * 64}, {"id": "second", "records_sha256": "2" * 64}]
     archive = {
@@ -125,6 +146,7 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
         "restore_name": "qt_original_" + "d" * 32,
         "wal_segment": "00000001000000000000000F", "replay_lsn": "0/F441",
         "archive_transfer_sha256": "e" * 64, "native_named_sha256": "f" * 64, "wal_transfer_sha256": "1" * 64,
+        "receiver_runtime_sha256": "8" * 64,
         "coverage": {"archive_snapshot": "2" * 64, "final_inventory_sha256": "3" * 64, "final_objects": 20,
                      "final_bytes": 30000, "baseline_objects_used": 19, "verified_suffix_objects": 1},
     }
@@ -141,30 +163,50 @@ def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(t
                              {**before_anchor, "source_sha256": digest(before_anchor)} if pending else None}}
     provider_digest = digest(provider)
     _write(root / f"collector-drained-{provider_digest}.json", json.dumps({**provider, "sha256": provider_digest}).encode())
-    checker = recovery.bind_approved_recovery_checks(
-        package_path=tmp_path / "package.json", package=accepted, receipt_root=root, verify_site_restore=lambda *args: report,
-        expected_pending_scope_sha256=plan["pending_spool_scope_sha256"],
-    )
+
+    def acknowledge(**overrides):
+        body = {"schema": named._RESPONSE, "request_sha256": "a" * 64, "runtime_sha256": archive["receiver_runtime_sha256"],
+                "approved_package_sha256": package_hash, "provider_boundary_sha256": provider_digest,
+                "receiver_preflight_sha256": measured,
+                **{key: report[key] for key in ("archive_closure", "pending_spool_verified")}}
+        report["receiver_response"] = named._sign(body | overrides, receiver)
+
+    acknowledge()
+    options = dict(package_path=package_path, package=accepted, approved_package_hash=package_hash,
+                   receipt_root=root, verify_site_restore=lambda *args: report,
+                   expected_pending_scope_sha256=plan["pending_spool_scope_sha256"])
+    checker = recovery.bind_approved_recovery_checks(**options)
     arguments = (None, None, 45, provider_digest, lambda: 30, lambda: None)
     certificate = checker(*arguments)
     assert checker(*arguments) == certificate
     proof = load_receipt(root / f"independent-recovery-{certificate}.json")
     assert proof["source_commit_seq"] == 45 and proof["provider_boundary_sha256"] == provider_digest
     assert proof["archive_closure"] == report["archive_closure"]
+    assert proof["receiver_preflight_sha256"] == measured
+    for field in ("approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256"):
+        acknowledge(**{field: "9" * 64})
+        with pytest.raises(RuntimeError, match="signed_boundary_changed"):
+            checker(*arguments)
+    acknowledge()
+    report["receiver_response"] = named._sign(report["receiver_response"]["body"], Ed25519PrivateKey.generate())
+    with pytest.raises(ValueError, match="signature_mismatch"):
+        checker(*arguments)
     changed = {**archive, "source_commit_seq": 46}
     report["archive_closure"] = {**changed, "closure_sha256": digest(changed)}
+    acknowledge()
     with pytest.raises(RuntimeError, match="named_boundary_changed"):
         checker(*arguments)
     report["archive_closure"] = {**archive, "closure_sha256": digest(archive)}
     changed = {**received, "segments": segments[:1]}
     report["pending_spool_verified"] = {**changed, "verification_sha256": digest(changed)}
+    acknowledge()
     with pytest.raises(RuntimeError, match="pending_spool_boundary_changed|unapproved_pending_spool"):
         checker(*arguments)
     with pytest.raises(ValueError, match="collector_scope_changed"):
-        recovery.bind_approved_recovery_checks(
-            package_path=tmp_path / "package.json", package=accepted, receipt_root=root, verify_site_restore=lambda *args: report,
-            expected_pending_scope_sha256="9" * 64,
-        )
+        recovery.bind_approved_recovery_checks(**(options | {"expected_pending_scope_sha256": "9" * 64}))
+    _write(package_path, json.dumps(accepted, indent=2).encode())
+    with pytest.raises(RuntimeError, match="package_changed"):
+        recovery.bind_approved_recovery_checks(**options)
 
 
 @pytest.fixture

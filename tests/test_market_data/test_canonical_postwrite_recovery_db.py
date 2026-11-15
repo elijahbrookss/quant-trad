@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
@@ -35,7 +36,7 @@ from portal.backend.service.storage.repos import market_data, market_lifecycle, 
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.automation.canonical_cold_collector_checks import RECEIPT_VERSION as COLLECTOR_RECEIPT_VERSION
 from scripts.automation.canonical_cold_recovery_checks import PLAN_VERSION, bind_approved_recovery_checks
-from scripts.automation.canonical_cold_named_recovery import NamedRecoverySite, _opened, bind_named_recovery_source, recover_named_site
+from scripts.automation.canonical_cold_named_recovery import RecoverySitePolicy, NamedRecoverySite, _opened, bind_named_recovery_source, recover_named_site
 from scripts.automation import canonical_cold_recovery_preflight as preflight
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, stage_handoff, verify_staged_handoff
 from scripts.automation.storage_host_boundary import load_receipt, save_receipt
@@ -443,7 +444,6 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
         assert pending_verified["boundary"]["anchor_sha256"] == closure["anchor_sha256"] == anchor_hash
         assert pending_verified["boundary"]["source_commit_seq"] == closure["source_commit_seq"]
         assert pending_verified["pre_anchor_sha256"] == pending_before["source_sha256"]
-        _check_named_receipt_package(tmp_path, target, pending_before, pending_source, pending_verified, closure)
         recovered_records = [record for descriptor in pending_verified["segments"]
                              for record in DurableRawSpoolSegment.from_path(pending_restore / "spool" / descriptor["path"]).records()]
         assert recovered_records == pending_records
@@ -575,7 +575,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     receiver_sign = private_key("receiver-sign", receiver.private_bytes_raw().hex())
     suffix_key = private_key("named-suffix", secrets.token_hex(32))
     pending_key = private_key("named-pending", secrets.token_hex(32))
-    site = NamedRecoverySite(receiving=receiving, approved_package_sha256="b" * 64,
+    policy = RecoverySitePolicy(receiving=receiving,
         base_transfer_sha256=transfer["transfer_receipt_sha256"], baseline_verification=base_native,
         source_public_key=source.public_key().public_bytes_raw().hex(), receiver_public_key=receiver.public_key().public_bytes_raw().hex(),
         wal=TransferLimits(35, 64 * 1024**2, 16), archive=TransferLimits(40, 64 * 1024**2, 100),
@@ -602,9 +602,9 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     (udev / f"b{os.major(device)}:{os.minor(device)}").write_text(f"E:ID_FS_UUID={receiver_uuid}\n")
     # This disposable server pair shares a single kernel. The independent host
     # pins are fixture inputs. Capacity and native metadata are measured for real.
-    monkeypatch.setattr(preflight, "receiver_host_sha256", lambda: "c" * 64)
+    monkeypatch.setattr(preflight.named, "receiver_host_sha256", lambda: "c" * 64)
     mount = lambda path: preflight.ReceiverPath(path, receiver_uuid)
-    preflight_options = dict(site=site, receiver_signing_key=receiver_sign, expected_host_sha256="c" * 64,
+    preflight_options = dict(site=policy, receiver_signing_key=receiver_sign, expected_host_sha256="c" * 64,
         source_host_sha256="d" * 64, source_filesystem_uuids=(pair["filesystem_uuid"],), receiving=mount(receiving),
         workspace=mount(workspace), pgdata=mount(pgdata), tablespaces={"signed_history_fixture": mount(history_path)},
         pgbackrest=worker.pgbackrest, restic=worker.restic, database_key=worker.config.database_key_path,
@@ -638,6 +638,21 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     expected = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series)
     assert len(expected) == 2
     source_commit = _admitted_rows(storage.database, series)[0][-1].market_commit_seq
+    scope_hash = archive_evidence_hash(asdict(scope))
+    plan = {"schema": PLAN_VERSION, "pending_spool_scope_sha256": scope_hash,
+            "receiver_public_key": policy.receiver_public_key, "receiver_preflight": measured,
+            **{key: sizing["site_policy"][key] for key in ("base_transfer_sha256", "baseline_verification_sha256", "pair_receipt_sha256")}}
+    plan_path = receipts / "recovery-plan.json"
+    save_receipt(plan_path, plan, initial=True)
+    plan_hash = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+    package = {"source_commit_floor": source_commit, "scope": {"target_database": target},
+               "artifacts": {"independent_recovery": {"filename": plan_path.name, "sha256": plan_hash}}}
+    package_path = receipts / "package.json"
+    save_receipt(package_path, package, initial=True)
+    approved_package_hash = hashlib.sha256(package_path.read_bytes()).hexdigest()
+    site = NamedRecoverySite(**vars(policy), approved_package_sha256=approved_package_hash, receiver_preflight=measured)
+    with pytest.raises(ValueError, match="preflight_policy_changed"):
+        replace(site, wal=replace(site.wal, bytes=site.wal.bytes + 1))
     source_options = dict(site=site, provider_receipt_root=receipts,
         database_repository=worker.root, archive_objects=objects.root, scratch=scratch, baseline=baseline,
         restic=worker.restic, archive_key=suffix_key, pending_key=pending_key, pending_spool=pending_root)
@@ -713,8 +728,11 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         with pytest.raises(ValueError, match="directory_invalid"):
             recover_named_site(**receiver_options, workspace=negative, pgdata=negative_data,
                                tablespaces={"signed_history_fixture": alias})
-        with pytest.raises(ValueError, match="native_manifest_scope_changed"):
+        with pytest.raises(ValueError, match="preflight_receiver_changed"):
             recover_named_site(**receiver_options, workspace=negative, pgdata=negative_data, tablespaces={})
+        with pytest.raises(ValueError, match="preflight_mount_changed"):
+            recover_named_site(**receiver_options, workspace=negative, pgdata=negative_data,
+                               tablespaces={"signed_history_fixture": history_path})
         assert not any(negative_data.iterdir())
         assert not (receiving / "named-recovery-response.json").exists()
         assert not (restore_root / "start").exists()
@@ -750,8 +768,13 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             save_receipt(damaged, response, initial=True)
             with pytest.raises(ValueError, match="signature_mismatch"):
                 _opened(damaged, site.receiver_public_key)
-            _check_named_receipt_package(tmp_path, target, before, report["pending_spool_source"],
-                                         report["pending_spool_verified"], report["archive_closure"])
+            binding = bind_approved_recovery_checks(package_path=package_path, package=package,
+                approved_package_hash=approved_package_hash, receipt_root=receipts,
+                verify_site_restore=lambda *_: report, expected_pending_scope_sha256=scope_hash)
+            digest = binding(None, None, source_commit, provider_hash, lambda: 10, lambda: None)
+            published = load_receipt(receipts / f"independent-recovery-{digest}.json", max_bytes=4 * 1024**2)
+            assert published["receiver_preflight_sha256"] == sizing["measurement_sha256"]
+            assert published["receiver_response"] == report["receiver_response"]
         finally:
             reopen_database_fence(fence, control, expected_outcome="original", read_outcome=lambda _: "original", record=lambda *_: None)
 
@@ -819,32 +842,6 @@ def _pending_level2(storage, structures, root):
     structures.release(claim)
     scope = PendingSpoolScope(definition, claim.session_id, 1, claim.provider, claim.venue, product, "level2", 2, total)
     return scope, records, failed
-
-
-def _check_named_receipt_package(tmp_path, target, before, source, received, closure):
-    """Validate the real receiver receipts offline, using the fixture's measured provider input."""
-    root = tmp_path / "independent-approval-fixture"
-    root.mkdir(mode=0o700)
-    scope_hash = archive_evidence_hash(before["scope"])
-    plan = {"schema": PLAN_VERSION, "pending_spool_scope_sha256": scope_hash,
-            **{key: closure[key] for key in ("base_transfer_sha256", "baseline_verification_sha256", "pair_receipt_sha256")}}
-    plan_path = root / "recovery-plan.json"
-    save_receipt(plan_path, plan, initial=True)
-    plan_hash = hashlib.sha256(plan_path.read_bytes()).hexdigest()
-    package = {"source_commit_floor": closure["source_commit_seq"], "scope": {"target_database": target},
-               "artifacts": {"independent_recovery": {"filename": plan_path.name, "sha256": plan_hash}}}
-    drained = {"schema": COLLECTOR_RECEIPT_VERSION, "phase": "drained",
-               "evidence": {"source_commit_seq": closure["source_commit_seq"], "pending_spool": before}}
-    provider_hash = archive_evidence_hash(drained)
-    save_receipt(root / f"collector-drained-{provider_hash}.json", drained | {"sha256": provider_hash}, initial=True)
-    report = {"archive_closure": closure, "pending_spool_source": source, "pending_spool_verified": received}
-    binding = bind_approved_recovery_checks(package_path=root / "package.json", package=package, receipt_root=root,
-        verify_site_restore=lambda *_: report, expected_pending_scope_sha256=scope_hash)
-    digest = binding(None, None, closure["source_commit_seq"], provider_hash, lambda: 10, lambda: None)
-    published = load_receipt(root / f"independent-recovery-{digest}.json", max_bytes=4 * 1024**2)
-    assert published["sha256"] == digest
-    assert published["pending_spool_before_anchor_sha256"] == before["source_sha256"]
-    assert {key: published[key] for key in report} == report
 
 
 def _later_trade(structures, root, claim, record, *, trade_id="after-physical-endpoint"):

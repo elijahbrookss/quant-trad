@@ -9,12 +9,13 @@ from market_data.fact_archive import archive_evidence_hash
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION
 from scripts.automation import storage_host_boundary as host
 from scripts.automation.canonical_cold_collector_checks import RECEIPT_VERSION as COLLECTOR_RECEIPT_VERSION
+from scripts.automation.canonical_cold_named_recovery import _RESPONSE, verify_receiver_preflight, verify_signed_recovery
 from scripts.automation.canonical_cold_package import _hash_file, _pin, _unique_fields
 from scripts.db.canonical_cold_recovery_archive_transport import _CLOSURE
 
 
-PLAN_VERSION = "qt.canonical_cold_independent_plan.v1"
-RECEIPT_VERSION = "qt.canonical_cold_independent_execution.v1"
+PLAN_VERSION = "qt.canonical_cold_independent_plan.v2"
+RECEIPT_VERSION = "qt.canonical_cold_independent_execution.v2"
 _BASE_PINS = {"base_transfer_sha256", "baseline_verification_sha256", "pair_receipt_sha256"}
 
 
@@ -33,21 +34,32 @@ def _directory(path):
     return info.st_dev, info.st_ino
 
 
-def bind_approved_recovery_checks(*, package_path, package, receipt_root, verify_site_restore, expected_pending_scope_sha256):
+def bind_approved_recovery_checks(*, package_path, package, approved_package_hash, receipt_root, verify_site_restore,
+                                  expected_pending_scope_sha256):
     """Accept the receiver's native receipts for the approved prestaged backup."""
+    package_path = Path(package_path)
+    package_hash, package_content = _hash_file(package_path, json_limit=65_536)
+    if package_hash != approved_package_hash or json.loads(package_content, object_pairs_hook=_unique_fields) != package:
+        raise RuntimeError("canonical_cold_independent_recovery_package_changed")
     binding = package["artifacts"]["independent_recovery"]
-    plan_hash, content = _hash_file(Path(package_path).parent / binding["filename"], json_limit=65_536)
+    plan_hash, content = _hash_file(package_path.parent / binding["filename"], json_limit=65_536)
     if plan_hash != binding["sha256"]:
         raise RuntimeError("canonical_cold_independent_recovery_plan_digest_changed")
     plan = json.loads(content, object_pairs_hook=_unique_fields)
-    if (not isinstance(plan, dict) or set(plan) != _BASE_PINS | {"schema", "pending_spool_scope_sha256"}
+    if (not isinstance(plan, dict) or set(plan) != _BASE_PINS | {"schema", "pending_spool_scope_sha256", "receiver_public_key", "receiver_preflight"}
             or plan["schema"] != PLAN_VERSION or not all(_pin(plan[field]) for field in _BASE_PINS)
+            or not _pin(plan["receiver_public_key"])
             or (plan["pending_spool_scope_sha256"] is not None and not _pin(plan["pending_spool_scope_sha256"]))):
         raise ValueError("canonical_cold_independent_recovery_invalid_plan")
     if plan["pending_spool_scope_sha256"] != expected_pending_scope_sha256:
         raise ValueError("canonical_cold_independent_recovery_collector_scope_changed")
     target = package["scope"]["target_database"]
     identity = f"{target['system_identifier']}/{target['database_oid']}"
+    measurement = verify_receiver_preflight(plan["receiver_preflight"], plan["receiver_public_key"])
+    site = measurement["site_policy"]
+    if (any(site.get(field) != plan[field] for field in _BASE_PINS) or site.get("database_identity") != identity
+            or measurement["pending_expected"] != (expected_pending_scope_sha256 is not None)):
+        raise RuntimeError("canonical_cold_independent_recovery_preflight_scope_changed")
     root = Path(receipt_root)
     root_identity = _directory(root)
 
@@ -72,13 +84,22 @@ def bind_approved_recovery_checks(*, package_path, package, receipt_root, verify
                     or archive_evidence_hash(pending_before_anchor.get("scope")) != expected_pending_scope_sha256):
                 raise RuntimeError("canonical_cold_independent_recovery_collector_pending_scope_changed")
         report = verify_site_restore(fence, control, source_commit, provider_boundary, remaining, check_archive)
-        if not isinstance(report, dict) or set(report) != {"archive_closure", "pending_spool_source", "pending_spool_verified"}:
+        if not isinstance(report, dict) or set(report) != {"archive_closure", "pending_spool_source", "pending_spool_verified", "receiver_response"}:
             raise ValueError("canonical_cold_independent_recovery_requires_native_receipts")
+        reply = verify_signed_recovery(report["receiver_response"], plan["receiver_public_key"])
+        if (set(reply) != {"schema", "request_sha256", "archive_closure", "pending_spool_verified", "runtime_sha256",
+                           "approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256"}
+                or reply["schema"] != _RESPONSE or not _pin(reply["request_sha256"])
+                or reply["approved_package_sha256"] != package_hash or reply["provider_boundary_sha256"] != provider_boundary
+                or reply["receiver_preflight_sha256"] != measurement["measurement_sha256"]
+                or any(reply[key] != report[key] for key in ("archive_closure", "pending_spool_verified"))):
+            raise RuntimeError("canonical_cold_independent_recovery_signed_boundary_changed")
         closure = report["archive_closure"]
         _verify_digest(closure, field="closure_sha256", schema=_CLOSURE)
         coverage = closure.get("coverage")
         layout = closure.get("storage_layout")
         if (any(closure.get(field) != plan[field] for field in _BASE_PINS)
+                or not _pin(reply.get("runtime_sha256")) or closure.get("receiver_runtime_sha256") != reply["runtime_sha256"]
                 or closure.get("database_identity") != identity or closure.get("source_commit_seq") != source_commit
                 or not isinstance(layout, dict) or layout.get("layout_version") != FACT_STORAGE_LAYOUT_VERSION
                 or not _pin(layout.get("certificate_sha256"))
@@ -115,6 +136,7 @@ def bind_approved_recovery_checks(*, package_path, package, receipt_root, verify
             raise RuntimeError("canonical_cold_independent_recovery_receipt_directory_changed")
         evidence = {"schema": RECEIPT_VERSION, "plan_sha256": plan_hash, "database_identity": identity,
                     "source_commit_seq": source_commit, "provider_boundary_sha256": provider_boundary,
+                    "receiver_preflight_sha256": measurement["measurement_sha256"],
                     "pending_spool_before_anchor_sha256": None if pending_before_anchor is None else pending_before_anchor["source_sha256"],
                     **report}
         digest = archive_evidence_hash(evidence)

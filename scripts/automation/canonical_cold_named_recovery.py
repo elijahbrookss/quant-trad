@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -16,6 +16,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from sqlalchemy import text
 
+from core.storage_mounts import inspect_filesystem
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.service.storage.incremental_recovery import _binary, _private_bytes, _run_native
 from portal.backend.service.storage.recovery_copies import _json_write, _sync
@@ -33,18 +34,18 @@ from scripts.db.canonical_cold_recovery_wal_transfer import _baseline, verify_fi
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
-_REQUEST = "qt.named_recovery_site_request.v1"
-_RESPONSE = "qt.named_recovery_site_response.v1"
+_REQUEST = "qt.named_recovery_site_request.v2"
+_RESPONSE = "qt.named_recovery_site_response.v2"
+PREFLIGHT_VERSION = "qt.named_recovery_receiver_preflight.v2"
 _MAX_RECEIPT = 1024 * 1024
 _MAX_PROVIDER_RECEIPT = 128 * 1024**2
 
 
 @dataclass(frozen=True)
-class NamedRecoverySite:
-    """Local policy, provisioned separately on both hosts before the hold."""
+class RecoverySitePolicy:
+    """Local settings and verification inputs available before approval."""
 
     receiving: Path
-    approved_package_sha256: str
     base_transfer_sha256: str
     baseline_verification: dict
     source_public_key: str
@@ -57,7 +58,7 @@ class NamedRecoverySite:
     max_pending_entries: int
 
     def __post_init__(self):
-        pins = (self.approved_package_sha256, self.base_transfer_sha256, self.source_public_key, self.receiver_public_key)
+        pins = (self.base_transfer_sha256, self.source_public_key, self.receiver_public_key)
         if (not all(map(_sha256, pins)) or self.source_public_key == self.receiver_public_key
                 or not all(isinstance(limit, TransferLimits) for limit in (self.wal, self.archive, self.pending, self.database))
                 or type(self.max_archive_objects) is not int or not 1 <= self.max_archive_objects <= 10_000_000
@@ -65,6 +66,57 @@ class NamedRecoverySite:
             raise ValueError("canonical_named_recovery_invalid_site_policy")
         _baseline(self.receiving, self.base_transfer_sha256, self.baseline_verification,
                   self.baseline_verification["verification_sha256"])
+
+    def preflight_scope(self):
+        return {"receiving": str(self.receiving), "source_public_key": self.source_public_key,
+                "receiver_public_key": self.receiver_public_key, "base_transfer_sha256": self.base_transfer_sha256,
+                **{name: self.baseline_verification[name] for name in ("database_identity", "pair_receipt_sha256")},
+                "baseline_verification_sha256": self.baseline_verification["verification_sha256"],
+                **{name: asdict(getattr(self, name)) for name in ("wal", "archive", "pending", "database")},
+                "max_archive_objects": self.max_archive_objects, "max_pending_entries": self.max_pending_entries}
+
+
+@dataclass(frozen=True)
+class NamedRecoverySite(RecoverySitePolicy):
+    """The final approval and signed preflight used by both named recovery owners."""
+
+    approved_package_sha256: str
+    receiver_preflight: dict
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.checked_preflight()
+
+    def checked_preflight(self):
+        measured = verify_receiver_preflight(self.receiver_preflight, self.receiver_public_key)
+        if not _sha256(self.approved_package_sha256) or measured["site_policy"] != self.preflight_scope():
+            raise ValueError("canonical_named_recovery_preflight_policy_changed")
+        return measured
+
+
+def receiver_host_sha256():
+    """Fingerprint the receiver's provisioned Linux machine identity."""
+    with Path("/etc/machine-id").open("rb") as stream:
+        identity = stream.read(129).strip()
+    if not re.fullmatch(rb"[0-9a-f]{32}", identity) or identity == b"0" * 32:
+        raise ValueError("canonical_recovery_preflight_host_identity_unavailable")
+    return hashlib.sha256(b"qt.recovery.receiver.machine-id.v1\0" + identity).hexdigest()
+
+
+def _assert_receiver_preflight_mounts(measured, root, workspace, pgdata, destinations):
+    paths = {"exchange": root, "workspace": workspace, "pgdata": pgdata,
+             **{f"tablespace:{name}": path for name, (path, _) in destinations.items()}}
+    mounts = measured["receiver_mounts"]
+    if receiver_host_sha256() != measured["receiver_host_sha256"] or set(paths) != set(mounts):
+        raise ValueError("canonical_named_recovery_preflight_receiver_changed")
+    udev = Path(os.environ.get("QT_STORAGE_UDEV_ROOT", "/run/udev/data"))
+    for role, path in paths.items():
+        expected = mounts[role]
+        if str(path) != expected["path"] or path.lstat().st_ino != expected["inode"]:
+            raise ValueError("canonical_named_recovery_preflight_mount_changed")
+        filesystem = inspect_filesystem(path, expected_uuid=expected["filesystem_uuid"], udev_root=udev)
+        if filesystem.device_id != expected["device_id"]:
+            raise ValueError("canonical_named_recovery_preflight_mount_changed")
 
 
 def _limit(limit, check):
@@ -92,8 +144,7 @@ def _sign(body, key):
     return {"body": body, "signature": key.sign(_signed_bytes(body)).hex()}
 
 
-def _opened(path, public):
-    payload = load_receipt(path, max_bytes=_MAX_RECEIPT)
+def verify_signed_recovery(payload, public):
     if (not isinstance(payload, dict) or set(payload) != {"body", "signature"} or not isinstance(payload["body"], dict)
             or not isinstance(payload["signature"], str) or not re.fullmatch(r"[0-9a-f]{128}", payload["signature"])):
         raise ValueError("canonical_named_recovery_invalid_envelope")
@@ -104,6 +155,62 @@ def _opened(path, public):
     except InvalidSignature:
         raise ValueError("canonical_named_recovery_signature_mismatch") from None
     return payload["body"]
+
+
+def _opened(path, public):
+    return verify_signed_recovery(load_receipt(path, max_bytes=_MAX_RECEIPT), public)
+
+
+def verify_receiver_preflight(payload, receiver_public_key):
+    measured = verify_signed_recovery(payload, receiver_public_key)
+    policy = measured.get("site_policy")
+    if (measured.get("schema") != PREFLIGHT_VERSION or not isinstance(policy, dict)
+            or policy.get("receiver_public_key") != receiver_public_key
+            or not _sha256(measured.get("receiver_host_sha256")) or not _sha256(measured.get("source_host_sha256"))
+            or measured["receiver_host_sha256"] == measured["source_host_sha256"]
+            or type(measured.get("pending_expected")) is not bool or not isinstance(measured.get("receiver_mounts"), dict)
+            or measured.get("measurement_sha256") != archive_evidence_hash(
+                {key: value for key, value in measured.items() if key != "measurement_sha256"})):
+        raise ValueError("canonical_named_recovery_invalid_preflight")
+    _verify_preflight_capacity(measured)
+    return measured
+
+
+def _preflight_needs(mounts, requirements):
+    if (not {"exchange", "workspace", "pgdata"} <= mounts.keys() or not isinstance(requirements, dict)
+            or requirements.keys() != mounts.keys()):
+        raise ValueError("canonical_named_recovery_invalid_preflight_capacity")
+    grouped = {}
+    for role, mount in mounts.items():
+        need = requirements[role]
+        if (not isinstance(mount, dict) or not isinstance(need, dict) or type(mount.get("block_size")) is not int
+                or mount["block_size"] < 1 or not isinstance(mount.get("device_id"), str)
+                or not re.fullmatch(r"[0-9]+:[0-9]+", mount["device_id"])
+                or any(type(need.get(key)) is not int or need[key] < 0 for key in ("checkpoint_bytes", "entries", "reserve_bytes"))):
+            raise ValueError("canonical_named_recovery_invalid_preflight_capacity")
+        device = grouped.setdefault(mount["device_id"], {"roles": [], "required_bytes": 0, "required_entries": 0, "reserve_bytes": 0})
+        device["roles"].append(role)
+        device["required_bytes"] += need["checkpoint_bytes"] + mount["block_size"] * need["entries"]
+        device["required_entries"] += need["entries"]
+        device["reserve_bytes"] = max(device["reserve_bytes"], need["reserve_bytes"])
+    return grouped
+
+
+def _verify_preflight_capacity(measured):
+    grouped = _preflight_needs(measured["receiver_mounts"], measured.get("requirements"))
+    capacity = measured.get("capacity_by_device")
+    if not isinstance(capacity, dict) or grouped.keys() != capacity.keys():
+        raise ValueError("canonical_named_recovery_invalid_preflight_capacity")
+    for key, needed in grouped.items():
+        observed = capacity[key]
+        if (not isinstance(observed, dict) or not isinstance(observed.get("roles"), list)
+                or not all(isinstance(role, str) for role in observed["roles"]) or sorted(observed["roles"]) != sorted(needed["roles"])
+                or any(type(observed.get(name)) is not int or observed[name] != needed[name]
+                       for name in ("required_bytes", "required_entries", "reserve_bytes"))
+                or type(observed.get("available_bytes")) is not int or type(observed.get("available_entries")) is not int
+                or observed["available_bytes"] < needed["required_bytes"] + needed["reserve_bytes"]
+                or observed["available_entries"] < needed["required_entries"]):
+            raise ValueError("canonical_named_recovery_invalid_preflight_capacity")
 
 
 def _publish(path, body):
@@ -135,6 +242,7 @@ def _private_credential(path, *, receiving, workspace=None):
 def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, database_repository, archive_objects,
                                scratch, baseline, restic, archive_key, pending_key=None, pending_spool=None):
     """Make the launcher callback. Actual recovery still requires the approved live fence."""
+    measured = site.checked_preflight()
     root, root_id = _private_root(site.receiving)
     scratch, scratch_id = _private_root(scratch)
     receipts, receipts_id = _private_root(provider_receipt_root)
@@ -147,7 +255,7 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
         pending_key = _private_credential(pending_key, receiving=root)
 
     def recover(fence, control, source_commit, provider_boundary, remaining, check_archive):
-        if (not isinstance(fence, DatabaseFence) or not _sha256(provider_boundary)
+        if (site.checked_preflight() != measured or not isinstance(fence, DatabaseFence) or not _sha256(provider_boundary)
                 or fence.connection.in_transaction() or control.in_transaction()):
             raise ValueError("canonical_named_recovery_live_fence_required")
         deadline = min(fence.deadline, monotonic() + remaining())
@@ -171,6 +279,8 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
                 or evidence.get("source_commit_seq") != source_commit):
             raise ValueError("canonical_named_recovery_provider_boundary_changed")
         pending_before = evidence.get("pending_spool")
+        if (pending_before is not None) != measured["pending_expected"]:
+            raise ValueError("canonical_named_recovery_preflight_pending_changed")
         if (pending_before is None) != (pending_spool is None and pending_key is None):
             raise ValueError("canonical_named_recovery_pending_configuration_changed")
         if pending_before is not None and (pending_spool is None or pending_key is None):
@@ -209,6 +319,7 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
                     raise RuntimeError("canonical_named_recovery_pending_source_changed")
             fence.assert_quiet(conn)
             request = {"schema": _REQUEST, "approved_package_sha256": site.approved_package_sha256,
+                       "receiver_preflight_sha256": measured["measurement_sha256"],
                        "database_identity": baseline.database_identity, "source_commit_seq": source_commit,
                        "provider_boundary_sha256": provider_boundary, "anchor_sha256": anchor_hash,
                        "base_transfer_sha256": site.base_transfer_sha256,
@@ -220,9 +331,12 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
         while not response_path.exists():
             check()
             sleep(0.1)
-        reply = _opened(response_path, site.receiver_public_key)
-        if (set(reply) != {"schema", "request_sha256", "archive_closure", "pending_spool_verified", "runtime_sha256"}
+        signed_reply = load_receipt(response_path, max_bytes=_MAX_RECEIPT)
+        reply = verify_signed_recovery(signed_reply, site.receiver_public_key)
+        if (set(reply) != {"schema", "request_sha256", "archive_closure", "pending_spool_verified", "runtime_sha256",
+                           "approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256"}
                 or reply["schema"] != _RESPONSE or reply["request_sha256"] != expected_request
+                or any(reply[key] != request[key] for key in ("approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256"))
                 or not _sha256(reply["runtime_sha256"])):
             raise RuntimeError("canonical_named_recovery_response_binding_changed")
         closure = reply["archive_closure"]
@@ -234,7 +348,8 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
         with conn.begin(), _bounded_step(conn, min(5, check())):
             fence.assert_quiet(conn)
         check()
-        return {"archive_closure": closure, "pending_spool_source": source, "pending_spool_verified": reply["pending_spool_verified"]}
+        return {"archive_closure": closure, "pending_spool_source": source, "pending_spool_verified": reply["pending_spool_verified"],
+                "receiver_response": signed_reply}
 
     return recover
 
@@ -244,15 +359,18 @@ def _read_request(root, site):
     baseline = site.baseline_verification
     required = {"schema", "approved_package_sha256", "database_identity", "source_commit_seq", "provider_boundary_sha256",
                 "anchor_sha256", "base_transfer_sha256", "baseline_verification_sha256", "wal_transfer_sha256",
-                "archive_transfer_sha256", "pending", "pending_source", "expires_at"}
+                "archive_transfer_sha256", "pending", "pending_source", "expires_at", "receiver_preflight_sha256"}
+    measured = site.checked_preflight()
     if (set(request) != required or request["schema"] != _REQUEST
             or request["approved_package_sha256"] != site.approved_package_sha256
+            or request["receiver_preflight_sha256"] != measured["measurement_sha256"]
             or request["base_transfer_sha256"] != site.base_transfer_sha256
             or request["baseline_verification_sha256"] != baseline["verification_sha256"]
             or request["database_identity"] != baseline["database_identity"]
             or type(request["source_commit_seq"]) is not int or request["source_commit_seq"] < 0
             or not all(_sha256(request[key]) for key in ("provider_boundary_sha256", "anchor_sha256", "wal_transfer_sha256", "archive_transfer_sha256"))
             or type(request["expires_at"]) is not int or request["expires_at"] <= time()
+            or (request["pending"] is not None) != measured["pending_expected"]
             or (request["pending"] is None) != (request["pending_source"] is None)):
         raise ValueError("canonical_named_recovery_request_outside_approval")
     path = root / "named-recovery-anchor.json"
@@ -377,6 +495,7 @@ def recover_named_site(*, site, signing_key, pgbackrest, restic, database_key, b
     if any(left != right and (left.is_relative_to(right) or right.is_relative_to(left))
            for left, _ in destinations.values() for right, _ in destinations.values()):
         raise ValueError("canonical_named_recovery_receiver_tablespace_invalid")
+    _assert_receiver_preflight_mounts(site.checked_preflight(), root, workspace, pgdata, destinations)
     database_key, base_archive_key, suffix_key = (_private_credential(path, receiving=root, workspace=workspace)
                                                   for path in (database_key, base_archive_key, suffix_key))
     signing_key = _private_credential(signing_key, receiving=root, workspace=workspace)
@@ -457,7 +576,8 @@ def recover_named_site(*, site, signing_key, pgbackrest, restic, database_key, b
     closure = {key: value for key, value in closure.items() if key != "closure_sha256"}
     closure["receiver_runtime_sha256"] = runtime
     closure["closure_sha256"] = archive_evidence_hash(closure)
-    reply = {"schema": _RESPONSE, "request_sha256": archive_evidence_hash(request), "archive_closure": closure,
+    assignment = {key: request[key] for key in ("approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256")}
+    reply = {"schema": _RESPONSE, "request_sha256": archive_evidence_hash(request), "archive_closure": closure, **assignment,
              "pending_spool_verified": pending_verified, "runtime_sha256": runtime}
     _publish(response_path, _sign(reply, signer))
     return reply

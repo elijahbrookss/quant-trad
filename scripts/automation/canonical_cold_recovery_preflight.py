@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from functools import partial
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,7 +16,8 @@ from core.storage_mounts import inspect_filesystem
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.service.storage.incremental_recovery import _binary, _keys, _run_native
 from portal.backend.service.storage.maintenance_runtime import _unique_fields
-from scripts.automation.canonical_cold_named_recovery import NamedRecoverySite, _private_credential, _sign, _signer
+from scripts.automation import canonical_cold_named_recovery as named
+from scripts.automation.canonical_cold_named_recovery import RecoverySitePolicy, _private_credential, _sign, _signer
 from scripts.automation.stage_encrypted_recovery_handoff import (
     TransferLimits, _append_only_wal, _identity, _inventory, _manifest_entry, _private_root, _source_generation, _source_hold,
 )
@@ -29,15 +29,6 @@ from scripts.db.canonical_cold_recovery_wal_transfer import _baseline
 class ReceiverPath:
     path: Path
     filesystem_uuid: str
-
-
-def receiver_host_sha256():
-    """Fingerprint the receiver's provisioned Linux machine identity."""
-    with Path("/etc/machine-id").open("rb") as stream:
-        identity = stream.read(129).strip()
-    if not re.fullmatch(rb"[0-9a-f]{32}", identity) or identity == b"0" * 32:
-        raise ValueError("canonical_recovery_preflight_host_identity_unavailable")
-    return hashlib.sha256(b"qt.recovery.receiver.machine-id.v1\0" + identity).hexdigest()
 
 
 def _deadline(seconds):
@@ -148,7 +139,7 @@ def measure_receiver_preflight(*, site, receiver_signing_key, expected_host_sha2
                                pgbackrest, restic, database_key, archive_key, pending_expected,
                                runtime_bytes, runtime_entries, max_manifest_entries, timeout_seconds):
     """Return signed native size and filesystem evidence from the prospective independent receiver."""
-    if (not isinstance(site, NamedRecoverySite) or type(pending_expected) is not bool
+    if (not isinstance(site, RecoverySitePolicy) or type(pending_expected) is not bool
             or any(type(value) is not int or value < 0 for value in (runtime_bytes, runtime_entries))
             or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600
             or type(max_manifest_entries) is not int or not 1 <= max_manifest_entries <= 10_000_000
@@ -157,7 +148,7 @@ def measure_receiver_preflight(*, site, receiver_signing_key, expected_host_sha2
             or not isinstance(tablespaces, dict) or any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", key) for key in tablespaces)
             or not all(isinstance(path, ReceiverPath) for path in (receiving, workspace, pgdata, *tablespaces.values()))):
         raise ValueError("canonical_recovery_preflight_invalid_limits_or_roots")
-    host = receiver_host_sha256()
+    host = named.receiver_host_sha256()
     if (host != expected_host_sha256 or host == source_host_sha256
             or not re.fullmatch(r"[0-9a-f]{64}", str(source_host_sha256))):
         raise ValueError("canonical_recovery_preflight_receiver_host_not_independent")
@@ -248,30 +239,25 @@ def measure_receiver_preflight(*, site, receiver_signing_key, expected_host_sha2
                                   "entries": base["total_file_count"] + site.max_archive_objects * 64 + runtime_entries
                                   + (site.max_pending_entries if pending_expected else 0) + 64,
                                   "reserve_bytes": max(site.archive.reserve_bytes, site.pending.reserve_bytes if pending_expected else 0)}
-    by_device = {}
-    for role, need in requirements.items():
+    by_device = named._preflight_needs(observed, requirements)
+    for role in requirements:
         old = observed[role]
         fresh = _observe(mounts[role], writable=True, udev=udev)
         if any(old[key] != fresh[key] for key in ("device_id", "filesystem_uuid", "inode", "block_size")):
             raise RuntimeError("canonical_recovery_preflight_receiver_mount_changed")
-        device = by_device.setdefault(fresh["device_id"], {"filesystem_uuid": fresh["filesystem_uuid"], "roles": [],
-            "required_bytes": 0, "required_entries": 0, "reserve_bytes": 0,
-            "available_bytes": fresh["available_bytes"], "available_entries": fresh["available_entries"]})
-        device["roles"].append(role)
-        device["required_bytes"] += need["checkpoint_bytes"] + need["entries"] * fresh["block_size"]
-        device["required_entries"] += need["entries"]
-        device["reserve_bytes"] = max(device["reserve_bytes"], need["reserve_bytes"])
+        device = by_device[fresh["device_id"]]
+        if device.setdefault("filesystem_uuid", fresh["filesystem_uuid"]) != fresh["filesystem_uuid"]:
+            raise RuntimeError("canonical_recovery_preflight_receiver_mount_changed")
         for key in ("available_bytes", "available_entries"):
-            device[key] = min(device[key], fresh[key])
+            device[key] = min(device.get(key, fresh[key]), fresh[key])
     if any(item["available_bytes"] < item["required_bytes"] + item["reserve_bytes"] or item["available_entries"] < item["required_entries"]
            for item in by_device.values()):
         raise RuntimeError("canonical_recovery_preflight_receiver_capacity_insufficient")
     check()
-    report = {"schema": "qt.named_recovery_receiver_preflight.v1", "receiver_host_sha256": host,
-              "source_host_sha256": source_host_sha256, "approved_package_sha256": site.approved_package_sha256,
+    report = {"schema": named.PREFLIGHT_VERSION, "receiver_host_sha256": host,
+              "source_host_sha256": source_host_sha256, "site_policy": site.preflight_scope(), "pending_expected": pending_expected,
               "source_filesystem_uuids": sorted(set(source_filesystem_uuids)),
-              "base_transfer_sha256": site.base_transfer_sha256, "pair_receipt_sha256": site.baseline_verification["pair_receipt_sha256"],
-              "baseline_verification_sha256": site.baseline_verification["verification_sha256"], "receiver_mounts": observed,
+              "receiver_mounts": observed,
               "database_targets": database, "archive_restore_bytes": base["total_size"], "archive_restore_files": base["total_file_count"],
               "requirements": requirements, "capacity_by_device": by_device}
     return _sign(report | {"measurement_sha256": archive_evidence_hash(report)}, signer)
