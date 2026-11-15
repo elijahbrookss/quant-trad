@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import text
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_namespace import archive_namespace
 from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.cold_history import ColdHistoryReader
@@ -20,6 +21,7 @@ from portal.backend.service.storage.repos.fact_archival import PostgresCanonical
 from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.db import canonical_cold_finalize_rollback as rollback_finalizer
+from scripts.db.canonical_cold_custody_placement import assert_original_custody_members, inspect_custody_members
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_finalize_rollback import finalize_rollback_layout
 from scripts.db.canonical_cold_raw_index import RECENT_TABLESPACE_OID, inspect_raw_mapping_index_member
@@ -201,6 +203,23 @@ def _exercise_reverse_layout(scope, monkeypatch, *, raw_index_move=None):
                 finalize_rollback_layout(conn, donor, **{**args, "direct_cold": omitted})
             assert conn.scalar(text("SELECT layout_version FROM market.fact_storage_state")) == COLD_HISTORY_LAYOUT_VERSION
             if raw_index_move is not None:
+                custody_forward = scope.certificate["custody_move"]
+                custody_original = inspect_custody_members(donor)
+                assert len({member["tablespace_oid"] for member in custody_original}) == 2
+                custody_before = inspect_custody_members(conn)
+                assert {member["tablespace_oid"] for member in custody_before} == {custody_forward["target"]["tablespace_oid"]}
+                with pytest.raises(ValueError, match="custody_copy_budget_required"):
+                    finalize_rollback_layout(conn, donor, **args)
+                with pytest.raises(RuntimeError, match="custody_restore_copy_budget_exceeded"):
+                    finalize_rollback_layout(conn, donor, **args, custody_max_copy_bytes=0)
+                with pytest.raises(ValueError, match="custody_restore_forward_receipt_invalid"), conn.begin_nested():
+                    conn.exec_driver_sql("""UPDATE market.fact_storage_state SET evidence=jsonb_set(evidence,
+                        '{custody_move,receipt_hash}', to_jsonb(repeat('0', 64)))""")
+                    finalize_rollback_layout(conn, donor, **args, custody_max_copy_bytes=2 * 1024**2)
+                with pytest.raises(RuntimeError, match="custody_original_placement_changed"), conn.begin_nested():
+                    conn.exec_driver_sql("UPDATE market.fact_storage_state SET evidence=evidence - 'custody_move'")
+                    finalize_rollback_layout(conn, donor, **args)
+                args["custody_max_copy_bytes"] = 2 * 1024**2
                 raw_before = inspect_raw_mapping_index_member(conn)
                 assert raw_before["tablespace_oid"] == raw_index_move["after"]["tablespace_oid"]
                 with pytest.raises(ValueError, match="raw_index_copy_budget_required"):
@@ -211,15 +230,21 @@ def _exercise_reverse_layout(scope, monkeypatch, *, raw_index_move=None):
                     conn.exec_driver_sql("UPDATE market.fact_storage_state SET evidence=evidence - 'raw_mapping_index'")
                     finalize_rollback_layout(conn, donor, **args)
                 args["raw_index_max_copy_bytes"] = 2 * 1024**2
+                with pytest.raises(ValueError, match="finalize_rollback_invalid_boundary"):
+                    finalize_rollback_layout(conn, donor, **(args | {"timeout_seconds": MAX_MIGRATION_SECONDS + 1}))
+                args["timeout_seconds"] = 121
                 with monkeypatch.context() as patch:
                     def fail_reader(*args, **kwargs):
+                        assert 1 <= kwargs["timeout_seconds"] <= 90
                         assert inspect_raw_mapping_index_member(conn)["tablespace_oid"] == RECENT_TABLESPACE_OID
+                        assert_original_custody_members(conn, custody_original)
                         raise RuntimeError("injected restored reader failure")
 
                     patch.setattr(rollback_finalizer, "check_witnesses", fail_reader)
                     with pytest.raises(RuntimeError, match="injected restored reader failure"):
                         finalize_rollback_layout(conn, donor, **args)
                 assert inspect_raw_mapping_index_member(conn) == raw_before
+                assert inspect_custody_members(conn) == custody_before
                 assert conn.scalar(text("SELECT layout_version FROM market.fact_storage_state")) == COLD_HISTORY_LAYOUT_VERSION
             result = finalize_rollback_layout(conn, donor, **args)
             if raw_index_move is not None:
@@ -229,6 +254,11 @@ def _exercise_reverse_layout(scope, monkeypatch, *, raw_index_move=None):
                 assert inverse["after"] == inspect_raw_mapping_index_member(conn)
                 assert inverse["after"]["tablespace_oid"] == RECENT_TABLESPACE_OID
                 assert inverse["after"]["index_oid"] == raw_index_move["before"]["index_oid"]
+                custody_inverse = result["restored_custody_placement"]
+                assert custody_inverse["forward_receipt_hash"] == custody_forward["receipt_hash"]
+                assert custody_inverse["before"] == custody_before
+                assert custody_inverse["after"] == assert_original_custody_members(conn, custody_original)
+                assert custody_inverse["copy_bytes"] > 0
             if legacy_days:
                 assert result["legacy_relation_mapping"]["original_oid"] != result["legacy_relation_mapping"]["restored_oid"]
             else:
@@ -245,6 +275,7 @@ def _exercise_reverse_layout(scope, monkeypatch, *, raw_index_move=None):
             assert check.exec_driver_sql("SELECT last_value,is_called FROM market.fact_commit_seq").one() == (gap, True)
             if raw_index_move is not None:
                 assert inspect_raw_mapping_index_member(check) == persisted["restored_raw_mapping_index"]["after"]
+                assert inspect_custody_members(check) == persisted["restored_custody_placement"]["after"]
             return "original"
 
         reopen_database_fence(fence, control, expected_outcome="original", read_outcome=original_outcome, record=lambda *_: None)

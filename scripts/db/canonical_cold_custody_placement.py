@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import PurePosixPath
+from time import monotonic
 
 from sqlalchemy import text
 
 from market_data.fact_archive import archive_evidence_hash
-from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES
+from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES, COLD_HISTORY_LAYOUT_VERSION
 from scripts.db.archive_reference_v2_placement import _definition
+from scripts.db.canonical_cold_database_fence import DatabaseFence
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
@@ -47,7 +49,8 @@ def _target(conn, expected_database, target_id):
     return result
 
 
-def _members(conn):
+def inspect_custody_members(conn):
+    """Read exact physical members, including on an unregistered old-layout donor."""
     rows = conn.execute(text("""
         WITH owners AS (
             SELECT c.oid,c.relname,c.reltoastrelid
@@ -110,7 +113,7 @@ def _require_placement(members, target):
 def inspect_custody_placement(conn, *, expected_database, target_id):
     """Read the exact current catalog binding and one copy's allocated bytes."""
     target = _target(conn, expected_database, target_id)
-    members = _members(conn)
+    members = inspect_custody_members(conn)
     return {"database_identity": expected_database, "target": target, "relation_oids": _relation_oids(members),
             "members": members, "placement_hash": custody_placement_hash(members),
             "copy_bytes": sum(row["bytes"] for row in members
@@ -160,6 +163,18 @@ def _logical_members(members):
             for row in members]
 
 
+def _placed_members(members):
+    return [{key: value for key, value in row.items() if key not in {"bytes", "filenode"}} for row in members]
+
+
+def assert_original_custody_members(conn, original):
+    """Require the donor's relation identity and effective tablespace for every member."""
+    observed = inspect_custody_members(conn)
+    if _placed_members(observed) != _placed_members(original):
+        raise RuntimeError("canonical_custody_original_placement_changed")
+    return observed
+
+
 def move_custody_tablespace(conn, *, expected_database, target_id, expected_tablespace_oid,
                           expected_relation_oids, max_copy_bytes, timeout_seconds, source_placement_hash=None):
     """Move only the reviewed custody tables in a caller-owned transaction.
@@ -184,7 +199,7 @@ def move_custody_tablespace(conn, *, expected_database, target_id, expected_tabl
             raise RuntimeError("canonical_custody_move_requires_native_history_tablespace")
         for name in COLD_CUSTODY_TABLE_NAMES:
             conn.exec_driver_sql(f"LOCK TABLE ONLY market.{name} IN ACCESS EXCLUSIVE MODE NOWAIT")
-        before = _members(conn)
+        before = inspect_custody_members(conn)
         _require_scope(before, target, expected_relation_oids, expected_tablespace_oid)
         if source_placement_hash is not None and custody_placement_hash(before) != source_placement_hash:
             raise RuntimeError("canonical_custody_source_placement_changed")
@@ -210,7 +225,7 @@ def move_custody_tablespace(conn, *, expected_database, target_id, expected_tabl
         current_target = _target(conn, expected_database, target_id)
         if current_target != target:
             raise RuntimeError("canonical_custody_registered_history_binding_changed")
-        after = _members(conn)
+        after = inspect_custody_members(conn)
         _require_scope(after, target, expected_relation_oids, expected_tablespace_oid)
         _require_placement(after, target)
         if _logical_members(after) != _logical_members(before) or _definitions(conn) != properties:
@@ -219,3 +234,80 @@ def move_custody_tablespace(conn, *, expected_database, target_id, expected_tabl
             raise RuntimeError("canonical_custody_physical_bytes_changed")
         return {"database_identity": expected_database, "target": target, "relation_oids": _relation_oids(after),
                 "copy_bytes": copy_bytes, "reused": not moving, "before": before, "after": after}
+
+
+def restore_custody_tablespace(conn, *, fence, expected_database, original, forward_receipt,
+                             expected_forward_hash, max_copy_bytes, timeout_seconds):
+    """Restore the donor's proven native placement on a fenced latest cold clone."""
+    if (not isinstance(fence, DatabaseFence) or fence.connection is not conn or not conn.in_transaction()
+            or fence.database.get("allow_connections") is not False
+            or conn.get_execution_options().get("isolation_level") == "AUTOCOMMIT"):
+        raise ValueError("canonical_custody_restore_requires_live_closed_database_fence")
+    if type(max_copy_bytes) is not int or not 0 <= max_copy_bytes <= 2**63 - 1:
+        raise ValueError("canonical_custody_invalid_copy_budget")
+    if (not isinstance(forward_receipt, dict) or set(forward_receipt) != {
+            "database_identity", "target", "relation_oids", "copy_bytes", "reused", "before", "after", "receipt_hash",
+            } or forward_receipt["receipt_hash"] != expected_forward_hash
+            or archive_evidence_hash({key: value for key, value in forward_receipt.items() if key != "receipt_hash"})
+            != expected_forward_hash or forward_receipt["database_identity"] != expected_database
+            or not isinstance(forward_receipt["target"], dict)
+            or any(not isinstance(forward_receipt[key], list) or not 1 <= len(forward_receipt[key]) <= 64
+                   or any(not isinstance(member, dict) for member in forward_receipt[key]) for key in ("before", "after"))):
+        raise ValueError("canonical_custody_restore_forward_receipt_invalid")
+    prior = forward_receipt["before"]
+    if (_placed_members(prior) != _placed_members(original)
+            or _logical_members(prior) != _logical_members(forward_receipt["after"])
+            or forward_receipt["relation_oids"] != _relation_oids(original)):
+        raise RuntimeError("canonical_custody_restore_donor_placement_changed")
+
+    with _bounded_step(conn, timeout_seconds) as limit:
+        limit(fence.deadline - monotonic())
+        fence.assert_quiet(conn)
+        if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))")):
+            raise RuntimeError("canonical_custody_storage_busy")
+        conn.exec_driver_sql("LOCK TABLE market.fact_storage_state, public.portal_storage_targets, "
+                             "public.portal_storage_header_tablespaces IN SHARE MODE NOWAIT")
+        if conn.exec_driver_sql("SELECT layout_version,state FROM market.fact_storage_state LIMIT 2").all() != [
+                (COLD_HISTORY_LAYOUT_VERSION, "ready")]:
+            raise RuntimeError("canonical_custody_restore_authority_changed")
+        for name in COLD_CUSTODY_TABLE_NAMES:
+            conn.exec_driver_sql(f"LOCK TABLE ONLY market.{name} IN ACCESS EXCLUSIVE MODE NOWAIT")
+        target_id = forward_receipt["target"].get("target_id")
+        target = _target(conn, expected_database, target_id)
+        if target != forward_receipt["target"]:
+            raise RuntimeError("canonical_custody_restore_registered_target_changed")
+        before = inspect_custody_members(conn)
+        if _placed_members(before) != _placed_members(forward_receipt["after"]):
+            raise RuntimeError("canonical_custody_restore_forward_placement_changed")
+        _require_placement(before, target)
+
+        history = target["tablespace_oid"]
+        destinations = {1663: "pg_default", history: target["tablespace_name"]}
+        prior_spaces = {row["oid"]: row["tablespace_oid"] for row in original}
+        heap_spaces = {row["relation"]: row["tablespace_oid"] for row in original if row["member_kind"] == "heap"}
+        if any(space not in destinations for space in prior_spaces.values()):
+            raise RuntimeError("canonical_custody_restore_original_tablespace_requires_review")
+        if any(row["member_kind"] in {"toast", "toast_index"}
+               and row["tablespace_oid"] != heap_spaces[row["relation"]] for row in original):
+            raise RuntimeError("canonical_custody_restore_mixed_toast_placement_requires_review")
+        moving = [row for row in before if prior_spaces[row["oid"]] != history]
+        copy_bytes = sum(row["bytes"] for row in moving)
+        if copy_bytes > max_copy_bytes:
+            raise RuntimeError(f"canonical_custody_restore_copy_budget_exceeded: bytes={copy_bytes} limit={max_copy_bytes}")
+        properties = _definitions(conn)
+        quote = conn.dialect.identifier_preparer.quote_identifier
+        for row in moving:
+            kind = row["member_kind"]
+            if kind in {"heap", "index"}:
+                relation = quote(row["schema"]) + "." + quote(row["name"])
+                destination = quote(destinations[prior_spaces[row["oid"]]])
+                conn.exec_driver_sql(f"ALTER {'TABLE' if kind == 'heap' else 'INDEX'} {relation} SET TABLESPACE {destination}")
+        after = assert_original_custody_members(conn, original)
+        if (_definitions(conn) != properties or _target(conn, expected_database, target_id) != target
+                or [row["bytes"] for row in before] != [row["bytes"] for row in after]):
+            raise RuntimeError("canonical_custody_restore_result_changed")
+        fence.assert_quiet(conn)
+    result = {"schema": "qt.canonical_cold_custody_restore.v1", "database_identity": expected_database,
+              "target": target, "before": before, "after": after, "copy_bytes": copy_bytes,
+              "forward_receipt_hash": expected_forward_hash}
+    return result | {"receipt_hash": archive_evidence_hash(result)}

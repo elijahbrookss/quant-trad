@@ -8,6 +8,7 @@ from time import monotonic
 
 from sqlalchemy import text
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_namespace import archive_namespace
 from market_data.cold_history import ColdHistoryReader
 from market_data.fact_archive import archive_evidence_hash
@@ -17,6 +18,9 @@ from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION, assert_fact_storage_contract, fact_partition_name
 from portal.backend.service.storage.recovery_copies import _snapshot_layout
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
+from scripts.db.canonical_cold_custody_placement import (
+    assert_original_custody_members, inspect_custody_members, restore_custody_tablespace,
+)
 from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index_member, restore_raw_mapping_index
 from scripts.db.canonical_cold_restore_references import _database_identity, _require_disposable_fence, restore_original_reference_bindings
 from scripts.db.canonical_cold_reverse_allocator import capture_allocator
@@ -62,29 +66,36 @@ def _restore_raw_index(conn, *, fence, identity, original, activation, max_copy_
 
 def finalize_rollback_layout(conn, donor, *, fence, allocator, original, original_hash, legacy, payloads,
                              direct_cold, witness, witness_hash, store, dated=(), recurring=(),
-                             raw_index_max_copy_bytes=None, timeout_seconds=120):
+                             raw_index_max_copy_bytes=None, custody_max_copy_bytes=None, timeout_seconds=120):
     """Restore the original read authority after exact data and retention reconstruction.
 
     The clone writer and archive fences stay held through certificate
-    publication and read acceptance. An activated raw index move requires a
-    fresh byte limit for the live index copy. The caller owns restart and all
-    host-level decisions.
+    publication and read acceptance. Activated raw index and custody moves
+    require fresh byte limits. The caller owns restart and host-level decisions.
     """
     _require_disposable_fence(conn, fence)
-    if conn is donor or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120:
+    if conn is donor or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS:
         raise ValueError("canonical_cold_finalize_rollback_invalid_boundary")
+    deadline = min(monotonic() + timeout_seconds, fence.deadline)
     donor_identity = original["database"]
     _require_snapshot(donor, donor_identity)
     assert_fact_storage_contract(donor)
     donor_legacy_end = assert_fact_header_legacy_contract(donor)
     original_certificate = _snapshot_layout(donor)
     original_raw_index = inspect_raw_mapping_index_member(donor)
+    original_custody = inspect_custody_members(donor)
     if original_certificate["layout_version"] != FACT_STORAGE_LAYOUT_VERSION or archive_evidence_hash(witness) != witness_hash:
         raise RuntimeError("canonical_cold_finalize_rollback_original_evidence_changed")
 
     with archive_namespace(store.root, exclusive=True) as check_archive, _bounded_step(conn, timeout_seconds) as limit:
-        limit(max(0, fence.deadline - monotonic()))
+        limit(max(0, deadline - monotonic()))
         fence.assert_quiet(conn)
+
+        def check_content():
+            limit(deadline - monotonic())
+            fence.check_clock()
+            check_archive()
+
         identity = _database_identity(conn)
         cold = conn.execute(text("""
             SELECT layout_version,evidence FROM market.fact_storage_state WHERE state='ready' AND completed_at IS NOT NULL
@@ -173,7 +184,26 @@ def finalize_rollback_layout(conn, donor, *, fence, allocator, original, origina
         if capture_allocator(conn, fence=fence, layout=COLD_HISTORY_LAYOUT_VERSION) != allocator:
             raise RuntimeError("canonical_cold_finalize_rollback_candidate_allocator_changed")
         verify_candidate_only_pages(conn, reader=ColdHistoryReader(store), receipt=direct_cold,
-                                    initial=cold.evidence["source_commit_seq"], check=lambda: (fence.check_clock(), check_archive()))
+                                    initial=cold.evidence["source_commit_seq"], check=check_content)
+        forward_custody = cold.evidence.get("custody_move")
+        custody = None
+        if forward_custody is None:
+            assert_original_custody_members(conn, original_custody)
+        else:
+            if custody_max_copy_bytes is None:
+                raise ValueError("canonical_cold_finalize_rollback_custody_copy_budget_required")
+            binding = cold.evidence.get("custody")
+            if (not isinstance(forward_custody, dict) or not isinstance(forward_custody.get("target"), dict)
+                    or binding != {"target_id": forward_custody["target"].get("target_id"),
+                                   "tablespace_oid": forward_custody["target"].get("tablespace_oid"),
+                                   "relation_oids": forward_custody.get("relation_oids")}):
+                raise ValueError("canonical_cold_finalize_rollback_custody_receipt_invalid")
+            custody = restore_custody_tablespace(
+                conn, fence=fence, expected_database=f"{identity['system_identifier']}/{identity['database_oid']}",
+                original=original_custody, forward_receipt=forward_custody,
+                expected_forward_hash=forward_custody.get("receipt_hash"),
+                max_copy_bytes=custody_max_copy_bytes, timeout_seconds=timeout_seconds,
+            )
         raw_index = _restore_raw_index(conn, fence=fence, identity=identity, original=original_raw_index,
                                        activation=cold.evidence, max_copy_bytes=raw_index_max_copy_bytes,
                                        timeout_seconds=timeout_seconds)
@@ -190,6 +220,8 @@ def finalize_rollback_layout(conn, donor, *, fence, allocator, original, origina
         }
         if raw_index is not None:
             evidence["restored_raw_mapping_index"] = raw_index
+        if custody is not None:
+            evidence["restored_custody_placement"] = custody
         written = conn.execute(text("""
             UPDATE market.fact_storage_state SET layout_version=:layout,completed_at=clock_timestamp(),
                 evidence=CAST(:evidence AS jsonb) WHERE layout_version=:prior
@@ -202,7 +234,13 @@ def finalize_rollback_layout(conn, donor, *, fence, allocator, original, origina
         _assert_original_raw_index(final_raw_index, original_raw_index)
         if raw_index is not None and final_raw_index != raw_index["after"]:
             raise RuntimeError("canonical_cold_finalize_rollback_raw_index_restore_changed")
-        if (check_witnesses(conn, witness, store=store, timeout_seconds=timeout_seconds) != witness_hash
+        final_custody = assert_original_custody_members(conn, original_custody)
+        if custody is not None and final_custody != custody["after"]:
+            raise RuntimeError("canonical_cold_finalize_rollback_custody_restore_changed")
+        witness_seconds = min(600, int(deadline - monotonic()))
+        if witness_seconds < 1:
+            raise TimeoutError("canonical_cold_finalize_rollback_witness_deadline")
+        if (check_witnesses(conn, witness, store=store, timeout_seconds=witness_seconds) != witness_hash
                 or PostgresMarketDataRepository._current_commit_seq_with_session(conn) != allocator.visible_commit):
             raise RuntimeError("canonical_cold_finalize_rollback_content_changed")
         restored = capture_allocator(conn, fence=fence, layout=FACT_STORAGE_LAYOUT_VERSION)

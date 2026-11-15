@@ -13,7 +13,7 @@ from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.contracts import DatasetSeriesRequest
 from market_data.fact_archive import archive_evidence_hash
-from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES, COLD_HISTORY_LAYOUT_VERSION
+from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
 from portal.backend.db.fact_header_legacy_schema import assert_fact_header_legacy_contract
 from portal.backend.db.fact_storage_schema import fact_partition_name
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
@@ -24,6 +24,7 @@ from scripts.db.canonical_cold_database_fence import close_database_fence, reope
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, finalize_identity_suffix, prepare_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
+from scripts.db.canonical_cold_custody_placement import inspect_custody_members, inspect_custody_placement
 from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index_member
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
 from scripts.db.canonical_cold_restore_legacy import measure_legacy_donor, restore_legacy_headers
@@ -95,6 +96,9 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
                 conn.execute(text(f"CREATE TABLESPACE {raw_tablespace} LOCATION :path"), {"path": tablespace_path})
             with engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE market.raw_archive_record_mappings SET TABLESPACE {raw_tablespace}")
+                retained = next(row for row in inspect_custody_members(conn) if row["member_kind"] == "index")
+                index_name = conn.dialect.identifier_preparer.quote_identifier(retained["name"])
+                conn.exec_driver_sql(f"ALTER INDEX market.{index_name} SET TABLESPACE {raw_tablespace}")
                 member = inspect_raw_mapping_index_member(conn)
                 raw_scope = {"target_id": "rollback-fixture-history", "tablespace_oid": member["table_tablespace_oid"],
                              "table_oid": member["table_oid"], "index_oid": member["index_oid"],
@@ -105,7 +109,9 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
             conn.exec_driver_sql(f"CREATE DATABASE {donor_name} TEMPLATE {template}")
         with engine.begin() as conn:
             _configure_fixture_catalog(conn, token, candidate_store.root)
+            custody_target = "activation-fixture"
             if raw_scope is not None:
+                custody_target = raw_scope["target_id"]
                 conn.execute(text("""
                     INSERT INTO public.portal_storage_targets(id,label,filesystem_uuid,root,medium,roles)
                     VALUES ('rollback-fixture-history','Rollback fixture history','rollback-fixture-device',
@@ -115,9 +121,7 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
                     INSERT INTO public.portal_storage_header_tablespaces(database_identity,target_id,tablespace_oid,binding)
                     VALUES (:identity,'rollback-fixture-history',:oid,'{}')
                 """), {"identity": token, "oid": raw_scope["tablespace_oid"]})
-            custody_tablespace = conn.scalar(text("SELECT dattablespace::bigint FROM pg_database WHERE datname=current_database()"))
-            custody_oids = {table: conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
-                {"name": f"market.{table}"}) for table in COLD_CUSTODY_TABLE_NAMES}
+            custody = inspect_custody_placement(conn, expected_database=token, target_id=custody_target)
             payload = fact_partition_name(day)
             payload_children = {} if state == "reclaimed" else {payload: conn.scalar(text("""
                 SELECT to_regclass(:name)::oid::bigint
@@ -144,10 +148,14 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
                      "approved_package_hash": "a" * 64, "target_database": target_identity,
                      "source_database": target_identity, "audit_set_hash": audit["audit_set_hash"],
                      "source_commit_seq": source_commit, "loaded_inventory_hash": audit["loaded_inventory_hash"],
-                     "payload_children": payload_children, "custody_target_id": "activation-fixture",
-                     "custody_tablespace_oid": custody_tablespace, "custody_relation_oids": custody_oids,
+                     "payload_children": payload_children, "custody_target_id": custody_target,
+                     "custody_tablespace_oid": custody["target"]["tablespace_oid"],
+                     "custody_relation_oids": custody["relation_oids"],
                      "identity_registry": {key: identity[key] for key in ("old_oid", "new_oid")}}
         execution["raw_mapping_index"] = raw_scope if native_raw_index else _stub_raw_index_case(monkeypatch)
+        if native_raw_index:
+            execution["custody_move"] = {"source_placement_hash": custody["placement_hash"],
+                                         "max_copy_bytes": 2 * 1024**2, "timeout_seconds": 15}
         outcome = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
         with _fence_connections(storage) as (conn, control):
             with conn.begin():
@@ -179,6 +187,14 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
             with engine.begin() as conn:
                 conn.exec_driver_sql("ALTER TABLE market.raw_archive_record_mappings SET TABLESPACE pg_default")
                 conn.exec_driver_sql("ALTER INDEX market.pk_market_raw_archive_record_mapping SET TABLESPACE pg_default")
+                tablespace_oid = conn.scalar(text("SELECT oid FROM pg_tablespace WHERE spcname=:name"),
+                                             {"name": raw_tablespace})
+                quote = conn.dialect.identifier_preparer.quote_identifier
+                for row in inspect_custody_members(conn):
+                    kind = row["member_kind"]
+                    if row["tablespace_oid"] == tablespace_oid and kind in {"heap", "index"}:
+                        relation = f"{quote(row['schema'])}.{quote(row['name'])}"
+                        conn.exec_driver_sql(f"ALTER {'TABLE' if kind == 'heap' else 'INDEX'} {relation} SET TABLESPACE pg_default")
         with admin.connect() as conn:
             conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {donor_name} WITH (FORCE)")
             if raw_tablespace is not None:
