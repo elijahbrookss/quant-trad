@@ -70,8 +70,8 @@ def load_private_clone(proof_path, proof_sha256, dsn):
     return PrivateClone(url, proof, endpoint)
 
 
-def assert_promoted_clone(session, clone):
-    """Recheck the promoted copy, on the connection that will use it."""
+def assert_promoted_postmaster(session, clone):
+    """Recheck the physical identity of the promoted private database."""
     proof = clone.proof
     server = session.execute(text("""
         SELECT system_identifier::text || '/' ||
@@ -95,8 +95,15 @@ def assert_promoted_clone(session, clone):
                 "role": proof["role"], "role_oid": proof["role_oid"], "started": proof["postmaster_epoch"],
                 "timeline": 2, "replay_lsn": proof["replay_lsn"], "sockets": str(clone.socket.parent),
                 "pgdata": str(root / "pgdata"), "tablespace": str(root / "history"), "isolated": True}
-    if (server != expected or not _matches_inode(clone.socket, proof, "socket_inode", expected_type=stat.S_ISSOCK)
-            or _snapshot_layout(session) != proof["storage_layout"]):
+    if server != expected or not _matches_inode(clone.socket, proof, "socket_inode", expected_type=stat.S_ISSOCK):
+        raise RuntimeError("private_seal_promoted_clone_changed")
+
+
+def assert_promoted_clone(session, clone):
+    """Recheck the promoted copy still contains its original layout and commit."""
+    assert_promoted_postmaster(session, clone)
+    proof = clone.proof
+    if _snapshot_layout(session) != proof["storage_layout"]:
         raise RuntimeError("private_seal_promoted_clone_changed")
     if PostgresMarketDataRepository._current_commit_seq_with_session(session) != proof["accepted_commit_seq"]:
         raise RuntimeError("private_seal_clone_watermark_changed")

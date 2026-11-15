@@ -45,9 +45,28 @@ def _check_wal(sample, limits):
         raise RuntimeError("private_cold_activation_wal_budget_exceeded")
 
 
-@contextmanager
 def supervise_private_activation(conn, remaining_seconds, *, clone, placement, execution, limits, pg_controldata):
     """Supervise native moves and acceptance inside the held writer transaction."""
+    scope = execution["raw_mapping_index"]
+    custody = execution.get("custody_move")
+    if scope["target_id"] != placement["history_target_id"] or execution["custody_target_id"] != placement["history_target_id"]:
+        raise ValueError("private_cold_activation_capacity_target_changed")
+    copies = scope["max_copy_bytes"] + (0 if custody is None else custody["max_copy_bytes"])
+    return _supervise_private_transaction(conn, remaining_seconds, clone=clone, placement=placement, limits=limits,
+        pg_controldata=pg_controldata, relation_bytes=copies, operation="activation")
+
+
+def supervise_private_rollback(conn, remaining_seconds, *, clone, placement, limits, pg_controldata, relation_bytes):
+    """Supervise the native inverse copy and WAL on the same device."""
+    if type(relation_bytes) is not int or not 1 <= relation_bytes < 2**63:
+        raise ValueError("private_cold_rollback_invalid_relation_allocation")
+    return _supervise_private_transaction(conn, remaining_seconds, clone=clone, placement=placement, limits=limits,
+        pg_controldata=pg_controldata, relation_bytes=relation_bytes, operation="rollback")
+
+
+@contextmanager
+def _supervise_private_transaction(conn, remaining_seconds, *, clone, placement, limits,
+                                   pg_controldata, relation_bytes, operation):
     if (not isinstance(limits, SharedHddActivationLimits) or not conn.in_transaction()
             or not isinstance(pg_controldata, Path) or not pg_controldata.is_absolute() or not pg_controldata.is_file()):
         raise ValueError("private_cold_activation_capacity_unbound")
@@ -57,13 +76,9 @@ def supervise_private_activation(conn, remaining_seconds, *, clone, placement, e
     conn.exec_driver_sql("SET LOCAL max_parallel_maintenance_workers=0")
     record, target, resources = observe_private_hdd(
         conn, clone=clone, placement=placement, pg_controldata=pg_controldata, deadline=deadline,
+        require_original_layout=operation == "activation",
     )
-    scope = execution["raw_mapping_index"]
-    custody = execution.get("custody_move")
-    if scope["target_id"] != target.target_id or execution["custody_target_id"] != target.target_id:
-        raise ValueError("private_cold_activation_capacity_target_changed")
-    copies = scope["max_copy_bytes"] + (0 if custody is None else custody["max_copy_bytes"])
-    allowance = copies + limits.max_wal_bytes + 1024 * limits.temp_file_limit_kib + limits.other_transaction_bytes
+    allowance = relation_bytes + limits.max_wal_bytes + 1024 * limits.temp_file_limit_kib + limits.other_transaction_bytes
     minimum = limits.min_free_bytes + record.reserved_bytes + record.auxiliary_reserved_bytes
     before = resources.capacity[target.target_id]
     floor = shared_hdd_floor(before.available_bytes, minimum=minimum, allowance=allowance)
@@ -91,7 +106,7 @@ def supervise_private_activation(conn, remaining_seconds, *, clone, placement, e
         watch.stop(conn)
     if watch.failure is not None:
         raise RuntimeError(f"private_cold_activation_capacity_failed: {watch.failure}")
-    seen.update(schema="qt.private_canonical_cold_activation_capacity.v1", target_id=target.target_id,
+    seen.update(schema=f"qt.private_canonical_cold_{operation}_capacity.v1", target_id=target.target_id,
                 device_id=before.device_id, filesystem_uuid=before.filesystem_uuid,
                 elapsed_seconds=monotonic() - began, before_available_bytes=before.available_bytes,
                 after_available_bytes=after.available_bytes, floor_bytes=floor, min_free_bytes=minimum,

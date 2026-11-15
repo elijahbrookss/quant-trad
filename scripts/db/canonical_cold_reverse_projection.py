@@ -9,6 +9,7 @@ from typing import Mapping
 
 from sqlalchemy import insert, text
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_namespace import archive_namespace
 from market_data.cold_history import ColdHistoryReader
 from market_data.fact_archive import FactArchiveManifest, archive_evidence_hash
@@ -190,13 +191,13 @@ def restore_candidate_only_pages(conn, *, fence, expected_database, expected_exe
     if (type(expected_source_commit) is not int or expected_source_commit < 1
             or type(max_pages) is not int or not 1 <= max_pages <= 16_384
             or type(max_bytes) is not int or not 1 <= max_bytes <= 128 * 1024**3
-            or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120):
+            or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS):
         raise ValueError("reverse projection candidate page budget invalid")
 
     with archive_namespace(reader.object_store.root, exclusive=True) as check_archive, _bounded_step(conn, timeout_seconds) as bound:
         bound(max(0, fence.deadline - monotonic()))
         fence.assert_quiet(conn)
-        _layout_guard(conn, ReversePage("", "", expected_source_commit, expected_database), timeout_seconds * 1000,
+        _layout_guard(conn, ReversePage("", "", expected_source_commit, expected_database), min(timeout_seconds, 120) * 1000,
                       layout=COLD_HISTORY_LAYOUT_VERSION)
         certificate = conn.scalar(text("SELECT evidence FROM market.fact_storage_state"))
         initial = certificate.get("source_commit_seq") if isinstance(certificate, dict) else None

@@ -40,7 +40,9 @@ from scripts.db.canonical_cold_load import TargetDatabase, _load_checkpoint, loa
 from scripts.db import canonical_cold_load
 from scripts.db.canonical_cold_load_pressure import CatalogLoadLimits, LoadPressure, supervise_page
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
-from scripts.db.canonical_cold_private_activation_capacity import SharedHddActivationLimits, supervise_private_activation
+from scripts.db.canonical_cold_private_activation_capacity import (
+    SharedHddActivationLimits, supervise_private_activation, supervise_private_rollback,
+)
 from scripts.db.canonical_cold_private_load import SharedHddLoadLimits, supervise_private_page
 from scripts.db.prepare_canonical_cold_catalog import prepare_catalog
 from tests.test_market_data.test_canonical_cold_migration import DAY, LIMITS
@@ -403,6 +405,8 @@ def test_private_catalog_load_checks_one_native_device_and_combines_page_allocat
     def measured_boundary(conn, **values):
         # This fixture tests the native resource/supervision boundary. Separate
         # tests exercise the promoted-clone and mounted archive proof.
+        if "require_original_layout" in values:
+            assert values.pop("require_original_layout") is False
         assert values == {"clone": clone, "placement": placement, "require_writable": True}
         checks.append(conn.scalar(text("SELECT current_database()")))
 
@@ -456,3 +460,11 @@ def test_private_catalog_load_checks_one_native_device_and_combines_page_allocat
     assert evidence["min_free_bytes"] == 4096
     assert evidence["after_wal"]["generated_bytes"] > 1
     assert evidence["device_id"] == device_id
+    with engine.begin() as conn, supervise_private_rollback(
+        conn, lambda: 30, clone=clone, placement=placement, limits=caps, relation_bytes=16 << 20,
+        pg_controldata=Path("/usr/lib/postgresql/15/bin/pg_controldata"),
+    ) as rollback_evidence:
+        conn.exec_driver_sql("DROP TABLE private_capacity_wal_probe")
+    assert rollback_evidence["shared_allowance_bytes"] == evidence["shared_allowance_bytes"]
+    assert rollback_evidence["schema"] == "qt.private_canonical_cold_rollback_capacity.v1"
+    assert rollback_evidence["after_wal"]["generated_bytes"] > 1

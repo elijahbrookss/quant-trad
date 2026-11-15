@@ -9,6 +9,7 @@ from time import monotonic
 
 from sqlalchemy import text
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_namespace import archive_namespace
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from market_data.fact_archive import archive_evidence_hash
@@ -215,7 +216,7 @@ def capture_original_payload_day(donor, *, donor_identity, day, expected_header_
     if (type(day) is not date or type(expected_header_oid) is not int or expected_header_oid <= 0
             or type(expected_source_commit_seq) is not int or expected_source_commit_seq < 0):
         raise ValueError("canonical_cold_recovery_payload_scope_invalid")
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS:
         raise ValueError("canonical_cold_recovery_payload_timeout_invalid")
     deadline = monotonic() + timeout_seconds
     if not donor.in_transaction():
@@ -263,7 +264,7 @@ def restore_legacy_payload_day(target, donor, *, fence, original, expected_origi
     _require_disposable_fence(target, fence)
     _limits(max_rows, max_bytes)
     if (not donor.in_transaction() or type(timeout_seconds) is not int
-            or not 1 <= timeout_seconds <= 3600):
+            or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS):
         raise ValueError("canonical_cold_recovery_payload_restore_scope_invalid")
     expected_target = legacy_header_receipt["target_database"]
     if (target is donor or original["version"] != VERSION

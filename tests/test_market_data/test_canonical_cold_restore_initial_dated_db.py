@@ -255,7 +255,7 @@ def initially_dated_rollback_clone(storage, tmp_path, monkeypatch, request):
         yield SimpleNamespace(
             storage=storage, source=source, donor=donor, target_identity=target_identity, donor_identity=donor_identity,
             donor_scope=donor_scope, audit=audit, forward_receipts=forward, candidate_store=candidate_store,
-            donor_store=donor_store, source_commit=source_commit, dated_days=(day,), end_day=end,
+            donor_store=donor_store, source_commit=source_commit, dated_days=(day,), end_day=end, audit_receipts=receipts,
             private_args=private_args,
             frozen=frozen, expected_frozen=expected_frozen, expected_latest=expected_latest, selection=selection,
             checkpoint=checkpoint, state="sealed" if state in {"empty", "partial", "private-sealed"} else state,

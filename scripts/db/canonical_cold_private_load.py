@@ -64,10 +64,11 @@ def shared_hdd_floor(available, *, minimum, allowance):
     return available - allowance
 
 
-def observe_private_hdd(conn, *, clone, placement, pg_controldata, deadline):
+def observe_private_hdd(conn, *, clone, placement, pg_controldata, deadline, require_original_layout=True):
     from scripts.db.canonical_cold_private_placement import assert_private_placement
 
-    assert_private_placement(conn, clone=clone, placement=placement, require_writable=True)
+    options = {} if require_original_layout else {"require_original_layout": False}
+    assert_private_placement(conn, clone=clone, placement=placement, require_writable=True, **options)
     target_id = placement["history_target_id"]
     targets_table = StorageTargetRecord.__table__
     record = conn.execute(select(targets_table).where(targets_table.c.id == target_id)).one_or_none()

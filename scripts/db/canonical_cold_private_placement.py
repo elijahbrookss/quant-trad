@@ -27,7 +27,7 @@ from scripts.automation.verify_canonical_recovery_archive import _sha256
 from scripts.ci.seed_private_candidate_archive import _VERSION as _SEED_VERSION
 from scripts.ci.verify_benchmark_clone_boundary import _read_receipt
 from scripts.db.canonical_cold_custody_placement import _target
-from scripts.db.canonical_cold_private_seal import assert_promoted_clone, load_private_clone
+from scripts.db.canonical_cold_private_seal import assert_promoted_clone, assert_promoted_postmaster, load_private_clone
 
 
 SCHEMA = "qt.private_rehearsal_placement.v1"
@@ -158,10 +158,11 @@ def load_private_placement(path, receipt_sha256, clone, *, clone_proof_sha256):
     return receipt
 
 
-def assert_private_placement(conn, *, clone, placement, require_writable=False):
+def assert_private_placement(conn, *, clone, placement, require_writable=False, require_original_layout=True):
     """Revalidate the private physical and SQL bindings in the caller's transaction."""
     _clone_root(clone)
-    assert_promoted_clone(conn, clone)
+    check = assert_promoted_clone if require_original_layout else assert_promoted_postmaster
+    check(conn, clone)
     return _bound_state(conn, clone, placement, require_writable=require_writable)
 
 
