@@ -3,12 +3,13 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import stat
 
 from market_data.fact_archive import archive_evidence_hash
 from scripts.automation.canonical_cold_receiver_ready import verify_replayed_checkpoint_baseline
 from scripts.automation.stage_encrypted_recovery_handoff import _file, _identity, _private_root, _safe_member, _stamp
-from scripts.automation.verify_encrypted_recovery_handoff import _archive_filenames, _bound_json, _sha256, _wal_range
+from scripts.automation.verify_encrypted_recovery_handoff import _WAL, _archive_filenames, _bound_json, _sha256, _wal_range
 from scripts.db.canonical_cold_recovery_wal_transfer import (
     _baseline, _MAX_SEGMENTS, _prefix_binding, _prefix_path, _prefix_window,
 )
@@ -77,6 +78,36 @@ def _observe(receiving, archive_id, segments, device, check):
         rows.append(RetainedWALFile(segment, checksum, path.relative_to(receiving).as_posix(), stamp))
     check()
     return tuple(rows)
+
+
+def _held(receiving, archive_id, root_identity, directories, files, evidence, check):
+    digest = archive_evidence_hash(evidence | {"root_identity": root_identity, "archive_id": archive_id,
+        "directories": directories, "files": [[row.segment, row.path, row.wal_checksum, row.stamp] for row in files]})
+    held = RetainedWAL(receiving, archive_id, root_identity, directories, files, digest)
+    held.assert_held(check)
+    return held
+
+
+def capture_wal_members(*, receiving, archive_id, rows, check):
+    """Pin exactly these authenticated transport rows around native archive-get."""
+    if (not isinstance(archive_id, str) or re.fullmatch(r"15-[1-9][0-9]*", archive_id) is None
+            or not isinstance(rows, (list, tuple)) or not callable(check)
+            or any(not isinstance(row, dict) or not isinstance(row.get("segment"), str)
+                   or _WAL.fullmatch(row["segment"]) is None for row in rows)):
+        raise ValueError("canonical_retained_wal_member_scope_invalid")
+    segments = tuple(row["segment"] for row in rows)
+    if segments != tuple(sorted(set(segments))):
+        raise ValueError("canonical_retained_wal_member_scope_invalid")
+    check()
+    receiving, root_identity = _private_root(receiving)
+    directories = _directories(receiving, archive_id, segments, root_identity[0])
+    files = _observe(receiving, archive_id, segments, root_identity[0], check)
+    if any(expected.get("path") != found.path or expected.get("wal_checksum") != found.wal_checksum
+           or ("bytes" in expected and (type(expected["bytes"]) is not int or expected["bytes"] != found.stamp[2]))
+           for expected, found in zip(rows, files)):
+        raise ValueError("canonical_retained_wal_member_changed")
+    return _held(receiving, archive_id, root_identity, directories, files,
+                 {"schema": "qt.named_recovery_wal_members.v1"}, check)
 
 
 def _prefixes(baseline, checkpoint, verification, envelopes, check):
@@ -202,9 +233,5 @@ def capture_retained_wal(*, receiving, baseline, base_transfer_sha256, checkpoin
     if native_verify(wal) != [[row.segment, row.wal_checksum] for row in files]:
         raise ValueError("canonical_retained_wal_native_verification_changed")
     evidence = {"schema": _SCHEMA, "base_transfer_sha256": base_transfer_sha256, "checkpoint_sha256": checkpoint_sha256,
-                "wal_verification_sha256": checkpoint["wal_verification_sha256"], "root_identity": root_identity,
-                "archive_id": archive_id, "directories": directories,
-                "files": [[row.segment, row.path, row.wal_checksum, row.stamp] for row in files]}
-    held = RetainedWAL(receiving, archive_id, root_identity, directories, files, archive_evidence_hash(evidence))
-    held.assert_held(check)
-    return held
+                "wal_verification_sha256": checkpoint["wal_verification_sha256"]}
+    return _held(receiving, archive_id, root_identity, directories, files, evidence, check)

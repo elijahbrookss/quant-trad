@@ -6,6 +6,7 @@ from market_data.fact_archive import archive_evidence_hash
 from scripts.automation.stage_encrypted_recovery_handoff import _encode
 from scripts.db.canonical_cold_recovery_wal_transfer import _prefix_binding, _prefix_path
 from scripts.db.canonical_cold_replayed_checkpoint import build_replayed_checkpoint
+from scripts.db import canonical_cold_retained_wal as retained
 from scripts.db.canonical_cold_retained_wal import capture_retained_wal
 
 
@@ -158,3 +159,27 @@ def test_capture_refuses_changed_chain_and_restart_cap(received_wal):
     kwargs["prefix_receipts"][0]["signature"] = "updated upstream signature bytes"
     with pytest.raises(ValueError, match="prefix_chain_changed"):
         capture_retained_wal(**kwargs)
+
+
+def test_capture_final_members_checks_authenticated_names_without_reading_bytes(received_wal, monkeypatch):
+    root, bucket, files, _ = received_wal
+    options = {"receiving": root, "archive_id": "15-1", "check": lambda: None}
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("final member custody opened a WAL file")
+
+    monkeypatch.setattr(retained, "_file", unexpected_read)
+    assert retained.capture_wal_members(rows=[], **options).files == ()
+    row = files[_segment(6)]
+    held = retained.capture_wal_members(rows=[row], **options)
+    assert [(item.segment, item.path, item.wal_checksum) for item in held.files] == [(row["segment"], row["path"], row["wal_checksum"])]
+    for changed in ({"path": "elsewhere"}, {"wal_checksum": "a" * 40}, {"bytes": row["bytes"] + 1}):
+        with pytest.raises(ValueError, match="member_changed"):
+            retained.capture_wal_members(rows=[row | changed], **options)
+    with pytest.raises(ValueError, match="member_scope_invalid"):
+        retained.capture_wal_members(rows=[row, row], **options)
+    (bucket / f"{_segment(7)}-{'a' * 40}.gz").write_bytes(b"new segment")
+    held.assert_held(options["check"])
+    (bucket / f"{_segment(6)}-{'a' * 40}.gz").write_bytes(b"ambiguous existing segment")
+    with pytest.raises(RuntimeError, match="segment_missing_or_ambiguous"):
+        held.assert_held(options["check"])

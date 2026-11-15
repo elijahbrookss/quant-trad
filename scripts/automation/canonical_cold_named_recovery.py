@@ -48,7 +48,7 @@ from scripts.db.canonical_cold_recovery_wal_transfer import (
 )
 from scripts.db.canonical_cold_prepared_custody import capture_prepared_custody
 from scripts.db.canonical_cold_replayed_checkpoint import build_replayed_checkpoint
-from scripts.db.canonical_cold_retained_wal import capture_retained_wal
+from scripts.db.canonical_cold_retained_wal import capture_retained_wal, capture_wal_members
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
@@ -859,9 +859,9 @@ def seal_replayed_receiver(*, staged, site, ready_seconds):
         _check_receiver_roots(staged.native.roots)
 
     _check_stopped_control(staged.native.pgdata, staged.checkpoint)
-    staged.used = True
     with _publish_prepared_receiver(staged.native, site, staged.measured, staged.baseline, staged.custody, ready_seconds, check,
             checkpoint=staged.checkpoint, retained_wal=staged.retained_wal, archive_objects=staged.archive_objects) as prepared:
+        staged.used = True
         yield prepared
 
 
@@ -1038,7 +1038,9 @@ def verify_wal_prefix_chain(*, site, prepared_sha256, prefixes):
 
 def _verify_prepared_wal(prepared, suffix, deadline, check):
     wal = suffix.wal
+    held = capture_wal_members(receiving=prepared.root, archive_id=wal["database_archive_id"], rows=wal["files"], check=check)
     entries = _verify_native_wal_entries(prepared, wal, deadline, check)
+    held.assert_held(check)
     pair = suffix.pair
     report = {"schema": PREPARED_NATIVE_VERSION, "prepared_receiver_sha256": prepared.digest,
               "verified_wal_sha256": archive_evidence_hash(entries), "wal_transfer_sha256": wal["wal_transfer_sha256"],
@@ -1047,7 +1049,7 @@ def _verify_prepared_wal(prepared, suffix, deadline, check):
               **{key: pair[key] for key in ("database_identity", "database_label", "archive_snapshot", "storage_layout")}}
     if "checkpoint_sha256" in wal:
         report.update(checkpoint_sha256=wal["checkpoint_sha256"], wal_verification_sha256=wal["wal_verification_sha256"])
-    return report | {"verification_sha256": archive_evidence_hash(report)}
+    return report | {"verification_sha256": archive_evidence_hash(report)}, held
 
 
 def recover_named_site(*, prepared, suffix_key, pending_key, boot_isolated, verify_original_runtime, timeout_seconds):
@@ -1101,7 +1103,7 @@ def recover_named_site(*, prepared, suffix_key, pending_key, boot_isolated, veri
         if _identity(suffix_restore.lstat()) == suffix_id and not any(suffix_restore.iterdir()):
             suffix_restore.rmdir()
         raise
-    native = _verify_prepared_wal(prepared, suffix, min(deadline, monotonic() + site.wal.seconds), check)
+    native, final_wal = _verify_prepared_wal(prepared, suffix, min(deadline, monotonic() + site.wal.seconds), check)
     pending_verified = None
     if request["pending"] is not None:
         pending = request["pending"]
@@ -1126,6 +1128,9 @@ def recover_named_site(*, prepared, suffix_key, pending_key, boot_isolated, veri
             raise RuntimeError("canonical_named_recovery_replayed_custody_required")
         _check_stopped_control(pgdata, checkpoint)
         prepared.retained_wal.assert_held(check)
+    final_wal.assert_held(check)
+    if _file_hash(prepared.settings) != prepared.settings_sha256:
+        raise RuntimeError("canonical_named_recovery_prepared_pgbackrest_configuration_changed")
     _arm_prepared(prepared, anchor)
     with boot_isolated(pgdata, check) as (control_engine, target_engine):
         _open_receive_database(control_engine, target_engine, anchor, pgdata, destinations, prepared.tablespace_oids, check)
