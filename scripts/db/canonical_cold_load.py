@@ -10,6 +10,7 @@ import argparse
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date
+from functools import partial
 from itertools import islice
 import json
 from math import isfinite
@@ -69,14 +70,24 @@ def _verify_resume_page(session, prior):
 def load_checkpoint(engine, checkpoint, *, target, object_store, day, after_ordinal=-1,
                     max_pages=1, max_seconds=120, statement_timeout_ms=30_000,
                     pressure_limits=None, pg_controldata=None):
-    if (type(max_pages) is not int or max_pages < 1 or not isfinite(max_seconds) or max_seconds <= 0
-            or type(statement_timeout_ms) is not int or statement_timeout_ms < 1):
-        raise ValueError("canonical_cold_load_invalid_budget")
     if ((pressure_limits is None) != (pg_controldata is None)
             or (pressure_limits is not None and (not isinstance(pressure_limits, CatalogLoadLimits)
                                                  or not Path(pg_controldata).is_absolute()))):
         raise ValueError("canonical_cold_load_pressure_invalid_configuration")
     history_target_id = pressure_limits.history_target_id if pressure_limits is not None else None
+    supervision = (partial(supervise_page, limits=pressure_limits, pg_controldata=Path(pg_controldata))
+                   if pressure_limits is not None else None)
+    return _load_checkpoint(engine, checkpoint, target=target, object_store=object_store, day=day,
+                            after_ordinal=after_ordinal, max_pages=max_pages, max_seconds=max_seconds,
+                            statement_timeout_ms=statement_timeout_ms, history_target_id=history_target_id,
+                            supervise=supervision)
+
+
+def _load_checkpoint(engine, checkpoint, *, target, object_store, day, after_ordinal, max_pages, max_seconds,
+                     statement_timeout_ms, history_target_id, supervise):
+    if (type(max_pages) is not int or max_pages < 1 or not isfinite(max_seconds) or max_seconds <= 0
+            or type(statement_timeout_ms) is not int or statement_timeout_ms < 1):
+        raise ValueError("canonical_cold_load_invalid_budget")
     deadline = monotonic() + max_seconds
     binding = checkpoint.binding()
     if Path(binding["staging_root"]).resolve(strict=True) != object_store.root:
@@ -121,9 +132,7 @@ def load_checkpoint(engine, checkpoint, *, target, object_store, day, after_ordi
                         object_store, limits=limits,
                         ensure_contracts=lambda contracts: ensure_payload_contracts(session, contracts),
                     )
-                    supervision = nullcontext() if pressure_limits is None else supervise_page(
-                        session, limits=pressure_limits, pg_controldata=Path(pg_controldata), deadline=deadline,
-                    )
+                    supervision = nullcontext() if supervise is None else supervise(session, deadline=deadline)
                     with supervision:
                         PostgresColdHistory(reader).admit(session, page.manifest)
             except LoadPressure as exc:

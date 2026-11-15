@@ -89,9 +89,7 @@ def _require_history_path(conn, resources, history):
     _same_process_file(resources.backend_pid, path, info, require_writable=True)
 
 
-@contextmanager
-def supervise_page(session, *, limits, pg_controldata: Path, deadline):
-    """Check one transaction's native paths and supervise its allocation."""
+def _begin_page(session, *, temp_file_limit_kib):
     if not session.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.cold.catalog.load.v1',0))")):
         raise LoadPressure("canonical_cold_load_other_loader_active")
     conn = session.connection()
@@ -100,7 +98,14 @@ def supervise_page(session, *, limits, pg_controldata: Path, deadline):
         SELECT set_config('temp_file_limit',
             LEAST(CASE WHEN setting::bigint<0 THEN :limit ELSE setting::bigint END,:limit)::text,true)
         FROM pg_settings WHERE name='temp_file_limit'
-    """), {"limit": limits.temp_file_limit_kib})
+    """), {"limit": temp_file_limit_kib})
+    return conn
+
+
+@contextmanager
+def supervise_page(session, *, limits, pg_controldata: Path, deadline):
+    """Check one transaction's native paths and supervise its allocation."""
+    conn = _begin_page(session, temp_file_limit_kib=limits.temp_file_limit_kib)
     records = {record.id: record for record in registered_header_targets(session)}
     ids = (limits.recent_target_id, limits.history_target_id)
     if not set(ids) <= records.keys():
@@ -134,6 +139,12 @@ def supervise_page(session, *, limits, pg_controldata: Path, deadline):
         if available - minimum < allowances[key]:
             raise LoadPressure(f"canonical_cold_load_page_capacity: target={key}")
         floors[key] = available - allowances[key]
+    with _watch_page(conn, limits=limits, resources=resources, targets=targets, floors=floors, deadline=deadline):
+        yield
+
+
+@contextmanager
+def _watch_page(conn, *, limits, resources, targets, floors, deadline):
     beginning_lsn = _measure_wal(conn, limits=limits)
     watch = _MoveWatch(driver=conn.connection.driver_connection, targets=targets, capacity=resources.capacity,
                       floors=floors, deadline=deadline, cancelled=None, grace=5)

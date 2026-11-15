@@ -2,6 +2,7 @@
 from datetime import UTC, datetime, timedelta
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 import os
 from pathlib import Path
 import pwd
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 from time import monotonic
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -34,10 +36,11 @@ from portal.backend.service.storage.repos.fact_archival import FACT_ARCHIVE_VERI
 from portal.backend.service.storage.repos.fact_archive_generation import (
     archive_preparation_id, catalog_batch_hash, catalog_commitment, catalog_root,
 )
-from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
+from scripts.db.canonical_cold_load import TargetDatabase, _load_checkpoint, load_checkpoint
 from scripts.db import canonical_cold_load
 from scripts.db.canonical_cold_load_pressure import CatalogLoadLimits, LoadPressure, supervise_page
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
+from scripts.db.canonical_cold_private_load import SharedHddLoadLimits, supervise_private_page
 from scripts.db.prepare_canonical_cold_catalog import prepare_catalog
 from tests.test_market_data.test_canonical_cold_migration import DAY, LIMITS
 from tests.test_market_data.test_canonical_fact_archive import _row
@@ -357,3 +360,71 @@ def test_supervised_load_admission_checks_native_paths_and_restores_transaction_
         with pytest.raises(LoadPressure, match="page_capacity: target=fixture-history"):
             with supervise_page(session, limits=replace(limits, min_history_free_bytes=2**63 - 1), **args):
                 pytest.fail("admitted work without filesystem headroom")
+
+
+def test_private_catalog_load_checks_one_native_device_and_combines_page_allocations(
+    prepared_database, tmp_path, monkeypatch,
+):
+    from scripts.db import canonical_cold_private_placement
+
+    engine, tablespace, history_root = prepared_database
+    server_root = Path(engine.url.query["host"]).parent
+    if server_root.stat().st_dev != history_root.stat().st_dev:
+        pytest.skip("requires the default same-device history fixture")
+    device = server_root.stat().st_dev
+    device_id = f"{os.major(device)}:{os.minor(device)}"
+    udev = server_root / "private-load-udev"
+    udev.mkdir(exist_ok=True)
+    (udev / f"b{device_id}").write_text("E:ID_FS_UUID=fixture-shared\n")
+    monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(udev))
+    row = _row()
+    source_store = FilesystemRawArchiveObjectStore(tmp_path / "archive")
+    candidate_store = FilesystemRawArchiveObjectStore(tmp_path / "candidate")
+    manifest = publish_canonical_fact_archive([row], object_store=source_store,
+                                              temporary_directory=tmp_path, limits=LIMITS)
+    target = _prepare(engine, [row], manifest, tablespace, history_root)
+    target_id = "fixture-hdd"
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE public.portal_storage_targets SET root=:root,filesystem_uuid='fixture-shared',
+                reserved_bytes=1024,auxiliary_reserved_bytes=2048 WHERE id=:target
+        """), {"root": str(server_root), "target": target_id})
+
+    checkpoint = MigrationCheckpoint(tmp_path / "private-load.sqlite")
+    source = PostgresMigrationSource(engine, expected_system_identifier=target.system_identifier)
+    assert stage(source, checkpoint, day=DAY, source_store=source_store, destination_store=candidate_store,
+                 temporary_directory=tmp_path, limits=LIMITS)["cohort_complete"]
+    clone = SimpleNamespace(proof={"database_identity": f"{target.system_identifier}/{target.oid}",
+                                  "device_id": device_id})
+    placement = {"history_target_id": target_id}
+    checks = []
+
+    def measured_boundary(conn, **values):
+        # This fixture tests the native resource/supervision boundary. Separate
+        # tests exercise the promoted-clone and mounted archive proof.
+        assert values == {"clone": clone, "placement": placement, "require_writable": True}
+        checks.append(conn.scalar(text("SELECT current_database()")))
+
+    monkeypatch.setattr(canonical_cold_private_placement, "assert_private_placement", measured_boundary)
+    caps = SharedHddLoadLimits(1024, 16 << 20, 8 << 20, 8 << 20, 1 << 30, 0, 2048)
+    statvfs = os.statvfs(server_root)
+    available = statvfs.f_bavail * statvfs.f_frsize
+    constrained = replace(caps, min_free_bytes=available - (24 << 20))
+    supervise = partial(supervise_private_page, clone=clone, placement=placement,
+                        pg_controldata=Path("/usr/lib/postgresql/15/bin/pg_controldata"))
+    loading = {"target": target, "object_store": candidate_store, "day": DAY, "after_ordinal": -1,
+               "max_pages": 1, "max_seconds": 30, "statement_timeout_ms": 10_000,
+               "history_target_id": target_id}
+    stopped = _load_checkpoint(engine, checkpoint, supervise=partial(supervise, limits=constrained), **loading)
+    assert stopped["deferred_reason"] == "private_cold_load_shared_hdd_page_capacity"
+    assert stopped["last_processed_ordinal"] == -1
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT count(*) FROM market.cold_fact_pages")) == 0
+    loaded = _load_checkpoint(engine, checkpoint, supervise=partial(supervise, limits=caps), **loading)
+    assert loaded["last_processed_ordinal"] == 0 and loaded["checkpoint_end_reached"]
+    assert checks == [target.name, target.name]
+    with Session(engine) as session:
+        assert not cold_layout_active(session)
+        assert PostgresColdHistory(ColdHistoryReader(candidate_store, limits=LIMITS)).read_by_ids(
+            session, [row["id"]],
+        ) == {row["id"]: row}
