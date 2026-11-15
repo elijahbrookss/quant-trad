@@ -140,9 +140,10 @@ def _measure(args):
                 or not tools["restic"].startswith("restic 0.19.1 ")):
             raise ValueError("same_hdd_rehearsal_tools_changed")
         br = [str(pgbackrest), "--no-config", "--stanza=qt", "--repo1-cipher-type=aes-256-cbc",
-              f"--repo1-path={database_repo}", f"--lock-path={work}", "--log-level-file=off", "--log-level-console=off"]
+              f"--repo1-path={database_repo}", "--log-level-file=off", "--log-level-console=off"]
+        br_info = [*br, f"--lock-path={work}"]
         rs = [str(restic), "--repo", str(archive_repo), "--no-lock", "--no-cache", "--json", "--quiet"]
-        selected, database_id, chain = _selected_backup_manifest(run, br, pair)
+        selected, database_id, chain = _selected_backup_manifest(run, br_info, pair)
         spaces = selected.get("tablespace") or []
         if (selected.get("link") or len(spaces) != len(args.tablespace)
                 or {space["name"] for space in spaces} != set(args.tablespace)
@@ -166,7 +167,7 @@ def _measure(args):
         if (snapshot.get("snapshots_count") != 1 or type(archive_bytes) is not int or archive_bytes < pair["archive_bytes"]
                 or type(archive_entries) is not int or not pair["archive_objects"] <= archive_entries <= args.max_metadata_entries):
             raise RuntimeError("same_hdd_rehearsal_archive_snapshot_stat_invalid")
-        if _selected_backup_manifest(run, br, pair) != (selected, database_id, chain):
+        if _selected_backup_manifest(run, br_info, pair) != (selected, database_id, chain):
             raise RuntimeError("same_hdd_rehearsal_native_backup_changed")
 
     check()
