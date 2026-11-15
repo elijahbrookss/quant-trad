@@ -36,7 +36,9 @@ from portal.backend.service.storage.repos import market_data, market_lifecycle, 
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.automation.canonical_cold_collector_checks import RECEIPT_VERSION as COLLECTOR_RECEIPT_VERSION
 from scripts.automation.canonical_cold_recovery_checks import PLAN_VERSION, bind_approved_recovery_checks
-from scripts.automation.canonical_cold_named_recovery import RecoverySitePolicy, NamedRecoverySite, _opened, bind_named_recovery_source, recover_named_site
+from scripts.automation.canonical_cold_named_recovery import (
+    RecoverySitePolicy, NamedRecoverySite, _opened, bind_named_recovery_source, prepare_named_receiver, recover_named_site,
+)
 from scripts.automation import canonical_cold_recovery_preflight as preflight
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, stage_handoff, verify_staged_handoff
 from scripts.automation.storage_host_boundary import load_receipt, save_receipt
@@ -696,10 +698,13 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         source_prefix = Path(str(objects.root).lstrip("/"))
         final = receiving / "final-archive" / "complete.json"
         suffix_prefix = Path(json.loads(final.read_text())["archive"]["archive_source_root"].lstrip("/"))
-        merged = workspace / "runtime-archive"
-        shutil.copytree(base_restore / source_prefix, merged)
-        shutil.copytree(suffix_restore / suffix_prefix, merged, dirs_exist_ok=True)
-        recovered_store = FilesystemRawArchiveObjectStore(merged, writable=False)
+        class ReceiverArchiveView(FilesystemRawArchiveObjectStore):
+            def local_path(self, object_key):
+                suffix = suffix_store.local_path(object_key)
+                return suffix if suffix.is_file() else super().local_path(object_key)
+
+        suffix_store = FilesystemRawArchiveObjectStore(suffix_restore / suffix_prefix, writable=False)
+        recovered_store = ReceiverArchiveView(base_restore / source_prefix, writable=False)
         recovered_db = Database(target_engine.url.render_as_string(hide_password=False))
         try:
             assert recovered_db.ensure_schema(), str(recovered_db.last_error)
@@ -719,24 +724,24 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         return archive_evidence_hash({"layout": pair["storage_layout"], "frozen": frozen.dataset_id,
                                       "pending": pending["verification_sha256"], "tablespace": list(restored)})
 
-    receiver_options = dict(site=site, signing_key=receiver_sign, pgbackrest=worker.pgbackrest,
+    prepare_options = dict(site=site, signing_key=receiver_sign, pgbackrest=worker.pgbackrest,
         restic=worker.restic, database_key=worker.config.database_key_path, base_archive_key=worker.config.archive_key_path,
-        suffix_key=suffix_key, pending_key=pending_key, boot_isolated=boot_isolated,
+        workspace=workspace, pgdata=pgdata, tablespaces={"signed_history_fixture": history_path},
+        timeout_seconds=100, ready_seconds=120, max_custody_entries=10_000)
+    receiver_options = dict(suffix_key=suffix_key, pending_key=pending_key, boot_isolated=boot_isolated,
         verify_original_runtime=verify_original, timeout_seconds=100)
 
-    def qualify_receiver():
-        with pytest.raises(ValueError, match="directory_invalid"):
-            recover_named_site(**receiver_options, workspace=negative, pgdata=negative_data,
-                               tablespaces={"signed_history_fixture": alias})
-        with pytest.raises(ValueError, match="preflight_receiver_changed"):
-            recover_named_site(**receiver_options, workspace=negative, pgdata=negative_data, tablespaces={})
-        with pytest.raises(ValueError, match="preflight_mount_changed"):
-            recover_named_site(**receiver_options, workspace=negative, pgdata=negative_data,
-                               tablespaces={"signed_history_fixture": history_path})
-        assert not any(negative_data.iterdir())
-        assert not (receiving / "named-recovery-response.json").exists()
-        assert not (restore_root / "start").exists()
-        approved_workspace = dict(workspace=workspace, pgdata=pgdata, tablespaces={"signed_history_fixture": history_path})
+    for supplied, failure in (({"signed_history_fixture": alias}, "directory_invalid"), ({}, "preflight_receiver_changed"),
+                              ({"signed_history_fixture": history_path}, "preflight_mount_changed")):
+        with pytest.raises(ValueError, match=failure), prepare_named_receiver(**(prepare_options | {
+                "workspace": negative, "pgdata": negative_data, "tablespaces": supplied})):
+            pytest.fail("unapproved preparation was admitted")
+    assert not any(negative_data.iterdir())
+
+    def qualify_receiver(prepared):
+        pg_control = pgdata / "global" / "pg_control"
+        before = pg_control.stat()
+        expected_workspace = set(workspace.iterdir())
         deadline = monotonic() + 60
         while not (receiving / "named-recovery-request.json").is_file():
             if monotonic() >= deadline:
@@ -751,16 +756,24 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             try:
                 pack.write_bytes(damaged)
                 with pytest.raises(RuntimeError, match="archive_transport_ciphertext_changed"):
-                    recover_named_site(**receiver_options, **approved_workspace)
-                assert not any(pgdata.iterdir()) and not any(history_path.iterdir())
-                assert set(workspace.iterdir()) == {pgdata}
+                    recover_named_site(prepared=prepared, **receiver_options)
+                assert pg_control.stat().st_ctime_ns == before.st_ctime_ns
+                assert set(workspace.iterdir()) == expected_workspace
                 assert not (restore_root / "start").exists()
                 assert not (receiving / "named-recovery-response.json").exists()
             finally:
                 intact.replace(pack)
-        return recover_named_site(**receiver_options, **approved_workspace)
+        return recover_named_site(prepared=prepared, **receiver_options)
 
-    with activation_fixture._fence_connections(storage) as (retained, control):
+    with prepare_named_receiver(**prepare_options) as prepared, activation_fixture._fence_connections(storage) as (retained, control):
+        assert not (restore_root / "start").exists()
+        assert (pgdata / "backup_label").is_file() and (pgdata / "recovery.signal").is_file()
+        ready = recover_source.assert_receiver_ready()
+        assert ready == prepared.ready
+        def bulk_operation_during_fence(*args, **kwargs):
+            pytest.fail("bulk materialization repeated during the source fence")
+        for name in ("_native_restore", "verify_handoff", "prepare_archive_baseline"):
+            monkeypatch.setattr(preflight.named, name, bulk_operation_during_fence)
         fence = close_database_fence(retained, control, expected_database=target, timeout_seconds=110, record=lambda *_: None)
         try:
             with retained.begin():
@@ -771,7 +784,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             provider_hash = archive_evidence_hash(provider)
             save_receipt(receipts / f"collector-drained-{provider_hash}.json", provider | {"sha256": provider_hash}, initial=True)
             with ThreadPoolExecutor(max_workers=1) as threads, archive_namespace(objects.root, exclusive=True) as check_archive:
-                result = threads.submit(qualify_receiver)
+                result = threads.submit(qualify_receiver, prepared)
                 def remaining():
                     if result.done():
                         result.result()
@@ -789,13 +802,20 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             save_receipt(damaged, response, initial=True)
             with pytest.raises(ValueError, match="signature_mismatch"):
                 _opened(damaged, site.receiver_public_key)
+            def exact_reply(*_):
+                return report
+            exact_reply.assert_receiver_ready = lambda: ready
             binding = bind_approved_recovery_checks(package_path=package_path, package=package,
                 approved_package_hash=approved_package_hash, receipt_root=receipts,
-                verify_site_restore=lambda *_: report, expected_pending_scope_sha256=scope_hash)
+                verify_site_restore=exact_reply, expected_pending_scope_sha256=scope_hash)
+            assert binding.assert_receiver_ready() == prepared.digest
             digest = binding(None, None, source_commit, provider_hash, lambda: 10, lambda: None)
             published = load_receipt(receipts / f"independent-recovery-{digest}.json", max_bytes=4 * 1024**2)
             assert published["receiver_preflight_sha256"] == sizing["measurement_sha256"]
             assert published["receiver_response"] == report["receiver_response"]
+            assert reply["prepared_receiver_sha256"] == prepared.digest
+            with pytest.raises(ValueError, match="live_prepared_receiver_required"):
+                recover_named_site(prepared=prepared, **receiver_options)
         finally:
             reopen_database_fence(fence, control, expected_outcome="original", read_outcome=lambda _: "original", record=lambda *_: None)
 

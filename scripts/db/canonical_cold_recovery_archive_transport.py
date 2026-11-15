@@ -28,6 +28,7 @@ from scripts.db.fact_header_v2_capture import _bounded_step
 
 _SCHEMA = "qt.encrypted_recovery_archive_transport.v1"
 _CLOSURE = "qt.named_recovery_archive_closure.v1"
+PREPARED_NATIVE_VERSION = "qt.encrypted_recovery_prepared_endpoint.v1"
 _DIR = "final-archive"
 
 
@@ -193,6 +194,7 @@ class _RestoredArchiveSuffix:
     pair: dict
     anchor: dict
     report: dict
+    wal: dict
     transfer_sha256: str
     remaining_seconds: float
 
@@ -219,7 +221,12 @@ def _require_named_replay(conn, anchor):
 
 def _require_native_named(native_named, native_named_sha256, baseline, pair, report):
     named = {key: value for key, value in native_named.items() if key != "verification_sha256"}
-    if (native_named.get("schema") != "qt.encrypted_recovery_repository_verification.v1"
+    schema = native_named.get("schema")
+    if (schema not in {"qt.encrypted_recovery_repository_verification.v1", PREPARED_NATIVE_VERSION}
+            or (schema == PREPARED_NATIVE_VERSION and (
+                not _sha256(named.get("prepared_receiver_sha256")) or not _sha256(named.get("verified_wal_sha256"))
+                or named.get("wal_transfer_sha256") != report["wal_transfer_sha256"]
+                or named.get("baseline_verification_sha256") != report["baseline_verification_sha256"]))
             or native_named.get("verification_sha256") != native_named_sha256 or archive_evidence_hash(named) != native_named_sha256
             or named.get("pair_receipt_sha256") != baseline.receipt_sha256
             or named.get("anchor_sha256") != report["anchor_sha256"] or named.get("wal_verified_through") != report["wal_segment"]
@@ -276,7 +283,7 @@ def restore_named_archive_suffix(*, receiving, wal_options, expected_wal_sha256,
             raise RuntimeError("canonical_recovery_archive_transport_restore_budget_exceeded")
         run("restore", snapshot, "--target", str(archive_restore), "--verify")
     check()
-    return _RestoredArchiveSuffix(receiving, receiver_id, archive_restore, restore_id, pair, anchor, report,
+    return _RestoredArchiveSuffix(receiving, receiver_id, archive_restore, restore_id, pair, anchor, report, wal,
                                   archive_transfer_sha256, deadline - monotonic())
 
 

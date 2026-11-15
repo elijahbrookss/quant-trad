@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+import fcntl
+from functools import partial
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+from secrets import token_hex
 import shutil
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep, time
@@ -17,10 +21,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from sqlalchemy import text
 
 from core.storage_mounts import inspect_filesystem
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.service.storage.incremental_recovery import _binary, _private_bytes, _run_native
 from portal.backend.service.storage.recovery_copies import _json_write, _sync
 from scripts.automation.canonical_cold_collector_checks import RECEIPT_VERSION as COLLECTOR_RECEIPT_VERSION
+from scripts.automation.canonical_cold_receiver_ready import (
+    PREPARED_READY_FILENAME, make_prepared_receiver_ready, prepared_receiver_scope, verify_prepared_receiver_ready,
+)
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, _identity, _private_root
 from scripts.automation.storage_host_boundary import load_receipt
 from scripts.automation.verify_canonical_recovery_archive import _sha256
@@ -28,16 +36,17 @@ from scripts.automation.verify_encrypted_recovery_handoff import _bound_json, _s
 from scripts.db.canonical_cold_database_fence import DatabaseFence
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
 from scripts.db.canonical_cold_recovery_archive_transport import (
-    close_named_archive_suffix, restore_named_archive_suffix, stage_encrypted_archive_suffix,
+    PREPARED_NATIVE_VERSION, close_named_archive_suffix, restore_named_archive_suffix, stage_encrypted_archive_suffix,
 )
 from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope, measure_pending_spool, stage_pending_spool, verify_pending_spool
 from scripts.db.canonical_cold_recovery_suffix import PreparedArchiveBaseline, prepare_archive_baseline
 from scripts.db.canonical_cold_recovery_wal_transfer import _baseline, stage_final_wal
+from scripts.db.canonical_cold_prepared_custody import capture_prepared_custody
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
-_REQUEST = "qt.named_recovery_site_request.v2"
-_RESPONSE = "qt.named_recovery_site_response.v2"
+_REQUEST = "qt.named_recovery_site_request.v3"
+_RESPONSE = "qt.named_recovery_site_response.v3"
 PREFLIGHT_VERSION = "qt.named_recovery_receiver_preflight.v2"
 _MAX_RECEIPT = 1024 * 1024
 _MAX_PROVIDER_RECEIPT = 128 * 1024**2
@@ -228,6 +237,11 @@ def _file_hash(path):
         return hashlib.sha256(stream.read(65537)).hexdigest()
 
 
+def _ready_scope(site, measured):
+    return prepared_receiver_scope(approved_package_sha256=site.approved_package_sha256,
+        receiver_preflight_sha256=measured["measurement_sha256"], site_policy=measured["site_policy"])
+
+
 def _wal_options(site, anchor_path, anchor_sha256, check):
     return {"base_transfer_sha256": site.base_transfer_sha256, "baseline": site.baseline_verification,
             "baseline_verification_sha256": site.baseline_verification["verification_sha256"],
@@ -255,9 +269,26 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
     signer = _signer(signing_key, site.source_public_key, root)
     if pending_key is not None:
         pending_key = _private_credential(pending_key, receiving=root)
+    ready_scope = _ready_scope(site, measured)
+    admitted = None
+
+    def assert_receiver_ready():
+        nonlocal admitted
+        if _identity(root.lstat()) != root_id:
+            raise RuntimeError("canonical_named_recovery_source_mount_changed")
+        try:
+            ready = load_receipt(root / PREPARED_READY_FILENAME, max_bytes=_MAX_RECEIPT)
+        except FileNotFoundError:
+            raise RuntimeError("canonical_named_recovery_prepared_receiver_unavailable") from None
+        body = verify_signed_recovery(ready, site.receiver_public_key)
+        digest = verify_prepared_receiver_ready(body, scope=ready_scope)
+        if admitted is not None and admitted != digest:
+            raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
+        admitted = digest
+        return ready
 
     def recover(fence, control, source_commit, provider_boundary, remaining, check_archive):
-        if (site.checked_preflight() != measured or not isinstance(fence, DatabaseFence) or not _sha256(provider_boundary)
+        if (admitted is None or site.checked_preflight() != measured or not isinstance(fence, DatabaseFence) or not _sha256(provider_boundary)
                 or fence.connection.in_transaction() or control.in_transaction()):
             raise ValueError("canonical_named_recovery_live_fence_required")
         deadline = min(fence.deadline, monotonic() + remaining())
@@ -273,6 +304,7 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
             return seconds
 
         check()
+        ready = assert_receiver_ready()["body"]
         drained = load_receipt(receipts / f"collector-drained-{provider_boundary}.json", max_bytes=_MAX_PROVIDER_RECEIPT)
         evidence = drained["evidence"]
         if (drained.get("schema") != COLLECTOR_RECEIPT_VERSION or drained.get("phase") != "drained"
@@ -320,14 +352,16 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
                 if source["segments"] != transported["segments"]:
                     raise RuntimeError("canonical_named_recovery_pending_source_changed")
             fence.assert_quiet(conn)
+            assert_receiver_ready()
             request = {"schema": _REQUEST, "approved_package_sha256": site.approved_package_sha256,
                        "receiver_preflight_sha256": measured["measurement_sha256"],
+                       "prepared_receiver_sha256": admitted,
                        "database_identity": baseline.database_identity, "source_commit_seq": source_commit,
                        "provider_boundary_sha256": provider_boundary, "anchor_sha256": anchor_hash,
                        "base_transfer_sha256": site.base_transfer_sha256,
                        "baseline_verification_sha256": site.baseline_verification["verification_sha256"],
                        "wal_transfer_sha256": wal["wal_transfer_sha256"], "archive_transfer_sha256": archived["archive_transfer_sha256"],
-                       "pending": pending, "pending_source": source, "expires_at": int(time()) + check()}
+                       "pending": pending, "pending_source": source, "expires_at": min(ready["expires_at"], int(time()) + check())}
             _publish(request_path, _sign(request, signer))
         expected_request = archive_evidence_hash(request)
         while not response_path.exists():
@@ -336,9 +370,10 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
         signed_reply = load_receipt(response_path, max_bytes=_MAX_RECEIPT)
         reply = verify_signed_recovery(signed_reply, site.receiver_public_key)
         if (set(reply) != {"schema", "request_sha256", "archive_closure", "pending_spool_verified", "runtime_sha256",
-                           "approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256"}
+                           "approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256", "prepared_receiver_sha256"}
                 or reply["schema"] != _RESPONSE or reply["request_sha256"] != expected_request
-                or any(reply[key] != request[key] for key in ("approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256"))
+                or any(reply[key] != request[key] for key in ("approved_package_sha256", "provider_boundary_sha256",
+                                                            "receiver_preflight_sha256", "prepared_receiver_sha256"))
                 or not _sha256(reply["runtime_sha256"])):
             raise RuntimeError("canonical_named_recovery_response_binding_changed")
         closure = reply["archive_closure"]
@@ -353,19 +388,22 @@ def bind_named_recovery_source(*, site, signing_key, provider_receipt_root, data
         return {"archive_closure": closure, "pending_spool_source": source, "pending_spool_verified": reply["pending_spool_verified"],
                 "receiver_response": signed_reply}
 
+    recover.assert_receiver_ready = assert_receiver_ready
     return recover
 
 
-def _read_request(root, site):
+def _read_request(root, site, *, prepared_sha256):
     request = _opened(root / "named-recovery-request.json", site.source_public_key)
     baseline = site.baseline_verification
     required = {"schema", "approved_package_sha256", "database_identity", "source_commit_seq", "provider_boundary_sha256",
                 "anchor_sha256", "base_transfer_sha256", "baseline_verification_sha256", "wal_transfer_sha256",
-                "archive_transfer_sha256", "pending", "pending_source", "expires_at", "receiver_preflight_sha256"}
+                "archive_transfer_sha256", "pending", "pending_source", "expires_at", "receiver_preflight_sha256",
+                "prepared_receiver_sha256"}
     measured = site.checked_preflight()
     if (set(request) != required or request["schema"] != _REQUEST
             or request["approved_package_sha256"] != site.approved_package_sha256
             or request["receiver_preflight_sha256"] != measured["measurement_sha256"]
+            or request["prepared_receiver_sha256"] != prepared_sha256
             or request["base_transfer_sha256"] != site.base_transfer_sha256
             or request["baseline_verification_sha256"] != baseline["verification_sha256"]
             or request["database_identity"] != baseline["database_identity"]
@@ -384,7 +422,7 @@ def _read_request(root, site):
     return request, anchor, path
 
 
-def _native_restore(*, root, workspace, pgdata, tablespaces, pgbackrest, database_key, pair, anchor, budget, deadline, check):
+def _native_restore(*, root, workspace, pgdata, tablespaces, pgbackrest, database_key, pair, unarmed, budget, deadline, check):
     binary = _binary(pgbackrest)
     key = _private_bytes(database_key, limit=4096).decode("ascii").strip()
     if not _sha256(key):
@@ -419,18 +457,17 @@ def _native_restore(*, root, workspace, pgdata, tablespaces, pgbackrest, databas
         selection = [str(binary), f"--config={settings}", "--stanza=qt", f"--set={pair['database_label']}"]
         meta = _run_native([*selection, "--output=json", "info"], cwd=workspace, env=env, deadline=restore_deadline, check=check_restore)
         selected, _, _ = _selected_backup(meta, pair)
-        database = anchor["database"]
         stored_spaces = selected.get("tablespace") or []
         if (selected.get("link") or len(stored_spaces) != len(tablespaces)
                 or {space["name"] for space in stored_spaces} != set(tablespaces)
-                or {"name": database["database"], "oid": database["database_oid"]} not in selected["database-ref"]):
+                or int(pair["database_identity"].split("/")[1]) not in {row["oid"] for row in selected["database-ref"]}):
             raise ValueError("canonical_named_recovery_native_manifest_scope_changed")
         physical_bytes = selected["info"]["size"]
         if (type(physical_bytes) is not int or not 0 < physical_bytes <= budget.bytes
                 or sum(max(0, free - budget.reserve_bytes) for free in starting.values()) < physical_bytes):
             raise RuntimeError("canonical_named_recovery_database_restore_budget_exceeded")
         command = [*selection, "--type=name",
-                   f"--target={anchor['restore_name']}", f"--target-timeline={anchor['timeline']}", "--target-action=promote",
+                   f"--target={unarmed}", f"--target-timeline={int(selected['archive']['stop'][:8], 16)}", "--target-action=shutdown",
                    "--archive-mode=off", f'--recovery-option=restore_command={binary} --config={settings} --stanza=qt archive-get %f "%p"']
         command.extend(f"--tablespace-map={name}={path}" for name, path in sorted(tablespaces.items()))
         _run_native([*command, "restore"], cwd=workspace, env=env, deadline=restore_deadline, check=check_restore)
@@ -438,7 +475,7 @@ def _native_restore(*, root, workspace, pgdata, tablespaces, pgbackrest, databas
         settings.unlink()
         _sync(workspace)
         raise
-    return settings
+    return settings, {space["name"]: space["oid"] for space in stored_spaces}
 
 
 def _local_receiver(engine):
@@ -449,7 +486,7 @@ def _local_receiver(engine):
         raise ValueError("canonical_named_recovery_receiver_endpoint_invalid")
 
 
-def _open_receive_database(control_engine, target_engine, anchor, pgdata, tablespaces, check):
+def _open_receive_database(control_engine, target_engine, anchor, pgdata, tablespaces, tablespace_oids, check):
     for engine in (control_engine, target_engine):
         _local_receiver(engine)
     database = anchor["database"]
@@ -468,24 +505,21 @@ def _open_receive_database(control_engine, target_engine, anchor, pgdata, tables
                                  anchor["restore_name"], "off") or state[7] == database["postmaster_started_at"]
                 or Path(state[8]).resolve(strict=True) != pgdata):
             raise RuntimeError("canonical_named_recovery_receiver_postmaster_changed")
-        observed_spaces = dict(conn.execute(text("""
-            SELECT spcname,pg_tablespace_location(oid) FROM pg_tablespace WHERE spcname NOT IN ('pg_default','pg_global')
-        """)).tuples().all())
-        if observed_spaces != {name: str(path) for name, (path, _) in tablespaces.items()}:
+        observed_spaces = {name: (location, oid) for name, location, oid in conn.execute(text("""
+            SELECT spcname,pg_tablespace_location(oid),oid::bigint FROM pg_tablespace WHERE spcname NOT IN ('pg_default','pg_global')
+        """))}
+        if observed_spaces != {name: (str(path), tablespace_oids[name]) for name, (path, _) in tablespaces.items()}:
             raise RuntimeError("canonical_named_recovery_receiver_tablespace_changed")
         quoted = conn.dialect.identifier_preparer.quote_identifier(database["database"])
         conn.exec_driver_sql(f"ALTER DATABASE {quoted} ALLOW_CONNECTIONS true")
 
 
-def recover_named_site(*, site, signing_key, pgbackrest, restic, database_key, base_archive_key, suffix_key,
-                       pending_key, workspace, pgdata, tablespaces, boot_isolated, verify_original_runtime, timeout_seconds):
-    """Read a signed request, run native verification, and publish the receiver's signed reply."""
+def _empty_receiver_paths(site, workspace, pgdata, tablespaces):
     root, root_id = _private_root(site.receiving)
     workspace, work_id = _private_root(workspace)
     pgdata, pgdata_id = _private_root(pgdata)
     if (root.is_relative_to(workspace) or workspace.is_relative_to(root) or not pgdata.is_relative_to(workspace)
-            or pgdata == workspace or any(pgdata.iterdir()) or not all(map(callable, (boot_isolated, verify_original_runtime)))
-            or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600 or not isinstance(tablespaces, dict)
+            or pgdata == workspace or any(pgdata.iterdir()) or not isinstance(tablespaces, dict)
             or not all(isinstance(name, str) and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,62}", name) for name in tablespaces)):
         raise ValueError("canonical_named_recovery_receiver_workspace_invalid")
     destinations = {name: _private_root(path) for name, path in tablespaces.items()}
@@ -498,21 +532,216 @@ def recover_named_site(*, site, signing_key, pgbackrest, restic, database_key, b
            for left, _ in destinations.values() for right, _ in destinations.values()):
         raise ValueError("canonical_named_recovery_receiver_tablespace_invalid")
     _assert_receiver_preflight_mounts(site.checked_preflight(), root, workspace, pgdata, destinations)
-    database_key, base_archive_key, suffix_key = (_private_credential(path, receiving=root, workspace=workspace)
-                                                  for path in (database_key, base_archive_key, suffix_key))
+    return root, workspace, pgdata, destinations, ((root, root_id), (workspace, work_id), (pgdata, pgdata_id), *destinations.values())
+
+
+@dataclass
+class _PreparedReceiver:
+    site: NamedRecoverySite
+    signer: Ed25519PrivateKey
+    root: Path
+    roots: tuple
+    workspace: Path
+    pgdata: Path
+    destinations: dict
+    tablespace_oids: dict
+    pgbackrest: Path
+    restic: Path
+    settings: Path
+    settings_sha256: str
+    unarmed: str
+    base_restore: Path
+    baseline: PreparedArchiveBaseline
+    custody: object
+    ready: dict
+    digest: str
+    owner_pid: int
+    active: bool = True
+    armed: bool = False
+
+
+@contextmanager
+def prepare_named_receiver(*, site, signing_key, pgbackrest, restic, database_key, base_archive_key,
+                           workspace, pgdata, tablespaces, timeout_seconds, ready_seconds, max_custody_entries):
+    """Prepare the exact native base and hold its private custody until named recovery."""
+    if not isinstance(site, NamedRecoverySite) or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86_400:
+        raise ValueError("canonical_named_recovery_invalid_preparation")
+    if type(ready_seconds) is not int or not 1 <= ready_seconds <= MAX_MIGRATION_SECONDS:
+        raise ValueError("canonical_named_recovery_invalid_readiness_lease")
+    root, workspace, pgdata, destinations, roots = _empty_receiver_paths(site, workspace, pgdata, tablespaces)
+    deadline = monotonic() + timeout_seconds
+
+    def check():
+        _check_receiver_roots(roots)
+        seconds = int(deadline - monotonic())
+        if seconds < 1:
+            raise TimeoutError("canonical_named_recovery_preparation_deadline")
+        return seconds
+
+    database_key, base_archive_key = (_private_credential(path, receiving=root, workspace=workspace)
+                                      for path in (database_key, base_archive_key))
     signing_key = _private_credential(signing_key, receiving=root, workspace=workspace)
     signer = _signer(signing_key, site.receiver_public_key, root)
+    pgbackrest, restic = _binary(pgbackrest), _binary(restic)
+    owner = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        try:
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("canonical_named_recovery_prepared_workspace_busy") from None
+        if _identity(os.fstat(owner)) != dict(roots)[workspace] or os.path.lexists(root / PREPARED_READY_FILENAME):
+            raise RuntimeError("canonical_named_recovery_preparation_already_used")
+        measured = site.checked_preflight()
+        verifier = site.baseline_verification
+        pair = _baseline(root, site.base_transfer_sha256, verifier, verifier["verification_sha256"])
+        base_restore = workspace / "base-archive"
+        base_restore.mkdir(mode=0o700)
+        unarmed = "qt_prepared_" + token_hex(16)
+        settings, space_oids = _native_restore(root=root, workspace=workspace, pgdata=pgdata,
+            tablespaces={name: path for name, (path, _) in destinations.items()}, pgbackrest=pgbackrest,
+            database_key=database_key, pair=pair, unarmed=unarmed, budget=site.database, deadline=deadline, check=check)
+        try:
+            native = verify_handoff(repository=root, receipt_sha256=verifier["pair_receipt_sha256"],
+                archive_restore=base_restore, pgbackrest=pgbackrest, restic=restic, database_key=database_key,
+                archive_key=base_archive_key, timeout_seconds=check(), max_archive_bytes=site.archive.bytes,
+                max_archive_objects=site.max_archive_objects, wal_segment_bytes=verifier["wal_segment_bytes"],
+                max_wal_segments=verifier["wal_segments"], reserve_bytes=site.archive.reserve_bytes, native_workspace=workspace)
+            if native != verifier:
+                raise RuntimeError("canonical_named_recovery_prepared_baseline_changed")
+            with capture_prepared_custody(pgdata=pgdata,
+                    tablespaces={name: path for name, (path, _) in destinations.items()}, archive_root=base_restore,
+                    max_entries=max_custody_entries, check=check) as custody:
+                baseline = prepare_archive_baseline(root / "complete.json", base_restore,
+                    expected_receipt_sha256=native["pair_receipt_sha256"], max_objects=site.max_archive_objects, check=check)
+                auto = _prepared_configuration(pgdata, unarmed)
+                custody.assert_held(check)
+                settings_sha256 = _file_hash(settings)
+                materialized = archive_evidence_hash({"custody_sha256": custody.sha256, "entries": custody.entries,
+                    "native_verification_sha256": native["verification_sha256"], "tablespace_oids": space_oids,
+                    "recovery_configuration_sha256": hashlib.sha256(auto).hexdigest()})
+                scope = _ready_scope(site, measured)
+                body = make_prepared_receiver_ready(scope=scope, materialized_sha256=materialized, expires_at=int(time()) + ready_seconds)
+                digest = verify_prepared_receiver_ready(body, scope=scope)
+                ready = _sign(body, signer)
+                _publish(root / PREPARED_READY_FILENAME, ready)
+                prepared = _PreparedReceiver(site, signer, root, roots, workspace, pgdata, destinations, space_oids,
+                    pgbackrest, restic, settings, settings_sha256, unarmed, base_restore, baseline, custody, ready, digest, os.getpid())
+                try:
+                    yield prepared
+                finally:
+                    prepared.active = False
+                    ready_path = root / PREPARED_READY_FILENAME
+                    if (_identity(root.lstat()) == dict(roots)[root] and ready_path.exists()
+                            and load_receipt(ready_path, max_bytes=_MAX_RECEIPT) == ready):
+                        ready_path.unlink()
+                        _sync(root)
+        finally:
+            settings.unlink()
+            _sync(workspace)
+    finally:
+        os.close(owner)
+
+
+def _check_receiver_roots(roots):
+    if any(_identity(path.lstat()) != identity for path, identity in roots):
+        raise RuntimeError("canonical_named_recovery_receiver_mount_changed")
+
+
+def _prepared_configuration(pgdata, unarmed):
+    config = pgdata / "postgresql.auto.conf"
+    if (os.path.lexists(pgdata / "postmaster.pid") or os.path.lexists(pgdata / "standby.signal")
+            or any(not path.is_file() or path.is_symlink() for path in (pgdata / "backup_label", pgdata / "recovery.signal"))):
+        raise RuntimeError("canonical_named_recovery_prepared_cluster_used")
+    raw = _private_bytes(config, limit=65536)
+    if (not re.search(rb"(?m)^recovery_target_name\s*=\s*'" + unarmed.encode() + rb"'\s*$", raw)
+            or not re.search(rb"(?m)^recovery_target_action\s*=\s*'shutdown'\s*$", raw)):
+        raise RuntimeError("canonical_named_recovery_unarmed_configuration_changed")
+    return raw
+
+
+def _arm_prepared(prepared, anchor):
+    raw = _prepared_configuration(prepared.pgdata, prepared.unarmed)
+    lines = [line for line in raw.splitlines(keepends=True)
+             if not re.match(rb"\s*recovery_target(?:_[a-z_]+)?\s*=", line)]
+    lines.extend((f"\nrecovery_target_name = '{anchor['restore_name']}'\n".encode(),
+                  f"recovery_target_timeline = '{anchor['timeline']}'\n".encode(), b"recovery_target_action = 'promote'\n"))
+    with TemporaryDirectory(prefix=".qt-arm-", dir=prepared.pgdata) as work:
+        path = Path(work) / "postgresql.auto.conf"
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
+            handle.writelines(lines)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(path, prepared.pgdata / path.name)
+    _sync(prepared.pgdata)
+    prepared.armed = True
+
+
+def _verify_prepared_wal(prepared, suffix, deadline, check):
+    if _file_hash(prepared.settings) != prepared.settings_sha256:
+        raise RuntimeError("canonical_named_recovery_prepared_pgbackrest_configuration_changed")
+    wal = suffix.wal
+    entries = []
+
+    def check_wal():
+        check()
+        if monotonic() >= deadline:
+            raise TimeoutError("canonical_named_recovery_prepared_wal_deadline")
+
+    with TemporaryDirectory(prefix="qt-prepared-wal-", dir=prepared.workspace) as work:
+        if shutil.disk_usage(work).free < wal["wal_segment_bytes"]:
+            raise RuntimeError("canonical_named_recovery_prepared_wal_workspace_insufficient")
+        env = {"PATH": os.defpath, "LC_ALL": "C", "HOME": work, "TMPDIR": work}
+        run = partial(_run_native, cwd=work, env=env, deadline=deadline, check=check_wal)
+        command = [str(prepared.pgbackrest), f"--config={prepared.settings}", "--stanza=qt", "--archive-async=n"]
+        for row in wal["files"]:
+            check_wal()
+            destination = Path(work) / row["segment"]
+            run([*command, "archive-get", row["segment"], str(destination)])
+            digest = hashlib.sha1()
+            with destination.open("rb") as stream:
+                while chunk := stream.read(1024**2):
+                    check_wal()
+                    digest.update(chunk)
+            checksum = digest.hexdigest()
+            if destination.stat().st_size != wal["wal_segment_bytes"] or checksum != row["wal_checksum"]:
+                raise RuntimeError("canonical_named_recovery_prepared_wal_native_mismatch")
+            entries.append([row["segment"], checksum])
+            destination.unlink()
+    pair = suffix.pair
+    report = {"schema": PREPARED_NATIVE_VERSION, "prepared_receiver_sha256": prepared.digest,
+              "verified_wal_sha256": archive_evidence_hash(entries), "wal_transfer_sha256": wal["wal_transfer_sha256"],
+              "baseline_verification_sha256": wal["baseline_verification_sha256"], "pair_receipt_sha256": wal["pair_receipt_sha256"],
+              "anchor_sha256": wal["anchor_sha256"], "wal_verified_through": wal["wal_transferred_through"],
+              **{key: pair[key] for key in ("database_identity", "database_label", "archive_snapshot", "storage_layout")}}
+    return report | {"verification_sha256": archive_evidence_hash(report)}
+
+
+def recover_named_site(*, prepared, suffix_key, pending_key, boot_isolated, verify_original_runtime, timeout_seconds):
+    """Consume the prepared receiver and replay the signed endpoint without bulk restoration."""
+    if (not isinstance(prepared, _PreparedReceiver) or not prepared.active or prepared.armed or prepared.owner_pid != os.getpid()
+            or not all(map(callable, (boot_isolated, verify_original_runtime)))
+            or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS):
+        raise ValueError("canonical_named_recovery_live_prepared_receiver_required")
+    site, root, workspace, pgdata = prepared.site, prepared.root, prepared.workspace, prepared.pgdata
+    destinations = prepared.destinations
+    measured = site.checked_preflight()
+    _assert_receiver_preflight_mounts(measured, root, workspace, pgdata, destinations)
+    ready = load_receipt(root / PREPARED_READY_FILENAME, max_bytes=_MAX_RECEIPT)
+    if ready != prepared.ready:
+        raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
+    ready_body = verify_signed_recovery(ready, site.receiver_public_key)
+    if verify_prepared_receiver_ready(ready_body, scope=_ready_scope(site, measured)) != prepared.digest:
+        raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
+    suffix_key = _private_credential(suffix_key, receiving=root, workspace=workspace)
     if pending_key is not None:
         pending_key = _private_credential(pending_key, receiving=root, workspace=workspace)
-    deadline = monotonic() + timeout_seconds
-    roots = ((root, root_id), (workspace, work_id), (pgdata, pgdata_id), *destinations.values())
+    deadline = monotonic() + min(timeout_seconds, ready_body["expires_at"] - time())
 
     def check():
         seconds = int(deadline - monotonic())
         if seconds < 1:
             raise TimeoutError("canonical_named_recovery_receiver_deadline")
-        if any(_identity(path.lstat()) != identity for path, identity in roots):
-            raise RuntimeError("canonical_named_recovery_receiver_mount_changed")
+        _check_receiver_roots(prepared.roots)
         return seconds
 
     request_path = root / "named-recovery-request.json"
@@ -520,73 +749,62 @@ def recover_named_site(*, site, signing_key, pgbackrest, restic, database_key, b
     while not request_path.exists():
         check()
         sleep(0.1)
-    request, anchor, anchor_path = _read_request(root, site)
+    request, anchor, anchor_path = _read_request(root, site, prepared_sha256=prepared.digest)
     deadline = min(deadline, monotonic() + request["expires_at"] - time())
     if response_path.exists() or response_path.is_symlink():
         raise RuntimeError("canonical_named_recovery_exchange_already_used")
     wal_options = _wal_options(site, anchor_path, request["anchor_sha256"], check)
-    pair = _baseline(root, site.base_transfer_sha256, site.baseline_verification, wal_options["baseline_verification_sha256"])
-    base_restore = workspace / "base-archive"
+    base_restore = prepared.base_restore
     suffix_restore = workspace / "final-archive"
     suffix_restore.mkdir(mode=0o700)
     suffix_id = _identity(suffix_restore.lstat())
     try:
         suffix = restore_named_archive_suffix(receiving=root, wal_options=wal_options,
             expected_wal_sha256=request["wal_transfer_sha256"], archive_transfer_sha256=request["archive_transfer_sha256"],
-            archive_restore=suffix_restore, restic=restic, decryption_key=suffix_key, limits=_limit(site.archive, check),
+            archive_restore=suffix_restore, restic=prepared.restic, decryption_key=suffix_key, limits=_limit(site.archive, check),
             native_workspace=workspace)
     except Exception:
         if _identity(suffix_restore.lstat()) == suffix_id and not any(suffix_restore.iterdir()):
             suffix_restore.rmdir()
         raise
-    base_restore.mkdir(mode=0o700)
-    settings = _native_restore(root=root, workspace=workspace, pgdata=pgdata,
-        tablespaces={name: path for name, (path, _) in destinations.items()}, pgbackrest=pgbackrest,
-        database_key=database_key, pair=pair, anchor=anchor, budget=site.database, deadline=deadline, check=check)
-    try:
-        native = verify_handoff(repository=root, receipt_sha256=site.baseline_verification["pair_receipt_sha256"],
-            archive_restore=base_restore, pgbackrest=pgbackrest, restic=restic, database_key=database_key, archive_key=base_archive_key,
-            timeout_seconds=check(), max_archive_bytes=site.archive.bytes, max_archive_objects=site.max_archive_objects,
-            wal_segment_bytes=site.baseline_verification["wal_segment_bytes"], max_wal_segments=site.baseline_verification["wal_segments"] + site.wal.files,
-            reserve_bytes=site.archive.reserve_bytes, anchor=anchor_path, anchor_sha256=request["anchor_sha256"],
-            isolated_pgdata=pgdata, native_workspace=workspace)
-        baseline = prepare_archive_baseline(root / "complete.json", base_restore,
-            expected_receipt_sha256=native["pair_receipt_sha256"], max_objects=site.max_archive_objects, check=check)
-        pending_verified = None
-        if request["pending"] is not None:
-            pending = request["pending"]
-            source = request["pending_source"]
-            boundary = {"database_identity": request["database_identity"], "source_commit_seq": request["source_commit_seq"],
-                        "anchor_sha256": request["anchor_sha256"]}
-            if (pending_key is None or set(pending) != {"transfer_sha256", "pre_anchor_sha256"}
-                    or source.get("boundary") != boundary or source.get("schema") != "qt.pending_raw_spool_source.v1"):
-                raise ValueError("canonical_named_recovery_pending_request_changed")
-            inactive = workspace / "inactive-pending"
-            inactive.mkdir(mode=0o700)
-            pending_verified = verify_pending_spool(receiving=root, expected_transfer_sha256=pending["transfer_sha256"],
-                scope=PendingSpoolScope(**source["scope"]), boundary=boundary, inactive_restore=inactive, restic=restic,
-                decryption_key=pending_key, limits=_limit(site.pending, check), max_entries=site.max_pending_entries,
-                expected_pre_anchor_sha256=pending["pre_anchor_sha256"])
-            if pending_verified["segments"] != source["segments"]:
-                raise RuntimeError("canonical_named_recovery_pending_receipts_differ")
-        with boot_isolated(pgdata, check) as (control_engine, target_engine):
-            _open_receive_database(control_engine, target_engine, anchor, pgdata, destinations, check)
-            with target_engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
-                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
-                closure = close_named_archive_suffix(conn, suffix=suffix, baseline=baseline, native_named=native,
-                    native_named_sha256=native["verification_sha256"], max_objects=site.max_archive_objects, timeout_seconds=check())
-            runtime = verify_original_runtime(target_engine, base_restore, suffix_restore, pending_verified, check)
-            if not _sha256(runtime):
-                raise RuntimeError("canonical_named_recovery_original_runtime_unverified")
-    finally:
-        settings.unlink()
-        _sync(workspace)
+    native = _verify_prepared_wal(prepared, suffix, min(deadline, monotonic() + site.wal.seconds), check)
+    pending_verified = None
+    if request["pending"] is not None:
+        pending = request["pending"]
+        source = request["pending_source"]
+        boundary = {"database_identity": request["database_identity"], "source_commit_seq": request["source_commit_seq"],
+                    "anchor_sha256": request["anchor_sha256"]}
+        if (pending_key is None or set(pending) != {"transfer_sha256", "pre_anchor_sha256"}
+                or source.get("boundary") != boundary or source.get("schema") != "qt.pending_raw_spool_source.v1"):
+            raise ValueError("canonical_named_recovery_pending_request_changed")
+        inactive = workspace / "inactive-pending"
+        inactive.mkdir(mode=0o700)
+        pending_verified = verify_pending_spool(receiving=root, expected_transfer_sha256=pending["transfer_sha256"],
+            scope=PendingSpoolScope(**source["scope"]), boundary=boundary, inactive_restore=inactive, restic=prepared.restic,
+            decryption_key=pending_key, limits=_limit(site.pending, check), max_entries=site.max_pending_entries,
+            expected_pre_anchor_sha256=pending["pre_anchor_sha256"])
+        if pending_verified["segments"] != source["segments"]:
+            raise RuntimeError("canonical_named_recovery_pending_receipts_differ")
+    prepared.custody.assert_held(check)
+    _arm_prepared(prepared, anchor)
+    with boot_isolated(pgdata, check) as (control_engine, target_engine):
+        _open_receive_database(control_engine, target_engine, anchor, pgdata, destinations, prepared.tablespace_oids, check)
+        prepared.custody.assert_archive_held(check)
+        with target_engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            closure = close_named_archive_suffix(conn, suffix=suffix, baseline=prepared.baseline, native_named=native,
+                native_named_sha256=native["verification_sha256"], max_objects=site.max_archive_objects, timeout_seconds=check())
+        runtime = verify_original_runtime(target_engine, base_restore, suffix_restore, pending_verified, check)
+        if not _sha256(runtime):
+            raise RuntimeError("canonical_named_recovery_original_runtime_unverified")
+        prepared.custody.assert_archive_held(check)
     check()
     closure = {key: value for key, value in closure.items() if key != "closure_sha256"}
     closure["receiver_runtime_sha256"] = runtime
     closure["closure_sha256"] = archive_evidence_hash(closure)
-    assignment = {key: request[key] for key in ("approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256")}
+    assignment = {key: request[key] for key in ("approved_package_sha256", "provider_boundary_sha256", "receiver_preflight_sha256",
+                                               "prepared_receiver_sha256")}
     reply = {"schema": _RESPONSE, "request_sha256": archive_evidence_hash(request), "archive_closure": closure, **assignment,
              "pending_spool_verified": pending_verified, "runtime_sha256": runtime}
-    _publish(response_path, _sign(reply, signer))
+    _publish(response_path, _sign(reply, prepared.signer))
     return reply
