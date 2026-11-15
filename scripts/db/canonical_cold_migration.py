@@ -259,8 +259,10 @@ class PostgresMigrationSource:
         return SourcePage(manifest, PostgresMigrationSource.source_authority(conn, row))
 
     @staticmethod
-    def source_authority(conn, page):
+    def source_authority(conn, page, *, check_budget=None):
         """Bind current published authority without creating a new proof receipt."""
+        if check_budget is not None:
+            check_budget()
         published = conn.execute(text("""SELECT g.preparation_id,g.generation,g.catalog_commitment,
                 prep.manifest_id AS prepared_id,prep.storage_day AS prepared_day,
                 prep.page_ordinal AS prepared_ordinal,prep.generation AS prepared_generation,
@@ -270,9 +272,13 @@ class PostgresMigrationSource:
             FROM market.fact_archive_active_generations g
             LEFT JOIN market.fact_archive_preparations prep ON prep.id=g.preparation_id WHERE g.manifest_id=:id"""),
             {"id": page["id"]}).mappings().one_or_none()
+        if check_budget is not None:
+            check_budget()
         receipt = conn.execute(text("""SELECT manifest_id,verifier_version,manifest_hash,catalog_hash,verification_hash
             FROM market.fact_archive_verifications WHERE manifest_id=:id AND verifier_version=:version"""),
             {"id": page["id"], "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
+        if check_budget is not None:
+            check_budget()
         binding = conn.execute(text("""SELECT preparation_id,catalog_commitment
             FROM market.fact_archive_verification_generations
             WHERE manifest_id=:id AND verifier_version=:version"""),
@@ -288,7 +294,7 @@ class PostgresMigrationSource:
             authority.update(kind="prepared_generation", preparation_id=published["preparation_id"],
                              generation=published["generation"], catalog_commitment=published["catalog_commitment"],
                              prepared_source_binding_hash=published["source_binding_hash"])
-            PostgresMigrationSource.verify_prepared_catalog(conn, page, published, authority)
+            PostgresMigrationSource.verify_prepared_catalog(conn, page, published, authority, check_budget=check_budget)
         if receipt is not None and dict(receipt) != _receipt(page, receipt["catalog_hash"]):
             raise RuntimeError(f"canonical_cold_migration_current_receipt_mismatch: id={page['id']}")
         expected_binding = ((published["preparation_id"], published["catalog_commitment"])
@@ -301,7 +307,7 @@ class PostgresMigrationSource:
         return authority
 
     @staticmethod
-    def verify_prepared_catalog(conn, page, prepared, authority):
+    def verify_prepared_catalog(conn, page, prepared, authority, *, check_budget=None):
         # Reuse the current preparation's commitment algorithm. Limit SQL to
         # one selected preparation and the deployed per-page catalog budgets.
         preparation = prepared["preparation_id"]
@@ -314,15 +320,21 @@ class PostgresMigrationSource:
                                        prepared["canonical_dependency_count"], prepared["canonical_dependency_root"], 50_000),
         }
         for kind, (columns, order, expected_count, expected_root, max_rows) in specifications.items():
+            if check_budget is not None:
+                check_budget()
             if not 0 <= expected_count <= max_rows:
                 raise RuntimeError(f"canonical_cold_migration_prepared_catalog_budget: id={page['id']} catalog={kind}")
             rows = conn.execute(text(f"SELECT batch_ordinal,{columns} FROM market.{PREPARED_CATALOG_TABLES[kind]} "
                 f"WHERE preparation_id=:id ORDER BY {order} LIMIT :limit"),
                 {"id": preparation, "limit": expected_count + 1}).mappings().all()
+            if check_budget is not None:
+                check_budget()
             projected = [{name: value for name, value in row.items() if name != "batch_ordinal"} for row in rows]
             root = catalog_root(projected)
             if len(rows) != expected_count or root != expected_root:
                 raise RuntimeError(f"canonical_cold_migration_prepared_catalog_root_mismatch: id={page['id']} catalog={kind}")
+            if check_budget is not None:
+                check_budget()
             receipts = conn.execute(text("""SELECT batch_ordinal,row_count,first_key,last_key,content_hash
                 FROM market.fact_archive_catalog_batches WHERE preparation_id=:id AND catalog_kind=:kind
                 ORDER BY batch_ordinal LIMIT :limit"""),
@@ -333,6 +345,8 @@ class PostgresMigrationSource:
             offset = 0
             keys = order.split(",")
             for ordinal, receipt in enumerate(receipts):
+                if check_budget is not None:
+                    check_budget()
                 end = offset + receipt["row_count"]
                 batch = projected[offset:end]
                 if (not batch or any(row["batch_ordinal"] != ordinal for row in rows[offset:end])

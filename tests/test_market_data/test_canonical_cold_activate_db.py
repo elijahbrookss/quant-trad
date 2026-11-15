@@ -360,6 +360,39 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
     receipts = [plan, *(audit_candidate(engine, checkpoint, day=day, **scope) for day in (legacy_day, daily_day)),
                 audit_candidate(engine, checkpoint, inventory=True, max_pages=4, **scope)]
     audit = validate_audit_receipts(receipts, target_identity=plan["database"], source_identity=plan["source_database"])
+    if not owner_path:
+        from scripts.db.canonical_cold_source_authority import verify_source_authority_preflight
+
+        preflight = verify_source_authority_preflight(
+            engine, audit=audit, expected_audit_hash=audit["audit_set_hash"], max_seconds=10,
+        )
+        assert (preflight["published_pages"], preflight["published_rows"], preflight["prepared_pages"]) == (2, 2, 2)
+        assert preflight["source_authority_inventory_hash"] == audit["source_authority_inventory_hash"]
+        assert 0 < preflight["inventory_seconds"] < preflight["elapsed_seconds"] <= 10
+        print("native_source_authority_preflight", preflight["inventory_seconds"], preflight["elapsed_seconds"])
+        changed = {key: value for key, value in audit.items() if key != "audit_set_hash"}
+        changed["source_authority_inventory_hash"] = "0" * 64
+        changed["audit_set_hash"] = archive_evidence_hash(changed)
+        with pytest.raises(RuntimeError, match="source_authority_inventory_changed"):
+            verify_source_authority_preflight(engine, audit=changed, expected_audit_hash=changed["audit_set_hash"],
+                                              max_seconds=10)
+        changed = {key: value for key, value in audit.items() if key != "audit_set_hash"}
+        changed["verified_pages"] = 1
+        changed["audit_set_hash"] = archive_evidence_hash(changed)
+        with pytest.raises(RuntimeError, match="exceeds_audited_pages"):
+            verify_source_authority_preflight(engine, audit=changed, expected_audit_hash=changed["audit_set_hash"],
+                                              max_seconds=10)
+        checks = 0
+
+        def early_deadline():
+            nonlocal checks
+            checks += 1
+            if checks == 5:
+                raise TimeoutError("fixture budget expired inside page proof")
+
+        with pytest.raises(TimeoutError, match="inside page proof"):
+            with source.snapshot() as conn:
+                activation.verify_source_authority_inventory(conn, storage.today, audit, check_budget=early_deadline)
     if owner_path:
         current = storage.repo.read_facts(series_id=storage.series_id, start=start, end=end)[0]
         retained_fact = storage.repo.read_facts(series_id=retained_series, start=start, end=end)[0]

@@ -168,7 +168,42 @@ def verify_mounted_candidate(conn, *, audit, store, limits, check_budget=None):
     return objects
 
 
-def _assert_source_authority_inventory(conn, cutoff, audit):
+def verify_source_authority_inventory(conn, cutoff, audit, *, check_budget):
+    """Recompute the full published archive authority of the retiring prefix."""
+    max_pages = audit["verified_pages"]
+    if type(max_pages) is not int or max_pages < 1:
+        raise ValueError("canonical_cold_activation_source_authority_inventory_budget_invalid")
+    check_budget()
+    rows = conn.execute(text("""
+        SELECT * FROM market.fact_archive_manifests
+        WHERE storage_day<:cutoff ORDER BY id COLLATE "C" LIMIT :limit
+    """).execution_options(yield_per=128), {"cutoff": cutoff, "limit": max_pages + 1}).mappings()
+    pages = rows_seen = prepared = 0
+
+    def witnesses():
+        nonlocal pages, rows_seen, prepared
+        for page in rows:
+            check_budget()
+            pages += 1
+            if pages > max_pages:
+                raise RuntimeError("canonical_cold_activation_source_authority_inventory_exceeds_audited_pages")
+            rows_seen += page["row_count"]
+            authority = PostgresMigrationSource.source_authority(conn, page, check_budget=check_budget)
+            prepared += authority["kind"] == "prepared_generation"
+            yield page["id"], page["storage_day"].isoformat(), archive_evidence_hash(authority)
+
+    try:
+        actual = manifest_inventory_hash(witnesses())
+    finally:
+        rows.close()
+    check_budget()
+    if actual != audit["source_authority_inventory_hash"]:
+        raise RuntimeError("canonical_cold_activation_source_authority_inventory_changed")
+    return {"source_authority_inventory_hash": actual, "published_pages": pages,
+            "published_rows": rows_seen, "prepared_pages": prepared}
+
+
+def _assert_source_authority_inventory(conn, cutoff, audit, *, check_budget):
     """Refuse changed exact published generations before any source DDL."""
     # A concurrent archive writer may stage a page elsewhere but cannot
     # mutate the published scope once the lifecycle/SQL writers are fenced.
@@ -176,23 +211,9 @@ def _assert_source_authority_inventory(conn, cutoff, audit):
               "fact_archive_preparations", "fact_archive_verification_generations",
               "fact_archive_verifications", "fact_archive_catalog_batches", *PREPARED_CATALOG_TABLES.values()}
     for table in sorted(tables):
+        check_budget()
         conn.execute(text(f'LOCK TABLE market."{table}" IN SHARE MODE NOWAIT'))
-    rows = conn.execute(text("""
-        SELECT * FROM market.fact_archive_manifests
-        WHERE storage_day<:cutoff ORDER BY id COLLATE "C"
-    """).execution_options(yield_per=128), {"cutoff": cutoff}).mappings()
-
-    def witnesses():
-        for page in rows:
-            authority = PostgresMigrationSource.source_authority(conn, page)
-            yield page["id"], page["storage_day"].isoformat(), archive_evidence_hash(authority)
-
-    try:
-        actual = manifest_inventory_hash(witnesses())
-    finally:
-        rows.close()
-    if actual != audit["source_authority_inventory_hash"]:
-        raise RuntimeError("canonical_cold_activation_source_authority_inventory_changed")
+    return verify_source_authority_inventory(conn, cutoff, audit, check_budget=check_budget)
 
 
 def _retention_sources(conn, cutoff, audit):
@@ -307,7 +328,7 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         raise RuntimeError("canonical_cold_activation_commit_boundary_changed")
     if _inventory_hash(conn) != audit["loaded_inventory_hash"]:
         raise RuntimeError("canonical_cold_activation_loaded_inventory_hash_mismatch")
-    _assert_source_authority_inventory(conn, cutoff, audit)
+    _assert_source_authority_inventory(conn, cutoff, audit, check_budget=database_fence.check_clock)
     _assert_verified_archive(conn, verified_objects)
     for table in COLD_CUSTODY_TABLE_NAMES:
         conn.exec_driver_sql(f"LOCK TABLE ONLY market.{table} IN SHARE MODE NOWAIT")
