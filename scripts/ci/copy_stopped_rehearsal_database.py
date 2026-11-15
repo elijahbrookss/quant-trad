@@ -165,6 +165,7 @@ def _workspace(root, scope, device):
         with os.fdopen(os.open(marker, _READ_FLAGS), "rb") as stream:
             if stream.read(len(encoded) + 1) != encoded:
                 raise RuntimeError("stopped_clone_scope_changed")
+        _sync(root)
     work.mkdir(mode=0o700, exist_ok=True)
     _private_root(work)
     _directory(work, device)
@@ -228,6 +229,7 @@ def _copy_file(source, destination, work, *, size, stamp, mode, device, check, r
         if (source_bytes != size or _sha_file(destination, check=check) != (digest, size)
                 or _stamp(source.lstat()) != stamp):
             raise RuntimeError(f"stopped_clone_checkpoint_bytes_changed: {destination.name}")
+        _sync(destination.parent)
         return digest, False
     reserve(size)
     staged = work / "file"
@@ -345,16 +347,16 @@ def copy_database(args):
                     if not os.path.lexists(destination):
                         destination.mkdir(mode=0o700)
                         os.chmod(destination, mode)
-                        _sync(destination)
-                        _sync(destination.parent)
                     if stat.S_IMODE(_directory(destination, device).st_mode) != mode:
                         raise RuntimeError(f"stopped_clone_destination_directory_mode_changed: {destination.name}")
+                    _sync(destination)
+                    _sync(destination.parent)
                 elif kind == "link":
                     if not os.path.lexists(destination):
                         destination.symlink_to(target)
-                        _sync(destination.parent)
                     if not stat.S_ISLNK(_member(destination, device).st_mode) or os.readlink(destination) != target:
                         raise RuntimeError("stopped_clone_destination_link_changed")
+                    _sync(destination.parent)
                 else:
                     source = getattr(args, role).joinpath(*parts)
                     checksum, new = _copy_file(source, destination, work, size=stamp[2], stamp=stamp, mode=mode,
