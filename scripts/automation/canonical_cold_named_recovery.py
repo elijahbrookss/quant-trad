@@ -40,7 +40,7 @@ from scripts.db.canonical_cold_recovery_archive_transport import (
 )
 from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope, measure_pending_spool, stage_pending_spool, verify_pending_spool
 from scripts.db.canonical_cold_recovery_suffix import PreparedArchiveBaseline, prepare_archive_baseline
-from scripts.db.canonical_cold_recovery_wal_transfer import _baseline, stage_final_wal
+from scripts.db.canonical_cold_recovery_wal_transfer import _baseline, stage_final_wal, verify_wal_prefix
 from scripts.db.canonical_cold_prepared_custody import capture_prepared_custody
 from scripts.db.fact_header_v2_capture import _bounded_step
 
@@ -678,10 +678,9 @@ def _arm_prepared(prepared, anchor):
     prepared.armed = True
 
 
-def _verify_prepared_wal(prepared, suffix, deadline, check):
+def _verify_native_wal_entries(prepared, wal, deadline, check):
     if _file_hash(prepared.settings) != prepared.settings_sha256:
         raise RuntimeError("canonical_named_recovery_prepared_pgbackrest_configuration_changed")
-    wal = suffix.wal
     entries = []
 
     def check_wal():
@@ -709,6 +708,62 @@ def _verify_prepared_wal(prepared, suffix, deadline, check):
                 raise RuntimeError("canonical_named_recovery_prepared_wal_native_mismatch")
             entries.append([row["segment"], checksum])
             destination.unlink()
+    return entries
+
+
+def verify_prepared_wal_prefix(*, prepared, after, through, prefix_sha256, timeout_seconds,
+                               previous_prefix_sha256=None, limits=None):
+    """Authenticate one installed archive batch before the receiver starts replay."""
+    if (not isinstance(prepared, _PreparedReceiver) or not prepared.active or prepared.armed
+            or prepared.owner_pid != os.getpid() or type(timeout_seconds) is not int
+            or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS):
+        raise ValueError("canonical_named_recovery_live_prepared_receiver_required")
+    site = prepared.site
+    limits = site.wal if limits is None else limits
+    if (not isinstance(limits, TransferLimits) or any(getattr(limits, name) > getattr(site.wal, name)
+            for name in ("seconds", "bytes", "files")) or limits.reserve_bytes < site.wal.reserve_bytes):
+        raise ValueError("canonical_named_recovery_prefix_outside_site_budget")
+    measured = site.checked_preflight()
+    ready = load_receipt(prepared.root / PREPARED_READY_FILENAME, max_bytes=_MAX_RECEIPT)
+    if ready != prepared.ready:
+        raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
+    ready_body = verify_signed_recovery(ready, site.receiver_public_key)
+    if verify_prepared_receiver_ready(ready_body, scope=_ready_scope(site, measured)) != prepared.digest:
+        raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
+    deadline = monotonic() + min(timeout_seconds, limits.seconds, ready_body["expires_at"] - time())
+
+    def check():
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("canonical_named_recovery_receiver_deadline")
+        _check_receiver_roots(prepared.roots)
+        return remaining
+
+    prepared.custody.assert_held(check)
+    verifier = site.baseline_verification
+    seconds = int(check())
+    if seconds < 1:
+        raise TimeoutError("canonical_named_recovery_receiver_deadline")
+    wal = verify_wal_prefix(receiving=prepared.root, base_transfer_sha256=site.base_transfer_sha256,
+        baseline=verifier, baseline_verification_sha256=verifier["verification_sha256"], after=after, through=through,
+        expected_hash=prefix_sha256, previous_prefix_sha256=previous_prefix_sha256,
+        limits=replace(limits, seconds=min(limits.seconds, seconds)))
+    entries = _verify_native_wal_entries(prepared, wal | {"wal_segment_bytes": verifier["wal_segment_bytes"]},
+                                         deadline, check)
+    prepared.custody.assert_held(check)
+    if load_receipt(prepared.root / PREPARED_READY_FILENAME, max_bytes=_MAX_RECEIPT) != ready:
+        raise RuntimeError("canonical_named_recovery_prepared_receiver_changed")
+    check()
+    return _sign({"schema": "qt.named_recovery_wal_prefix_verification.v1",
+                  "prepared_receiver_sha256": prepared.digest, "pair_receipt_sha256": verifier["pair_receipt_sha256"],
+                  "baseline_verification_sha256": verifier["verification_sha256"], "wal_prefix_sha256": prefix_sha256,
+                  "previous_prefix_sha256": previous_prefix_sha256, "after": after, "through": through,
+                  "verified_wal_sha256": archive_evidence_hash(entries), "segments": len(entries)}, prepared.signer)
+
+
+def _verify_prepared_wal(prepared, suffix, deadline, check):
+    wal = suffix.wal
+    entries = _verify_native_wal_entries(prepared, wal, deadline, check)
     pair = suffix.pair
     report = {"schema": PREPARED_NATIVE_VERSION, "prepared_receiver_sha256": prepared.digest,
               "verified_wal_sha256": archive_evidence_hash(entries), "wal_transfer_sha256": wal["wal_transfer_sha256"],
