@@ -280,6 +280,25 @@ def test_only_current_boundary_fields_can_change_in_approved_scope(artifacts):
                                provider_boundary="c" * 64, independent_recovery="d" * 64)
 
 
+def test_reviewed_custody_move_requires_exact_source_and_shared_target(artifacts):
+    path, approved, inventory = artifacts
+    reviewed = package.load_approved_package(path, approved_package_hash=approved, inventory=inventory)
+    raw = reviewed["scope"]["raw_mapping_index"]
+    movement = {"source_placement_hash": "f" * 64, "max_copy_bytes": 2**30, "timeout_seconds": 60}
+    scope = {**reviewed["scope"], "custody_move": movement,
+             "custody_tablespace_oid": raw["tablespace_oid"], "custody_target_id": raw["target_id"]}
+    approved = _write(path, json.dumps({**reviewed, "scope": scope}).encode())
+    reviewed = package.load_approved_package(path, approved_package_hash=approved, inventory=inventory)
+    boundary = {"approved_package_hash": approved, "source_commit_seq": 105,
+                "provider_boundary": "c" * 64, "independent_recovery": "d" * 64}
+    assert package.bind_execution(reviewed, **boundary)[0]["custody_move"] == movement
+    for change in ({"custody_tablespace_oid": raw["tablespace_oid"] + 1},
+                   {"custody_move": {**movement, "source_placement_hash": "invalid"}},
+                   {"custody_move": None}):
+        with pytest.raises(ValueError, match="custody_move_scope_invalid"):
+            package.bind_execution({**reviewed, "scope": {**scope, **change}}, **boundary)
+
+
 def test_changed_evidence_or_inventory_refuses_the_package(artifacts):
     path, approved, inventory = artifacts
     reviewed = package.load_approved_package(path, approved_package_hash=approved, inventory=inventory)

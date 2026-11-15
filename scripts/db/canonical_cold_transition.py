@@ -16,8 +16,8 @@ from market_data.archive_namespace import archive_namespace
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from scripts.automation.canonical_cold_package import bind_execution
 from scripts.db.canonical_cold_activate import (
-    activate_cold_storage, assert_original_identity_registry, raw_index_placement_scope, read_activation_outcome,
-    read_original_watermark, verify_mounted_candidate,
+    activate_cold_storage, assert_original_custody_placement, assert_original_identity_registry,
+    raw_index_placement_scope, read_activation_outcome, read_original_watermark, verify_mounted_candidate,
 )
 from scripts.db.canonical_cold_database_fence import (
     close_database_fence, native_transaction_mode, reopen_database_fence, retain_read_session,
@@ -86,6 +86,7 @@ def run_fenced_transition(
         commit = current_original_watermark(connection)
         assert_original_identity_registry(connection, scope=scope["identity_registry"])
         assert_raw_mapping_index_placement(connection, **raw_index_scope, on_history=False)
+        assert_original_custody_placement(connection, scope)
         if source_commit is not None and commit != source_commit:
             raise RuntimeError("canonical_cold_transition_original_boundary_changed")
         return "original"
@@ -106,6 +107,7 @@ def run_fenced_transition(
                     raise RuntimeError("canonical_cold_transition_source_behind_approved_floor")
                 assert_original_identity_registry(conn, scope=scope["identity_registry"])
                 assert_raw_mapping_index_placement(conn, **raw_index_scope, on_history=False)
+                assert_original_custody_placement(conn, scope)
                 if verified_objects is None:
                     verified_objects = verify_mounted_candidate(
                         conn, audit=audit, store=store, limits=limits, check_budget=remaining_seconds,
@@ -193,6 +195,8 @@ def run_fenced_transition(
                     if physical is not None:
                         precommit["physical_supervision"] = physical
                         result["physical_supervision"] = physical
+                    if "custody_move" in execution:
+                        precommit["custody_move_receipt_hash"] = result["custody_move"]["receipt_hash"]
                     record("activation_precommit_verified", precommit)
         except Exception as error:
             recovered_commit = False

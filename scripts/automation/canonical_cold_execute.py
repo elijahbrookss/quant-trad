@@ -15,7 +15,8 @@ from scripts.automation.canonical_cold_host_hold import hold_cold_cutover
 from scripts.automation.canonical_cold_package import load_approved_package, read_approved_candidate_witness
 from scripts.automation.canonical_cold_recovery_checks import bind_approved_recovery_checks
 from scripts.db.canonical_cold_activate import (
-    assert_original_identity_registry, raw_index_placement_scope, read_original_watermark, verify_mounted_candidate,
+    assert_original_custody_placement, assert_original_identity_registry, raw_index_placement_scope,
+    read_original_watermark, verify_mounted_candidate,
 )
 from scripts.db.canonical_cold_database_fence import _database, native_transaction_mode, retain_read_session
 from scripts.db.canonical_cold_raw_index import _fork_bytes, assert_raw_mapping_index_placement
@@ -26,9 +27,15 @@ from scripts.db.fact_header_v2_capture import _bounded_step
 
 def _raw_index_headroom(conn, scope):
     raw = assert_raw_mapping_index_placement(conn, **raw_index_placement_scope(scope), on_history=False)
-    return {"history_filesystem_uuid": raw["target"]["filesystem_uuid"], "raw_index_bytes": _fork_bytes(raw["member"]),
-            "history_directory": raw["target"]["location"],
-            "database_directory": conn.scalar(text("SELECT current_setting('data_directory')"))}
+    footprint = {"history_filesystem_uuid": raw["target"]["filesystem_uuid"], "raw_index_bytes": _fork_bytes(raw["member"]),
+                 "history_directory": raw["target"]["location"],
+                 "database_directory": conn.scalar(text("SELECT current_setting('data_directory')"))}
+    custody = assert_original_custody_placement(conn, scope)
+    if custody is not None:
+        if custody["target"] != raw["target"]:
+            raise RuntimeError("canonical_cold_execute_copy_targets_changed")
+        footprint["custody_bytes"] = custody["copy_bytes"]
+    return footprint
 
 
 def _read_open_original(conn, control, *, package, timeout_seconds):

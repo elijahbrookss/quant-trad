@@ -35,6 +35,7 @@ from scripts.db import canonical_cold_transition as transition_runner
 from scripts.db import fact_header_v2_online_proof as online
 from scripts.db.canonical_cold_audit import audit_candidate
 from scripts.db.canonical_cold_commit_outcome import observe_activation_transaction, prepare_activation_transaction
+from scripts.db.canonical_cold_custody_placement import inspect_custody_placement
 from scripts.db.canonical_cold_database_fence import _database, close_database_fence, reopen_database_fence, retain_read_session
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, prepare_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
@@ -197,6 +198,14 @@ def native_raw_index_target(storage):
                     conn.exec_driver_sql("ALTER INDEX market.pk_market_raw_archive_record_mapping SET TABLESPACE pg_default")
                 if observed["table_tablespace_oid"] != 1663:
                     conn.exec_driver_sql(f"ALTER TABLE {TABLE} SET TABLESPACE pg_default")
+                for table in COLD_CUSTODY_TABLE_NAMES:
+                    conn.exec_driver_sql(f"ALTER TABLE market.{table} SET TABLESPACE pg_default")
+                    indexes = conn.scalars(text("""
+                        SELECT indexrelid::regclass::text FROM pg_index
+                        WHERE indrelid=CAST(:table AS regclass)
+                    """), {"table": f"market.{table}"}).all()
+                    for index in indexes:
+                        conn.exec_driver_sql(f"ALTER INDEX {index} SET TABLESPACE pg_default")
             engine.dispose()
             with admin.connect() as conn:
                 conn.exec_driver_sql(f"DROP TABLESPACE IF EXISTS {name}")
@@ -337,11 +346,13 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
         """)).one()
         database_identity = f"{cluster}/{oid}"
         _configure_fixture_catalog(conn, database_identity, new_store.root)
-        custody_tablespace = conn.scalar(text("SELECT dattablespace::bigint FROM pg_database WHERE datname=current_database()"))
-        custody_oids = {
-            table: conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"), {"name": f"market.{table}"})
-            for table in COLD_CUSTODY_TABLE_NAMES
-        }
+        custody_target = raw_scope["target_id"] if native else "activation-fixture"
+        custody_before = inspect_custody_placement(conn, expected_database=database_identity, target_id=custody_target)
+        custody_tablespace = custody_before["target"]["tablespace_oid"]
+        custody_oids = custody_before["relation_oids"]
+        if native:
+            assert custody_tablespace == raw_scope["tablespace_oid"]
+            assert {item["tablespace_oid"] for item in custody_before["members"]} == {1663}
         payload_children = {
             fact_partition_name(day): conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
                                                   {"name": f"market.{fact_partition_name(day)}"})
@@ -423,11 +434,14 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
         "audit_set_hash": audit["audit_set_hash"], "source_commit_seq": latest_commit,
         "loaded_inventory_hash": audit["loaded_inventory_hash"],
         "payload_children": payload_children,
-        "custody_target_id": "activation-fixture", "custody_tablespace_oid": custody_tablespace,
+        "custody_target_id": custody_target, "custody_tablespace_oid": custody_tablespace,
         "custody_relation_oids": custody_oids,
         "raw_mapping_index": raw_scope,
         "identity_registry": {key: identity[key] for key in ("old_oid", "new_oid")},
     }
+    if native:
+        execution["custody_move"] = {"source_placement_hash": custody_before["placement_hash"],
+                                     "max_copy_bytes": 1024**2, "timeout_seconds": 15}
     if owner_path:
         execution["evidence"]["candidate_transaction_witness"] = sha256(candidate_witness).hexdigest()
     outcome_arguments = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
@@ -476,6 +490,10 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 assert raw["before"]["tablespace_oid"] == 1663
                 assert raw["after"]["tablespace_oid"] == raw_scope["tablespace_oid"]
                 assert raw["after"]["index_oid"] == raw_scope["index_oid"]
+                custody = result["custody_move"]
+                assert custody["relation_oids"] == custody_oids and custody["copy_bytes"] == custody_before["copy_bytes"] > 0
+                assert {item["tablespace_oid"] for item in custody["before"]} == {1663}
+                assert {item["tablespace_oid"] for item in custody["after"]} == {custody_tablespace}
             verified_candidate.append(result)
 
         with _fence_connections(storage) as (retained, control):
@@ -517,6 +535,17 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                                                         limits=ArchiveVerificationLimits(max_bytes=scope["bytes"] - 1))
                 verified = activation.verify_mounted_candidate(retained, audit=audit, store=new_store, limits=limits)
 
+            if native:
+                stale_scope = {**package["scope"], "custody_move": {
+                    **execution["custody_move"], "source_placement_hash": "0" * 64,
+                }}
+                with pytest.raises(RuntimeError, match="canonical_custody_source_placement_changed"):
+                    run_fenced_transition(
+                        retained, control, **{**owner, "package": {**package, "scope": stale_scope}},
+                        verified_objects=verified,
+                    )
+                assert phases == []
+
             changed = {**witness, "cases": [dict(case) for case in witness["cases"]]}
             changed["cases"][1]["expected_hash"] = "f" * 64
             changed_witness = json.dumps(changed).encode()
@@ -537,6 +566,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 assert retained.scalar(text(f"SELECT '{STAGED}'::regclass::oid")) == identity["new_oid"]
                 if native:
                     assert inspect_raw_mapping_index_member(retained)["tablespace_oid"] == 1663
+                    assert activation.assert_original_custody_placement(retained, execution) == custody_before
             phases.clear()
 
             if native:
@@ -554,6 +584,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     assert activation.read_activation_outcome(retained, **outcome_arguments) == "original"
                     assert retained.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["old_oid"]
                     assert inspect_raw_mapping_index_member(retained)["tablespace_oid"] == 1663
+                    assert activation.assert_original_custody_placement(retained, execution) == custody_before
                 phases.clear()
             if retain_reader:
                 def lose_writer_before_commit(connection, _result):
@@ -635,13 +666,15 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     assert item.filesystem_uuid == expected_uuid
                     return item
 
-                def capacity(*, history_filesystem_uuid, raw_index_bytes, database_directory, history_directory, timeout_seconds):
+                def capacity(*, history_filesystem_uuid, raw_index_bytes, database_directory, history_directory,
+                             timeout_seconds, custody_bytes=0):
                     assert history_filesystem_uuid and raw_index_bytes > 0 and timeout_seconds > 0
                     assert database_directory.startswith("/") and history_directory.startswith("/")
                     physical_samples.append(raw_index_bytes)
                     if refuse_final_capacity and len(physical_samples) == 3:
                         raise RuntimeError("fixture free space fell during independent restore")
-                    receipt = {"raw_index_bytes": raw_index_bytes, "devices": {
+                    assert custody_bytes == (custody_before["copy_bytes"] if native else 0)
+                    receipt = {"raw_index_bytes": raw_index_bytes, "custody_bytes": custody_bytes, "devices": {
                         tier: {**asdict(item), "reserve_bytes": reserve, "temporary_bytes": allowance}
                         for tier, item in devices.items()
                     }}
@@ -765,7 +798,14 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
         if native:
             with engine.begin() as conn:
                 receipt_hash = conn.scalar(text("SELECT evidence->'raw_mapping_index'->>'receipt_hash' FROM market.fact_storage_state"))
+                custody_hash = conn.scalar(text("SELECT evidence->'custody_move'->>'receipt_hash' FROM market.fact_storage_state"))
+                observed_custody = inspect_custody_placement(
+                    conn, expected_database=database_identity, target_id=custody_target,
+                )
             assert precommit["raw_mapping_index_receipt_hash"] == receipt_hash
+            assert precommit["custody_move_receipt_hash"] == custody_hash == result["custody_move"]["receipt_hash"]
+            assert observed_custody["copy_bytes"] == 0
+            assert observed_custody["members"] == result["custody_move"]["after"]
     else:
         _exercise_fence_failures(storage, new_store, audit, outcome_arguments, receipts,
                                  identity, (legacy_day, daily_day))

@@ -67,6 +67,8 @@ def observe_held_activation(control, *, state_root, inventory, package_path, app
         if precommit is not None and (
             precommit.get("execution_hash") != execution_hash or precommit.get("xid") != transaction["xid"]
             or not _pin(precommit.get("witness_hash")) or not _pin(precommit.get("raw_mapping_index_receipt_hash"))
+            or (("custody_move" in execution) != ("custody_move_receipt_hash" in precommit))
+            or ("custody_move" in execution and not _pin(precommit.get("custody_move_receipt_hash")))
             or not isinstance(precommit.get("identity_retirement"), dict) or not precommit.get("wal_before_commit")
         ):
             raise RuntimeError("canonical_cold_commit_observer_precommit_changed")

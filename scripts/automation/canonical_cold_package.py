@@ -85,7 +85,7 @@ def load_approved_package(path, *, approved_package_hash, inventory):
             or type(package["max_outage_seconds"]) is not int
             or not 1 <= package["max_outage_seconds"] <= MAX_MIGRATION_SECONDS
             or not _pin(package["runtime_model_hash"])
-            or not isinstance(package["scope"], dict) or package["scope"].keys() != _EXECUTION_SCOPE
+            or not isinstance(package["scope"], dict) or package["scope"].keys() - {"custody_move"} != _EXECUTION_SCOPE
             or not isinstance(package["artifacts"], dict)
             or package["artifacts"].keys() != _PHYSICAL_GATES | {"command_sheet", "host_inventory", "runtime_model"}):
         raise ValueError("canonical_cold_package_invalid_structure")

@@ -28,7 +28,9 @@ from portal.backend.service.storage.repos.cold_retirement import (
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from scripts.db.canonical_cold_audit import _ensure_target, _plan
-from scripts.db.canonical_cold_custody_placement import assert_custody_placement
+from scripts.db.canonical_cold_custody_placement import (
+    assert_custody_placement, custody_placement_hash, inspect_custody_move_source, move_custody_tablespace,
+)
 from scripts.db.canonical_cold_database_fence import DatabaseFence
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, _SWAP_RECEIPT, _oid, swap_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase
@@ -90,6 +92,32 @@ def raw_index_placement_scope(execution):
     }
 
 
+def _valid_custody_move(scope):
+    return (isinstance(scope, dict) and scope.keys() == {"source_placement_hash", "max_copy_bytes", "timeout_seconds"}
+            and _valid_digest(scope["source_placement_hash"])
+            and type(scope["max_copy_bytes"]) is int and 0 < scope["max_copy_bytes"] <= 2**63 - 1
+            and type(scope["timeout_seconds"]) is int and 1 <= scope["timeout_seconds"] <= MAX_MIGRATION_SECONDS)
+
+
+def custody_placement_scope(execution):
+    identity = execution["target_database"]
+    return {
+        "expected_database": f"{identity['system_identifier']}/{identity['database_oid']}",
+        "target_id": execution["custody_target_id"],
+        "expected_tablespace_oid": execution["custody_tablespace_oid"],
+        "expected_relation_oids": execution["custody_relation_oids"],
+    }
+
+
+def assert_original_custody_placement(conn, execution):
+    scope = custody_placement_scope(execution)
+    if "custody_move" not in execution:
+        assert_custody_placement(conn, **scope)
+        return None
+    move = execution["custody_move"]
+    return inspect_custody_move_source(conn, **scope, source_placement_hash=move["source_placement_hash"])
+
+
 def validate_execution_record(execution, *, expected_execution_hash):
     """Pin the exact approved record separately from component audit receipts."""
     if not _valid_digest(expected_execution_hash) or archive_evidence_hash(execution) != expected_execution_hash:
@@ -101,7 +129,7 @@ def validate_execution_record(execution, *, expected_execution_hash):
     if not _valid_identity_registry(execution.get("identity_registry")):
         raise ValueError("canonical_cold_activation_identity_registry_scope_invalid")
     if (
-        execution.keys() != _EXECUTION_SCOPE | {"schema", "approved_package_hash", "evidence", "source_commit_seq"}
+        execution.keys() - {"custody_move"} != _EXECUTION_SCOPE | {"schema", "approved_package_hash", "evidence", "source_commit_seq"}
         or not isinstance(execution.get("evidence"), dict)
         or not _valid_digest(execution.get("approved_package_hash"))
         or set(execution["evidence"]) != _PHYSICAL_GATES
@@ -123,6 +151,12 @@ def validate_execution_record(execution, *, expected_execution_hash):
                    for oid in execution["custody_relation_oids"].values())
     ):
         raise ValueError("canonical_cold_activation_incomplete_execution_record")
+    if "custody_move" in execution and (
+        not _valid_custody_move(execution["custody_move"])
+        or (execution["custody_target_id"], execution["custody_tablespace_oid"])
+        != (execution["raw_mapping_index"]["target_id"], execution["raw_mapping_index"]["tablespace_oid"])
+    ):
+        raise ValueError("canonical_cold_activation_custody_move_scope_invalid")
 
 
 def _inventory_hash(conn, *, objects=None):
@@ -334,11 +368,7 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         conn.exec_driver_sql(f"LOCK TABLE ONLY market.{table} IN SHARE MODE NOWAIT")
     conn.exec_driver_sql("LOCK TABLE public.portal_storage_targets, public.portal_storage_header_tablespaces "
                          "IN SHARE MODE NOWAIT")
-    assert_custody_placement(
-        conn, expected_database=f"{target.system_identifier}/{target.oid}",
-        target_id=execution["custody_target_id"], expected_tablespace_oid=execution["custody_tablespace_oid"],
-        expected_relation_oids=execution["custody_relation_oids"],
-    )
+    assert_original_custody_placement(conn, execution)
     retention = _retention_sources(conn, cutoff, audit)
     payloads = _payload_children(conn, cutoff, execution["payload_children"], retention)
     if conn.scalar(text("""
@@ -346,6 +376,13 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
           WHERE storage_day<:cutoff AND state IN ('building','ready'))
     """), {"cutoff": cutoff}):
         raise RuntimeError("canonical_cold_activation_unfinished_archive_preparations")
+    custody_move = None
+    if "custody_move" in execution:
+        database_fence.assert_quiet(conn)
+        moved = move_custody_tablespace(
+            conn, **custody_placement_scope(execution), **execution["custody_move"],
+        )
+        custody_move = moved | {"receipt_hash": archive_evidence_hash(moved)}
     approved_move = execution["raw_mapping_index"]
     raw_index = move_raw_mapping_index(
         conn, fence=database_fence, **raw_index_placement_scope(execution), max_copy_bytes=approved_move["max_copy_bytes"],
@@ -399,6 +436,8 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         "raw_mapping_index": raw_index,
         "evidence": execution["evidence"],
     }
+    if custody_move is not None:
+        result["custody_move"] = custody_move
     written = conn.execute(text("""
         UPDATE market.fact_storage_state SET layout_version=:layout,completed_at=clock_timestamp(),
             evidence=CAST(:evidence AS jsonb)
@@ -447,6 +486,27 @@ def verify_committed_raw_mapping_index(conn, *, scope, receipt):
         raise RuntimeError("canonical_cold_activation_raw_index_outcome_changed")
 
 
+def verify_committed_custody(conn, *, execution, receipt):
+    current = assert_custody_placement(conn, **custody_placement_scope(execution))
+    if "custody_move" not in execution:
+        if receipt is not None:
+            raise RuntimeError("canonical_cold_activation_unapproved_custody_move")
+        return
+    if (not isinstance(receipt, dict) or not isinstance(receipt.get("before"), list)
+            or not isinstance(receipt.get("after"), list)
+            or type(receipt.get("copy_bytes")) is not int
+            or not 0 <= receipt["copy_bytes"] <= execution["custody_move"]["max_copy_bytes"]
+            or receipt.get("receipt_hash") != archive_evidence_hash({
+                key: value for key, value in receipt.items() if key != "receipt_hash"
+            })
+            or custody_placement_hash(receipt["before"]) != execution["custody_move"]["source_placement_hash"]
+            or custody_placement_hash(receipt["after"]) != current["placement_hash"]
+            or receipt.get("database_identity") != current["database_identity"]
+            or receipt.get("target") != current["target"]
+            or receipt.get("relation_oids") != current["relation_oids"]):
+        raise RuntimeError("canonical_cold_activation_custody_move_outcome_changed")
+
+
 def read_original_watermark(conn, *, expected, expected_inventory):
     """Check original SQL authority before a final boundary receipt exists."""
     layout, _, watermark = _read_authority(conn, expected)
@@ -468,6 +528,7 @@ def read_activation_outcome(conn, *, execution, expected_execution_hash, require
         _assert_original_inventory(conn, execution["loaded_inventory_hash"])
         assert_original_identity_registry(conn, scope=execution["identity_registry"])
         assert_raw_mapping_index_placement(conn, **raw_index_scope, on_history=False)
+        assert_original_custody_placement(conn, execution)
         return "original"
     if (layout != COLD_HISTORY_LAYOUT_VERSION or not isinstance(evidence, dict)
             or evidence.get("execution_hash") != expected_execution_hash
@@ -479,6 +540,7 @@ def read_activation_outcome(conn, *, execution, expected_execution_hash, require
         raise RuntimeError("canonical_cold_activation_outcome_uncertain")
     assert_fact_storage_contract(conn)
     verify_committed_raw_mapping_index(conn, scope=raw_index_scope, receipt=evidence.get("raw_mapping_index"))
+    verify_committed_custody(conn, execution=execution, receipt=evidence.get("custody_move"))
     if require_identity_retired:
         identity = evidence["identity"]
         approved_identity = execution["identity_registry"]

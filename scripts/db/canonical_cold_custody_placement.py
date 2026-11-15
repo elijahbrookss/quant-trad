@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 
 from sqlalchemy import text
 
+from market_data.fact_archive import archive_evidence_hash
 from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES
 from scripts.db.archive_reference_v2_placement import _definition
 from scripts.db.fact_header_v2_capture import _bounded_step
@@ -111,16 +112,33 @@ def inspect_custody_placement(conn, *, expected_database, target_id):
     target = _target(conn, expected_database, target_id)
     members = _members(conn)
     return {"database_identity": expected_database, "target": target, "relation_oids": _relation_oids(members),
-            "members": members, "copy_bytes": sum(row["bytes"] for row in members
+            "members": members, "placement_hash": custody_placement_hash(members),
+            "copy_bytes": sum(row["bytes"] for row in members
                                                    if row["tablespace_oid"] != target["tablespace_oid"])}
+
+
+def custody_placement_hash(members):
+    """Bind relation OIDs and file placement while allowing fork allocations to grow."""
+    return archive_evidence_hash({"members": [
+        {key: value for key, value in row.items() if key != "bytes"} for row in members
+    ]})
+
+
+def inspect_custody_move_source(conn, *, expected_database, target_id, expected_tablespace_oid,
+                                expected_relation_oids, source_placement_hash):
+    inspected = inspect_custody_placement(conn, expected_database=expected_database, target_id=target_id)
+    _require_scope(inspected["members"], inspected["target"], expected_relation_oids, expected_tablespace_oid)
+    if inspected["placement_hash"] != source_placement_hash:
+        raise RuntimeError("canonical_custody_source_placement_changed")
+    return inspected
 
 
 def assert_custody_placement(conn, *, expected_database, target_id, expected_tablespace_oid, expected_relation_oids):
     """Bind every existing custody member to the approved registered tablespace."""
-    target = _target(conn, expected_database, target_id)
-    members = _members(conn)
-    _require_scope(members, target, expected_relation_oids, expected_tablespace_oid)
-    _require_placement(members, target)
+    inspected = inspect_custody_placement(conn, expected_database=expected_database, target_id=target_id)
+    _require_scope(inspected["members"], inspected["target"], expected_relation_oids, expected_tablespace_oid)
+    _require_placement(inspected["members"], inspected["target"])
+    return inspected
 
 
 def _definitions(conn):
@@ -143,7 +161,7 @@ def _logical_members(members):
 
 
 def move_custody_tablespace(conn, *, expected_database, target_id, expected_tablespace_oid,
-                          expected_relation_oids, max_copy_bytes, timeout_seconds):
+                          expected_relation_oids, max_copy_bytes, timeout_seconds, source_placement_hash=None):
     """Move only the reviewed custody tables in a caller-owned transaction.
 
     PostgreSQL performs the byte-preserving relation moves. This step never
@@ -168,6 +186,8 @@ def move_custody_tablespace(conn, *, expected_database, target_id, expected_tabl
             conn.exec_driver_sql(f"LOCK TABLE ONLY market.{name} IN ACCESS EXCLUSIVE MODE NOWAIT")
         before = _members(conn)
         _require_scope(before, target, expected_relation_oids, expected_tablespace_oid)
+        if source_placement_hash is not None and custody_placement_hash(before) != source_placement_hash:
+            raise RuntimeError("canonical_custody_source_placement_changed")
         on_destination = {row["relation"] for row in before
                           if row["member_kind"] == "heap" and row["tablespace_oid"] == expected_tablespace_oid}
         if any(row["relation"] in on_destination and row["member_kind"] in {"toast", "toast_index"}

@@ -93,15 +93,20 @@ def bind_approved_capacity_checks(*, package_path, package, archive_root, databa
     ssd, hdd = _device_plan(plan["ssd"]), _device_plan(plan["hdd"])
     archive = _absolute_path(str(archive_root))
     max_copy = package["scope"]["raw_mapping_index"]["max_copy_bytes"]
+    custody_max_copy = package["scope"].get("custody_move", {}).get("max_copy_bytes", 0)
     if (ssd["filesystem_uuid"] == hdd["filesystem_uuid"] or ssd["path"] == hdd["path"]
-            or not archive.is_relative_to(hdd["path"]) or hdd["temporary_bytes"] < max_copy or not _pin(database_container)):
+            or not archive.is_relative_to(hdd["path"])
+            or hdd["temporary_bytes"] < max_copy + custody_max_copy or not _pin(database_container)):
         raise ValueError("canonical_cold_capacity_plan_scope_changed")
 
-    def check(*, history_filesystem_uuid, raw_index_bytes, database_directory, history_directory, timeout_seconds):
+    def check(*, history_filesystem_uuid, raw_index_bytes, database_directory, history_directory, timeout_seconds,
+              custody_bytes=0):
         if history_filesystem_uuid != hdd["filesystem_uuid"]:
             raise RuntimeError("canonical_cold_capacity_history_registration_changed")
         if type(raw_index_bytes) is not int or not 0 < raw_index_bytes <= max_copy:
             raise RuntimeError("canonical_cold_capacity_raw_index_copy_budget_exceeded")
+        if type(custody_bytes) is not int or not 0 <= custody_bytes <= custody_max_copy:
+            raise RuntimeError("canonical_cold_capacity_custody_copy_budget_exceeded")
         deadline = monotonic() + timeout_seconds
 
         def remaining():
@@ -161,6 +166,7 @@ def bind_approved_capacity_checks(*, package_path, package, archive_root, databa
         remaining()
         receipt = {"plan_sha256": digest, "observed_at": datetime.now(UTC).isoformat(),
                    "devices": observed, "archive_path": actual_archive.path, "raw_index_bytes": raw_index_bytes,
+                   "custody_bytes": custody_bytes, "total_copy_bytes": raw_index_bytes + custody_bytes,
                    "postgresql": postgresql}
         return receipt | {"receipt_hash": archive_evidence_hash(receipt)}
 

@@ -57,13 +57,15 @@ def physical_plan(tmp_path, monkeypatch):
     monkeypatch.setattr(capacity.host, "docker", read_docker)
     monkeypatch.setattr(capacity, "inspect_filesystem", inspect)
 
-    def bind(archive="/history/archives", *, changed=False):
+    def bind(archive="/history/archives", *, changed=False, custody_max_copy=None):
         path = tmp_path / "capacity.json"
         content = json.dumps(plan).encode()
         path.write_bytes(content)
         path.chmod(0o600)
         package = {"scope": {"raw_mapping_index": {"max_copy_bytes": 200}},
                    "artifacts": {"physical_capacity": {"filename": path.name, "sha256": sha256(content).hexdigest()}}}
+        if custody_max_copy is not None:
+            package["scope"]["custody_move"] = {"max_copy_bytes": custody_max_copy}
         if changed:
             path.write_bytes(content + b" ")
         return capacity.bind_approved_capacity_checks(package_path=tmp_path / "package.json",
@@ -87,6 +89,7 @@ def test_capacity_check_pins_manifest_and_reports_fresh_physical_headroom(physic
     assert (receipt["devices"]["hdd"]["reserve_bytes"], receipt["devices"]["hdd"]["temporary_bytes"]) == (100, 250)
     assert receipt["devices"]["hdd"]["device_id"] == "8:2"
     assert receipt["raw_index_bytes"] == 175
+    assert receipt["custody_bytes"] == 0 and receipt["total_copy_bytes"] == 175
     assert receipt.pop("receipt_hash") == archive_evidence_hash(receipt)
     assert receipt["postgresql"] == {"database": "/var/lib/docker/volumes/test-db/_data",
                                       "wal": "/var/lib/docker/volumes/test-db/_data/pg_wal",
@@ -103,6 +106,13 @@ def test_approved_plan_requires_bound_mounts_and_copy_headroom(physical_plan):
         bind(changed=True)
     with pytest.raises(ValueError, match="plan_scope_changed"):
         bind(archive="/unapproved/archives")
+    with pytest.raises(ValueError, match="plan_scope_changed"):
+        bind(custody_max_copy=51)
+    binder = bind(custody_max_copy=50)
+    receipt = physical_plan[5](binder, custody_bytes=49)
+    assert receipt["custody_bytes"] == 49 and receipt["total_copy_bytes"] == 224
+    with pytest.raises(RuntimeError, match="custody_copy_budget_exceeded"):
+        physical_plan[5](binder, custody_bytes=51)
     plan["hdd"]["temporary_bytes"] = 199
     with pytest.raises(ValueError, match="plan_scope_changed"):
         bind()
