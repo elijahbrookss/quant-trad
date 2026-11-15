@@ -44,6 +44,17 @@ The final receiver verifies the delivered WAL, archive suffix and pending spool,
 
 ### Prepare a replayed receiver before approval
 
+Run the source staging command while collection is serving. Its mode-0600 plan uses schema `qt.canonical_cold_source_operator.v1` and pins the same `site` and `receiver_preflight` used by the receiver. Set `source` to the encrypted source repository, `state_directory` to a separate private directory, and `control_credential` to a private PostgreSQL control DSN file. Set `expected_database` from the live control read with the exact database name, OID, system identifier, postmaster start time, and admission state. Supply `tools.pg_waldump`, `tools.pg_waldump_sha256`, and `tools.pgbackrest`. The `pgdata` input is a private snapshot containing `global/pg_control` for native archive retrieval. Keep `database_key` outside the repository and state directory.
+
+Use the last closed archived segment that contains the complete selected record. Set `target` to its `segment`, record start `target_lsn`, exact end `replay_lsn`, `record_kind`, and `restore_name`. A naturally archived online checkpoint can use `checkpoint_online` with a null name. The command checks the native record and page geometry after restoring that one staged segment to private scratch. Set `max_batches` and `timeout_seconds` from the selected prefix size and measured throughput. Source SQL is read-only and staging uses existing archived WAL.
+
+```sh
+python -m scripts.automation.canonical_cold_source_operator \
+  --plan /private/source-plan.json --plan-sha256 "$SOURCE_PLAN_SHA256" stage
+```
+
+Keep `wal-prefix-progress.json` in place when retrying. The command compares already completed receipt and file identities and resumes with the pending batch. A later plan can extend the same lineage by selecting a later archived segment and supplying the exact current postmaster pin. Transfer the exact emitted selection to the receiver inbox as `replay-selection.json` using an atomic rename. Retain the returned target receipt and selection digest for review.
+
 Run the receiver on the qualified independent host as its unprivileged database owner. Use a network namespace with loopback only, exact PostgreSQL 15.6 and required Timescale libraries, the qualified Python runtime, and the pinned original QT checkout. Mount the encrypted exchange, private workspace, retained tablespaces, and archive output at the signed preflight paths. Expose the prestaged archive object tree through a separate explicit read-only mount. Keep the approval inbox and credentials private and outside the exchange. The archive output sits on the approved workspace device.
 
 Start the process with a private, mode-0600 receiver plan and its independently recorded SHA-256.
@@ -65,9 +76,17 @@ The `qt.canonical_cold_receiver_operator.v1` plan contains the existing recovery
 | `lifecycle` | `prepare_seconds`, `approval_seconds`, `ready_seconds`, `recover_seconds`, `max_custody_entries` measured for the selected scope |
 
 1. After the receiver emits `awaiting_replay_selection`, place `replay-selection.json` atomically in the private inbox. Use schema `qt.canonical_cold_receiver_replay_selection.v1` with `baseline_verification_sha256`, `receiver_preflight_sha256`, `timeline`, exact `target_lsn` and `replay_lsn`, and the ordered `prefixes`. Each prefix has `after`, `through`, `prefix_sha256`, and `previous_prefix_sha256` (null for the first). These refer to the already staged encrypted prefix receipts. Select the point after the bulk base is ready so it can be as close as practicable to the eventual hold.
-2. Review the signed `replayed-candidate-<checkpoint>.json` and its detached `replayed-catalog-<digest>.jsonl` on the exchange. Verify the receiver signature, catalog hash, exact stopped database and archive scope, and measured restart range. The event is `awaiting_approval`. The stopped copy remains under the same process's custody.
+2. After `awaiting_approval`, review the signed candidate and detached catalog on the exchange using the source command below. Supply the measured restart cap and, when present, the independently pinned pending-spool scope with `--pending-spool-scope-sha256`. The command verifies the signature, selected native endpoint, manifest checksum and descriptors, and current transfer and restart budgets. Use its emitted `independent_recovery` as a package artifact. Keep the stopped copy under the same process's custody and pass the verified `replayed_inventory` path to the source binding.
 3. After final operational approval, place the exact package, host inventory, and all referenced artifacts in the private inbox. In the `independent_recovery` v3 artifact, bind the offered `replayed_checkpoint_sha256` and the measured `max_restart_segments`. The existing `replay_equivalence` artifact carries the typed frozen and raw checks run through the exact original QT checkout. Publish the marker `approval.json` last with schema `qt.canonical_cold_receiver_operator_approval.v1` and fields `package_filename`, `package_sha256`, `inventory_filename`, and `checkpoint_sha256`. Use the separately obtained approval digest.
 4. Before publishing `ready`, the receiver rechecks actual free bytes and filesystem entries after preparation. It groups the remaining requirements by device so co-located exchange, workspace, and PostgreSQL allocations count together. Continue with the source owner's existing approved command only while that exact signed readiness is valid. The source rechecks the final device and WAL limits before the hold and repeats the exact endpoint checks at the fence. Use the resulting `recovered` closure as the independent recovery evidence.
+
+```sh
+python -m scripts.automation.canonical_cold_source_operator \
+  --plan /private/source-plan.json --plan-sha256 "$SOURCE_PLAN_SHA256" review \
+  --selection "$SELECTION_PATH" --selection-sha256 "$SELECTION_SHA256" \
+  --offer "$OFFER_PATH" --receiver-plan-sha256 "$RECEIVER_PLAN_SHA256" \
+  --max-restart-segments "$MEASURED_RESTART_SEGMENTS"
+```
 
 The archived point can age while the package is under review. If the tail or restart range exceeds its approved cap, source admission refuses the hold. Qualify the exact operator environment and workflow before using this path on QT. [Receiver command](../../scripts/automation/canonical_cold_receiver_operator.py)
 

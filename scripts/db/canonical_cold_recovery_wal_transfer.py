@@ -195,6 +195,28 @@ def _check_wal_archiver(control, fence, last, floor, timeout, check):
         sleep(0.1)
 
 
+def _finish_interrupted_wal_link(destination, found, check):
+    """Remove only this file's leftover private staging name under the receiver lock."""
+    aliases = []
+    with os.scandir(destination.parent) as entries:
+        for entry in entries:
+            check()
+            if re.fullmatch(r"\.qt-wal-[a-z0-9_]{8}", entry.name) is None:
+                continue
+            info = entry.stat(follow_symlinks=False)
+            if (_identity(info) == _identity(found) and stat.S_ISREG(info.st_mode)
+                    and info.st_uid == os.getuid() and info.st_mode & 0o077 == 0 and info.st_nlink == 2):
+                aliases.append(Path(entry.path))
+    if len(aliases) != 1 or any(_stamp(path.lstat()) != _stamp(found) for path in (*aliases, destination)):
+        raise RuntimeError("canonical_recovery_wal_existing_ciphertext_changed")
+    check()
+    aliases[0].unlink()
+    current = destination.lstat()
+    if _identity(current) != _identity(found) or current.st_nlink != 1:
+        raise RuntimeError("canonical_recovery_wal_existing_ciphertext_changed")
+    _sync(destination.parent)
+
+
 def _copy_one(source_path, expected, receiving, relative, receiving_device, check):
     directory = receiving / Path(relative).parent
     parent = directory.parent
@@ -206,9 +228,11 @@ def _copy_one(source_path, expected, receiving, relative, receiving_device, chec
     destination = receiving / relative
     if destination.exists() or destination.is_symlink():
         found = _safe_member(destination, receiving_device)
-        if (not stat.S_ISREG(found.st_mode) or found.st_nlink != 1
+        if (not stat.S_ISREG(found.st_mode) or found.st_nlink not in {1, 2}
                 or _file(destination, _stamp(found), check) != (evidence := _file(source_path, expected, check))):
             raise RuntimeError("canonical_recovery_wal_existing_ciphertext_changed")
+        if found.st_nlink == 2:
+            _finish_interrupted_wal_link(destination, found, check)
         return evidence | {"path": relative}
     with NamedTemporaryFile(mode="wb", prefix=".qt-wal-", dir=directory, delete=False) as output:
         temporary = Path(output.name)

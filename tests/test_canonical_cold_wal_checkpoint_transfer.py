@@ -1,10 +1,35 @@
 import hashlib
+import os
 
 import pytest
 
 from market_data.fact_archive import archive_evidence_hash
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, _encode
 from scripts.db import canonical_cold_recovery_wal_transfer as transfer
+
+
+@pytest.mark.parametrize("staging_name", (".qt-wal-a1b2c3d4", "unrelated-owner-link"))
+def test_wal_copy_recovers_only_its_interrupted_private_staging_link(tmp_path, staging_name):
+    source = tmp_path / "source"
+    source.write_bytes(b"encrypted fixture bytes")
+    receiving = tmp_path / "receiving"
+    bucket = receiving / "archive" / "segment-bucket"
+    bucket.mkdir(parents=True, mode=0o700)
+    destination = bucket / "archive-wal"
+    destination.write_bytes(source.read_bytes())
+    destination.chmod(0o600)
+    alias = bucket / staging_name
+    os.link(destination, alias)
+    options = (source, transfer._stamp(source.stat()), receiving, destination.relative_to(receiving),
+               receiving.stat().st_dev, lambda: None)
+    if staging_name.startswith(".qt-wal-"):
+        report = transfer._copy_one(*options)
+        assert report["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+        assert destination.stat().st_nlink == 1 and not alias.exists()
+    else:
+        with pytest.raises(RuntimeError, match="existing_ciphertext_changed"):
+            transfer._copy_one(*options)
+        assert alias.is_file() and destination.stat().st_nlink == 2
 
 
 def _segment(number, timeline=1):

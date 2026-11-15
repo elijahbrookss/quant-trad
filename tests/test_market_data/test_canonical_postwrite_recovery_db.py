@@ -10,11 +10,14 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import subprocess
+import sys
 from time import monotonic, sleep
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
@@ -675,12 +678,132 @@ def _stage_fixture_wal_prefix(engine, prepared, worker, receiving, transfer, bas
           f"through={last_through} first_receipt={first_hash} second_receipt={second_hash}")
 
 
+def _run_source_operator_fixture(*, engine, worker, policy, signed_preflight, scratch, generated, boundary,
+                                 authenticate_prefix, check):
+    from scripts.automation.canonical_cold_receiver_operator import _replay_selection
+    from scripts.automation.canonical_cold_source_operator import PLAN_VERSION
+
+    setup = scratch / "source-operator"
+    state = setup / "state"
+    inbox = setup / "receiver-inbox"
+    for path in (setup, state, inbox):
+        path.mkdir(mode=0o700)
+    pgdata = setup / "source-control"
+    (pgdata / "global").mkdir(mode=0o700, parents=True)
+    pgdata.chmod(0o700)
+    pg_control = pgdata / "global" / "pg_control"
+    pg_control.touch(mode=0o600)
+    shutil.copyfile("/qt-source/pgdata/global/pg_control", pg_control)
+    credential = setup / "pg-control-url"
+    credential.touch(mode=0o600)
+    control_url = URL.create(engine.url.drivername, username=engine.url.username, database="postgres",
+                             query={"host": "/var/run/postgresql"})
+    credential.write_text(control_url.render_as_string(hide_password=False))
+    with engine.begin() as conn:
+        expected_database = _database(conn, engine.url.database)
+    pg_waldump = Path("/qt-fixture-pg15/pg_waldump")
+    target_lsn, replay_lsn, _ = boundary
+    target = {"segment": generated[-1], "target_lsn": target_lsn, "replay_lsn": replay_lsn,
+              "record_kind": "restore_point", "restore_name": "qt_fixture_signed_prefix"}
+    plan = {"schema": PLAN_VERSION, "site": asdict(policy) | {"receiving": str(policy.receiving)},
+            "receiver_preflight": signed_preflight, "source": str(worker.root), "state_directory": str(state),
+            "pgdata": str(pgdata),
+            "control_credential": str(credential), "expected_database": expected_database,
+            "tools": {"pg_waldump": str(pg_waldump), "pg_waldump_sha256": hashlib.sha256(pg_waldump.read_bytes()).hexdigest(),
+                      "pgbackrest": str(worker.pgbackrest)}, "database_key": str(worker.config.database_key_path),
+            "target": target, "max_batches": 2, "timeout_seconds": 30}
+
+    def invoke(path, *command, failure=None):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        result = subprocess.run([sys.executable, "-m", "scripts.automation.canonical_cold_source_operator",
+                                 "--plan", str(path), "--plan-sha256", digest, *map(str, command)],
+                                capture_output=True, text=True, timeout=40)
+        if failure is not None:
+            assert result.returncode == 1 and failure in result.stderr, result.stderr[-2400:]
+            assert not result.stdout
+            return None
+        assert result.returncode == 0, result.stderr[-2400:]
+        return json.loads(result.stdout)
+
+    baseline = policy.baseline_verification
+    plan_path = setup / "source-plan.json"
+    save_receipt(plan_path, plan, initial=True)
+    source_archive = worker.root / "database" / "archive" / "qt" / baseline["database_archive_id"] / generated[-1][:16]
+    terminal, = source_archive.glob(f"{generated[-1]}-*")
+    held = terminal.with_name(".fixture-held-" + terminal.name)
+    terminal.rename(held)
+    try:
+        invoke(plan_path, "stage", failure="recovery_handoff_wal_segment_missing_or_ambiguous")
+    finally:
+        held.rename(terminal)
+    progress_path = state / "wal-prefix-progress.json"
+    interrupted = load_receipt(progress_path)
+    first, = interrupted["prefixes"]
+    assert interrupted["pending"]["after"] == first["through"]
+    assert interrupted["pending"]["through"] == generated[-1]
+    first_receipt = policy.receiving / f"encrypted-wal-prefix-through-{first['through']}.json"
+    first_inode = first_receipt.stat().st_ino
+    first_hash = hashlib.sha256(first_receipt.read_bytes()).hexdigest()
+
+    truncated_plan = setup / "bad-target.json"
+    upper, lower = replay_lsn.split("/")
+    wrong_replay = f"{upper}/{int(lower, 16) + 8:X}"
+    save_receipt(truncated_plan, plan | {"target": target | {"replay_lsn": wrong_replay}}, initial=True)
+    invoke(truncated_plan, "stage", failure="canonical_source_wal_target_native_record_end_changed")
+    progress = load_receipt(progress_path)
+    assert len(progress["prefixes"]) == 2 and progress["pending"] is None
+    assert progress["prefixes"][0] == first and first_receipt.stat().st_ino == first_inode
+    assert hashlib.sha256(first_receipt.read_bytes()).hexdigest() == first_hash
+    assert not list(state.glob("replay-selection-*.json")) and not list(state.glob("qualified-wal-target-*.json"))
+    receipts = [policy.receiving / f"encrypted-wal-prefix-through-{row['through']}.json" for row in progress["prefixes"]]
+    before = [(path.stat().st_ino, path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+              for path in [progress_path, *receipts]]
+
+    announced = invoke(plan_path, "stage")
+    assert announced["phase"] == "selection_staged"
+    after = [(path.stat().st_ino, path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+             for path in [progress_path, *receipts]]
+    assert after == before
+    selection_path = inbox / "replay-selection.json"
+    shutil.copy2(announced["selection"], selection_path)
+    assert hashlib.sha256(selection_path.read_bytes()).hexdigest() == announced["selection_sha256"]
+    measured = signed_preflight["body"]
+    selection = _replay_selection(selection_path, policy, measured, check)
+    native_result = Path(announced["target_receipt"])
+    assert hashlib.sha256(native_result.read_bytes()).hexdigest() == announced["target_receipt_sha256"]
+    native = load_receipt(native_result)
+    assert (selection["timeline"], selection["target_lsn"], selection["replay_lsn"]) == (1, target_lsn, replay_lsn)
+    assert all(native[key] == value for key, value in target.items())
+    assert native["system_identifier"] == expected_database["system_identifier"]
+    assert native["pg_waldump_version"] == "pg_waldump (PostgreSQL) 15.6"
+    check_wal = [load_receipt(path)["files"] for path in receipts]
+    segments = [row["segment"] for batch in check_wal for row in batch]
+    assert segments == _wal_range(baseline["wal_backup_stop"], generated[-1], baseline["wal_segment_bytes"], 7)[1:]
+    assert native["wal_sha1"] == check_wal[-1][-1]["wal_checksum"]
+    for batch in selection["prefixes"]:
+        authenticate_prefix(**batch)
+    assert not (policy.receiving / "encrypted-wal-transfer.json").exists()
+    print(f"QT_NATIVE_SOURCE_SELECTION batches={'+'.join(str(len(batch)) for batch in check_wal)} through={target['segment']} "
+          f"target={target_lsn} replay={replay_lsn} resumed_pending={interrupted['pending']['through']} "
+          f"wrong_replay_refused={wrong_replay} unchanged_receipts={len(before)} "
+          f"selection_sha256={announced['selection_sha256']} target_receipt_sha256={announced['target_receipt_sha256']}")
+
+    def review(offer, receiver_plan_sha256, pending_scope_sha256):
+        return invoke(plan_path, "review", "--selection", selection_path, "--selection-sha256", announced["selection_sha256"],
+                      "--offer", offer, "--receiver-plan-sha256", receiver_plan_sha256, "--max-restart-segments", 3,
+                      "--pending-spool-scope-sha256", pending_scope_sha256)
+
+    return review
+
+
 def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, monkeypatch, signed_named_tablespace):
     assert os.getenv("QT_STORAGE_DEMO") == "1" and os.getuid() == 70
     engine = storage.database._engine
     assert engine.url.host == "timescaledb" and engine.url.database.startswith("qt_migration_")
     replayed = os.getenv("QT_NAMED_REPLAYED_FIXTURE") == "1"
     runtime_fixture = os.getenv("QT_NAMED_RUNTIME_FIXTURE") == "1"
+    source_fixture = os.getenv("QT_NAMED_SOURCE_FIXTURE") == "1"
+    assert not source_fixture or replayed
     rolling_prefix = replayed or os.getenv("QT_TEST_ROLLING_WAL_PREFIX") == "1"
     with engine.begin() as conn:
         identity = _identity(conn)[0]
@@ -801,6 +924,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     scope_hash = archive_evidence_hash(asdict(scope))
     package_path = receipts / "package.json"
     verify_runtime = None
+    source_review = None
 
     def runtime_artifact():
         from scripts.automation.canonical_cold_receiver_runtime import (
@@ -845,7 +969,26 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
                 **{key: sizing["site_policy"][key] for key in
                    ("base_transfer_sha256", "baseline_verification_sha256", "pair_receipt_sha256")}}
         plan_path = receipts / "recovery-plan.json"
-        save_receipt(plan_path, plan, initial=True)
+        if source_fixture:
+            from scripts.automation.canonical_cold_receiver_operator import _publish_offer
+
+            assert staged is not None and source_review is not None
+            receiver_plan_pin = archive_evidence_hash({"fixture": "native-operator-selection", "preflight": sizing["measurement_sha256"]})
+            offer = _publish_offer(staged, policy, sizing, receiver, plan_sha256=receiver_plan_pin,
+                                   reserve_bytes=0, check=lambda: None)
+            review = source_review(offer, receiver_plan_pin, scope_hash)
+            assert (review["phase"], review["archive_objects"], review["checkpoint_sha256"]) == (
+                "receiver_offer_reviewed", 2, pins["replayed_checkpoint_sha256"])
+            assert review["source_wal_files_now"] <= policy.wal.files
+            inventory = Path(review["replayed_inventory"])
+            reviewed_plan = Path(review["independent_recovery"])
+            assert load_receipt(reviewed_plan) == plan
+            shutil.copy2(reviewed_plan, plan_path)
+            assert hashlib.sha256(plan_path.read_bytes()).hexdigest() == review["independent_recovery_sha256"]
+            print(f"QT_NATIVE_SOURCE_REVIEW checkpoint={review['checkpoint_sha256']} objects={review['archive_objects']} "
+                  f"source_wal_files={review['source_wal_files_now']} plan_sha256={review['independent_recovery_sha256']}")
+        else:
+            save_receipt(plan_path, plan, initial=True)
         plan_hash = hashlib.sha256(plan_path.read_bytes()).hexdigest()
         artifacts = {"independent_recovery": {"filename": plan_path.name, "sha256": plan_hash}}
         if runtime_fixture:
@@ -984,8 +1127,14 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         from scripts.automation.canonical_cold_receiver_replay import replay_private_receiver
         from tests.test_market_data.local_named_replayed_fixture import PORT, SOCKET, materialize_fixture_archive
 
-        _stage_fixture_wal_prefix(engine, None, worker, receiving, transfer, base_native,
-                                  generated=generated, authenticate_prefix=authenticate_prefix)
+        nonlocal source_review
+        if source_fixture:
+            source_review = _run_source_operator_fixture(engine=engine, worker=worker, policy=policy,
+                signed_preflight=measured, scratch=scratch, generated=generated, boundary=prefix_boundary,
+                authenticate_prefix=authenticate_prefix, check=check)
+        else:
+            _stage_fixture_wal_prefix(engine, None, worker, receiving, transfer, base_native,
+                                      generated=generated, authenticate_prefix=authenticate_prefix)
         prefix_target, prefix_replay, _ = prefix_boundary
         archive_paths = None
 
