@@ -305,6 +305,15 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
                           database_fence, statement_timeout_ms=900_000):
     """Perform one all-or-nothing authority change on the already fenced target."""
     validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
+    return _activate_cold_storage(conn, execution=execution, expected_execution_hash=expected_execution_hash,
+        receipts=receipts, verified_objects=verified_objects, database_fence=database_fence,
+        certificate_metadata={"approved_package_hash": execution["approved_package_hash"], "evidence": execution["evidence"]},
+        statement_timeout_ms=statement_timeout_ms)
+
+
+def _activate_cold_storage(conn, *, execution, expected_execution_hash, receipts, verified_objects,
+                           database_fence, certificate_metadata, statement_timeout_ms):
+    """Shared SQL transaction after the caller's exact scope has been admitted."""
     audit = validate_audit_receipts(receipts, target_identity=execution["target_database"],
                                    source_identity=execution["source_database"])
     if (audit["audit_set_hash"] != execution["audit_set_hash"]
@@ -436,9 +445,9 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
     if any(identity_result[key] != oid for key, oid in execution["identity_registry"].items()):
         raise RuntimeError("canonical_cold_activation_promoted_identity_registry_changed")
     result = {
+        **certificate_metadata,
         "execution_hash": expected_execution_hash, "audit_set_hash": audit["audit_set_hash"],
         "loaded_inventory_hash": audit["loaded_inventory_hash"],
-        "approved_package_hash": execution["approved_package_hash"],
         "database": identity, "source_commit_seq": execution["source_commit_seq"],
         "cold_before_day": cutoff.isoformat(),
         "verified_rows": audit["verified_rows"], "verified_pages": audit["verified_pages"],
@@ -447,7 +456,6 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         "custody": {"target_id": execution["custody_target_id"], "tablespace_oid": execution["custody_tablespace_oid"],
                     "relation_oids": execution["custody_relation_oids"]},
         "raw_mapping_index": raw_index,
-        "evidence": execution["evidence"],
     }
     if custody_move is not None:
         result["custody_move"] = custody_move
@@ -532,6 +540,13 @@ def read_original_watermark(conn, *, expected, expected_inventory):
 def read_activation_outcome(conn, *, execution, expected_execution_hash, require_identity_retired=False):
     """Reconcile durable SQL state for this exact operation on the pinned database."""
     validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
+    return _read_activation_outcome(conn, execution=execution, expected_execution_hash=expected_execution_hash,
+        certificate_metadata={"approved_package_hash": execution["approved_package_hash"]},
+        require_identity_retired=require_identity_retired)
+
+
+def _read_activation_outcome(conn, *, execution, expected_execution_hash, certificate_metadata,
+                             require_identity_retired=False):
     expected = execution["target_database"]
     raw_index_scope = raw_index_placement_scope(execution)
     layout, evidence, watermark = _read_authority(conn, expected)
@@ -547,7 +562,7 @@ def read_activation_outcome(conn, *, execution, expected_execution_hash, require
             or evidence.get("execution_hash") != expected_execution_hash
             or evidence.get("audit_set_hash") != execution["audit_set_hash"]
             or evidence.get("loaded_inventory_hash") != execution["loaded_inventory_hash"]
-            or evidence.get("approved_package_hash") != execution["approved_package_hash"]
+            or any(evidence.get(key) != value for key, value in certificate_metadata.items())
             or evidence.get("database") != expected
             or evidence.get("source_commit_seq") != execution["source_commit_seq"]):
         raise RuntimeError("canonical_cold_activation_outcome_uncertain")

@@ -93,13 +93,17 @@ def _begin_page(session, *, temp_file_limit_kib):
     if not session.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.cold.catalog.load.v1',0))")):
         raise LoadPressure("canonical_cold_load_other_loader_active")
     conn = session.connection()
+    _bound_temporary_files(conn, temp_file_limit_kib=temp_file_limit_kib)
+    return conn
+
+
+def _bound_temporary_files(conn, *, temp_file_limit_kib):
     conn.exec_driver_sql("SET LOCAL max_parallel_workers_per_gather=0")
-    session.execute(text("""
+    conn.execute(text("""
         SELECT set_config('temp_file_limit',
             LEAST(CASE WHEN setting::bigint<0 THEN :limit ELSE setting::bigint END,:limit)::text,true)
         FROM pg_settings WHERE name='temp_file_limit'
     """), {"limit": temp_file_limit_kib})
-    return conn
 
 
 @contextmanager

@@ -40,6 +40,7 @@ from scripts.db.canonical_cold_load import TargetDatabase, _load_checkpoint, loa
 from scripts.db import canonical_cold_load
 from scripts.db.canonical_cold_load_pressure import CatalogLoadLimits, LoadPressure, supervise_page
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
+from scripts.db.canonical_cold_private_activation_capacity import SharedHddActivationLimits, supervise_private_activation
 from scripts.db.canonical_cold_private_load import SharedHddLoadLimits, supervise_private_page
 from scripts.db.prepare_canonical_cold_catalog import prepare_catalog
 from tests.test_market_data.test_canonical_cold_migration import DAY, LIMITS
@@ -428,3 +429,30 @@ def test_private_catalog_load_checks_one_native_device_and_combines_page_allocat
         assert PostgresColdHistory(ColdHistoryReader(candidate_store, limits=LIMITS)).read_by_ids(
             session, [row["id"]],
         ) == {row["id"]: row}
+
+    # The authority handoff uses the same native placements. Include both
+    # physical move budgets along with the WAL and SQL temporary allocation.
+    execution = {
+        "custody_target_id": target_id, "custody_move": {"max_copy_bytes": 8 << 20},
+        "raw_mapping_index": {"target_id": target_id, "max_copy_bytes": 8 << 20},
+    }
+    caps = SharedHddActivationLimits(1024, 8 << 20, 1 << 30, 0, 2048, 1 << 20)
+    observe = partial(supervise_private_activation, remaining_seconds=lambda: 30, clone=clone, placement=placement,
+                      execution=execution, pg_controldata=Path("/usr/lib/postgresql/15/bin/pg_controldata"))
+    statvfs = os.statvfs(server_root)
+    available = statvfs.f_bavail * statvfs.f_frsize
+    with pytest.raises(LoadPressure, match="private_cold_shared_hdd_capacity"):
+        with engine.begin() as conn, observe(conn, limits=replace(caps, min_free_bytes=available - (20 << 20))):
+            pytest.fail("admitted combined copy, WAL and SQL allocation over the reserve")
+    with pytest.raises(RuntimeError, match="private_cold_activation_wal_budget_exceeded"):
+        with engine.begin() as conn, observe(conn, limits=replace(caps, max_wal_bytes=1)):
+            conn.exec_driver_sql("CREATE TABLE private_capacity_wal_probe(value integer)")
+    with engine.begin() as conn, observe(conn, limits=caps) as evidence:
+        assert conn.scalar(text("SELECT to_regclass('private_capacity_wal_probe') IS NULL"))
+        assert conn.scalar(text("SHOW temp_file_limit")) == "2MB"
+        assert conn.scalar(text("SHOW max_parallel_maintenance_workers")) == "0"
+        conn.exec_driver_sql("CREATE TABLE private_capacity_wal_probe(value integer)")
+    assert evidence["shared_allowance_bytes"] == 27 << 20
+    assert evidence["min_free_bytes"] == 4096
+    assert evidence["after_wal"]["generated_bytes"] > 1
+    assert evidence["device_id"] == device_id

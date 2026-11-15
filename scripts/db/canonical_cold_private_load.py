@@ -18,14 +18,14 @@ import os
 from pathlib import Path
 from time import monotonic
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.pool import NullPool
 
 from core.storage_mounts import StorageMountError, configured_archive_root
 from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive import FilesystemRawArchiveObjectStore
-from portal.backend.service.storage.header_admission import registered_header_targets
+from portal.backend.db.storage_target_models import StorageTargetRecord
 from portal.backend.service.storage.header_inspection import _bound_resource_targets
 from portal.backend.service.storage.header_resources import observe_header_resources
 from portal.backend.service.storage_management import _target
@@ -58,22 +58,19 @@ class SharedHddLoadLimits:
                 + self.max_page_recent_catalog_bytes + self.temp_file_limit_kib * 1024)
 
 
-def _shared_floor(available, *, limits, reserved_bytes, auxiliary_reserved_bytes):
-    minimum = limits.min_free_bytes + reserved_bytes + auxiliary_reserved_bytes
-    allowance = limits.page_allocation_bytes
+def shared_hdd_floor(available, *, minimum, allowance):
     if available - minimum < allowance:
-        raise LoadPressure("private_cold_load_shared_hdd_page_capacity")
+        raise LoadPressure("private_cold_shared_hdd_capacity")
     return available - allowance
 
 
-@contextmanager
-def supervise_private_page(session, *, clone, placement, limits, pg_controldata, deadline):
+def observe_private_hdd(conn, *, clone, placement, pg_controldata, deadline):
     from scripts.db.canonical_cold_private_placement import assert_private_placement
 
-    conn = _begin_page(session, temp_file_limit_kib=limits.temp_file_limit_kib)
     assert_private_placement(conn, clone=clone, placement=placement, require_writable=True)
     target_id = placement["history_target_id"]
-    record = next((row for row in registered_header_targets(session) if row.id == target_id), None)
+    targets_table = StorageTargetRecord.__table__
+    record = conn.execute(select(targets_table).where(targets_table.c.id == target_id)).one_or_none()
     if record is None:
         raise LoadPressure("private_cold_load_history_target_missing")
     history = _target(record)
@@ -97,9 +94,23 @@ def supervise_private_page(session, *, clone, placement, limits, pg_controldata,
     observed = resources.capacity[target_id]
     if observed.device_id != clone.proof["device_id"]:
         raise LoadPressure("private_cold_load_native_device_changed")
-    floor = _shared_floor(observed.available_bytes, limits=limits, reserved_bytes=record.reserved_bytes,
-                          auxiliary_reserved_bytes=record.auxiliary_reserved_bytes)
-    with _watch_page(conn, limits=limits, resources=resources, targets=targets,
+    return record, history, resources
+
+
+@contextmanager
+def supervise_private_page(session, *, clone, placement, limits, pg_controldata, deadline):
+    conn = _begin_page(session, temp_file_limit_kib=limits.temp_file_limit_kib)
+    record, history, resources = observe_private_hdd(
+        conn, clone=clone, placement=placement, pg_controldata=pg_controldata, deadline=deadline,
+    )
+    target_id = history.target_id
+    try:
+        floor = shared_hdd_floor(resources.capacity[target_id].available_bytes,
+                                 minimum=limits.min_free_bytes + record.reserved_bytes + record.auxiliary_reserved_bytes,
+                                 allowance=limits.page_allocation_bytes)
+    except LoadPressure as exc:
+        raise LoadPressure("private_cold_load_shared_hdd_page_capacity") from exc
+    with _watch_page(conn, limits=limits, resources=resources, targets=(history,),
                      floors={target_id: floor}, deadline=deadline):
         yield
 

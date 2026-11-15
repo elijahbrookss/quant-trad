@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from time import monotonic, sleep
 
 from sqlalchemy import text
@@ -57,6 +58,22 @@ def _other_publishers(conn, reader=None):
 
 def _same_database(observed, expected):
     return all(observed[key] == expected[key] for key in ("system_identifier", "database_oid", "database"))
+
+
+def _require_private_workerless_postmaster(conn, epoch):
+    if not isinstance(epoch, str) or not re.fullmatch(r"[1-9][0-9]*\.[0-9]{6}", epoch):
+        raise ValueError("canonical_cold_database_fence_invalid_private_postmaster")
+    conn.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
+    if conn.scalar(text("""
+        SELECT current_database() ~ '^qt_bench_[a-z0-9_]{1,48}$'
+          AND extract(epoch FROM pg_postmaster_start_time())::text=:epoch
+          AND inet_server_addr() IS NULL AND inet_client_addr() IS NULL
+          AND current_setting('listen_addresses')=''
+          AND current_setting('timescaledb.max_background_workers')='0'
+          AND NOT EXISTS (SELECT 1 FROM pg_stat_activity
+               WHERE starts_with(backend_type,'TimescaleDB Background Worker '))
+    """), {"epoch": epoch}) is not True:
+        raise RuntimeError("canonical_cold_database_fence_private_workerless_postmaster_changed")
 
 
 @dataclass(frozen=True)
@@ -136,6 +153,7 @@ class DatabaseFence:
     jobs: tuple
     deadline: float
     reader: RetainedReadSession | None = None
+    private_workerless_epoch: str | None = None
 
     def check_clock(self):
         if monotonic() >= self.deadline:
@@ -152,6 +170,8 @@ class DatabaseFence:
         OnlineController._require_job_environment(conn)
         if OnlineController._supported_builtin_catalog(conn) != self.jobs:
             raise RuntimeError("canonical_cold_database_fence_job_catalog_changed")
+        if self.private_workerless_epoch is not None:
+            _require_private_workerless_postmaster(conn, self.private_workerless_epoch)
         if self.reader is not None:
             self.reader.assert_held(self.database)
         activity = _other_publishers(conn, self.reader)
@@ -162,7 +182,8 @@ class DatabaseFence:
                                f"backend_types={activity.backend_types} prepared={activity.prepared_transactions}")
 
 
-def close_database_fence(conn, control, *, expected_database, timeout_seconds, record, reader=None):
+def close_database_fence(conn, control, *, expected_database, timeout_seconds, record, reader=None,
+                         private_workerless_epoch=None):
     """Close new logins and stop qualified background jobs on one retained connection.
 
     Caller owns the host/publisher hold and a durable record callback. Existing
@@ -183,13 +204,16 @@ def close_database_fence(conn, control, *, expected_database, timeout_seconds, r
             if not _same_database(observed, expected_database) or not observed["allow_connections"]:
                 raise RuntimeError("canonical_cold_database_fence_target_database_changed")
             OnlineController._require_job_environment(conn, allow_connections=True)
+            if private_workerless_epoch is not None:
+                _require_private_workerless_postmaster(conn, private_workerless_epoch)
             jobs = OnlineController._supported_builtin_catalog(conn)
             pid = conn.scalar(text("SELECT pg_backend_pid()"))
             if reader is not None:
                 reader.assert_held(observed)
             if _other_publishers(conn, reader).prepared_transactions:
                 raise RuntimeError("canonical_cold_database_fence_prepared_transactions")
-    fence = DatabaseFence(conn, {**observed, "allow_connections": False}, pid, jobs, deadline, reader=reader)
+    fence = DatabaseFence(conn, {**observed, "allow_connections": False}, pid, jobs, deadline,
+                          reader=reader, private_workerless_epoch=private_workerless_epoch)
     receipt = {"database": observed, "backend_pid": pid, "jobs": list(jobs)}
     if reader is not None:
         receipt["retained_reader"] = {"backend_pid": reader.backend_pid, "backend_start": reader.backend_start.isoformat()}
@@ -204,10 +228,15 @@ def close_database_fence(conn, control, *, expected_database, timeout_seconds, r
                     or OnlineController._supported_builtin_catalog(conn) != jobs
                     or conn.scalar(text("SELECT pg_backend_pid()")) != pid):
                 raise RuntimeError("canonical_cold_database_fence_target_changed")
-            record("jobs_stopping", receipt)
-            fence.check_clock()
-            if conn.scalar(text("SELECT _timescaledb_functions.stop_background_workers()")) is not True:
-                raise RuntimeError("canonical_cold_database_fence_job_stop_unconfirmed")
+            if private_workerless_epoch is None:
+                record("jobs_stopping", receipt)
+                fence.check_clock()
+                if conn.scalar(text("SELECT _timescaledb_functions.stop_background_workers()")) is not True:
+                    raise RuntimeError("canonical_cold_database_fence_job_stop_unconfirmed")
+            else:
+                fence.check_clock()
+                _require_private_workerless_postmaster(conn, private_workerless_epoch)
+                record("private_jobs_already_disabled", {**receipt, "postmaster_epoch": private_workerless_epoch})
 
     while True:
         fence.check_clock()
@@ -251,8 +280,13 @@ def reopen_database_fence(fence, control, *, expected_outcome, read_outcome, rec
         OnlineController._require_job_environment(conn, allow_connections=True)
         if OnlineController._supported_builtin_catalog(conn) != fence.jobs or read_outcome(conn) != expected_outcome:
             raise RuntimeError("canonical_cold_database_fence_release_outcome_changed")
-        record("jobs_restarting", receipt)
-        fence.check_clock()
-        if conn.scalar(text("SELECT _timescaledb_functions.start_background_workers()")) is not True:
-            raise RuntimeError("canonical_cold_database_fence_job_restart_unconfirmed")
+        if fence.private_workerless_epoch is None:
+            record("jobs_restarting", receipt)
+            fence.check_clock()
+            if conn.scalar(text("SELECT _timescaledb_functions.start_background_workers()")) is not True:
+                raise RuntimeError("canonical_cold_database_fence_job_restart_unconfirmed")
+        else:
+            fence.check_clock()
+            _require_private_workerless_postmaster(conn, fence.private_workerless_epoch)
+            record("private_jobs_remain_disabled", {**receipt, "postmaster_epoch": fence.private_workerless_epoch})
     record("database_reopened", receipt)

@@ -1,9 +1,13 @@
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from datetime import timedelta
+from functools import partial
 from hashlib import sha256
 import json
 import os
+from pathlib import Path
+import shutil
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -299,8 +303,14 @@ def test_fenced_activation_moves_native_raw_index(storage, tmp_path, monkeypatch
                                lose_commit_reply=lose_commit_reply, retain_reader=retain_reader)
 
 
+@pytest.mark.parametrize("storage", ["benchmark"], indirect=True)
+def test_private_activation_rehearses_real_shared_hdd_transaction(storage, tmp_path, monkeypatch, native_raw_index_target):
+    _exercise_exact_activation(storage, tmp_path, monkeypatch, owner_path=True, native_raw_index=native_raw_index_target,
+                               private=True)
+
+
 def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, native_raw_index=None, lose_commit_reply=False,
-                               retain_reader=False):
+                               retain_reader=False, private=False):
     native = native_raw_index is not None
     raw_scope = native_raw_index if native else _stub_raw_index_case(monkeypatch)
     engine = storage.database._engine
@@ -336,6 +346,10 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
     for day in (legacy_day, daily_day):
         archive.seal_partition(day)
         assert archive.stage_next_page(day)["status"] == "page_acknowledged"
+    if private:
+        # The actual private runner seeds the existing immutable objects before
+        # staging cold pages. Use a distinct fixture copy of that source tree.
+        shutil.copytree(old_store.root, new_store.root, dirs_exist_ok=True)
 
     with engine.begin() as conn:
         _attach_legacy_child(conn, legacy_day, daily_day)
@@ -425,6 +439,12 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
             witness = measure_witnesses(conn, cases, store=old_store, timeout_seconds=15, max_archive_bytes=1024**2)
         assert [case["expected_rows"] for case in witness["cases"]] == [3, 1, 1]
         candidate_witness = json.dumps(witness).encode()
+    if private:
+        _exercise_private_activation(
+            storage, monkeypatch, plan, audit, receipts, identity, custody_before, raw_scope,
+            payload_children, candidate_witness, new_store, latest_commit, frozen, before, retained_series,
+        )
+        return
     # The release caller supplies digests for independent recovery, provider
     # handoff and tested rollback. Synthetic digests here exercise the record
     # boundary and carry no qualification for any of those external gates.
@@ -860,6 +880,116 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
         assert {item["storage_day"] for item in retention["actions"]} == {
             storage.today.isoformat(), (storage.today + timedelta(days=1)).isoformat(),
         }
+    finally:
+        restarted._reset_engine()
+
+
+def _exercise_private_activation(storage, monkeypatch, plan, audit, receipts, identity, custody, raw_scope,
+                                 payload_children, witness, store, source_commit, frozen, before, retained_series):
+    from scripts.db import canonical_cold_private_activate as private
+    from scripts.db import canonical_cold_private_prepare_activation as prepare
+
+    target = plan["database"]
+    with storage.database._engine.connect() as conn:
+        postmaster_epoch = conn.scalar(text("SELECT extract(epoch FROM pg_postmaster_start_time())::text"))
+        workers_disabled = conn.scalar(text("SHOW timescaledb.max_background_workers")) == "0"
+    clone = SimpleNamespace(url=storage.database._engine.url, proof={
+        "database_identity": f"{target['system_identifier']}/{target['database_oid']}",
+        "accepted_commit_seq": source_commit, "tablespace_oid": raw_scope["tablespace_oid"],
+        "postmaster_epoch": postmaster_epoch,
+    })
+    placement = {
+        "history_target_id": raw_scope["target_id"], "archive_root": str(store.root.parent),
+        "clone_proof_sha256": "a" * 64,
+        "native_binding": {"tablespace_oid": raw_scope["tablespace_oid"]},
+    }
+    source_witness = json.loads(witness)
+    cases = [{key: value for key, value in case.items() if key not in ("expected_rows", "expected_hash")}
+             for case in source_witness["cases"]]
+    monkeypatch.setattr(prepare, "assert_private_placement", lambda conn, **scope: None)
+    with storage.database._engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        execution, witness, measured = prepare.measure_private_activation(
+            conn, clone=clone, clone_sha256="a" * 64, placement=placement, placement_sha256="b" * 64,
+            audit_receipts=receipts, cases=cases, store=store, raw_copy_bytes=raw_scope["max_copy_bytes"],
+            custody_copy_bytes=1024**2, copy_timeout_seconds=15, witness_max_bytes=1024**2, witness_timeout_seconds=15,
+        )
+    assert json.loads(witness) == source_witness
+    assert (execution["audit_set_hash"], execution["payload_children"]) == (audit["audit_set_hash"], payload_children)
+    assert execution["custody_move"]["source_placement_hash"] == custody["placement_hash"]
+    assert (measured["verified_rows"], measured["verified_pages"]) == (2, 2)
+    digest = archive_evidence_hash(execution)
+    with pytest.raises(ValueError, match="incomplete_execution_record"):
+        activation.validate_execution_record(execution, expected_execution_hash=digest)
+
+    def admit_fixture(conn, control, *, clone, placement, store):
+        # Mount, socket and promoted-postmaster admission has separate native
+        # coverage. Keep the retained login, writer fence and all SQL real.
+        assert conn is not control and store.root.name == "objects"
+        assert clone.url.database == target["database"] and clone.url.database.startswith("qt_bench_")
+        assert placement["history_target_id"] == raw_scope["target_id"]
+
+    monkeypatch.setattr(private, "_assert_private_owner", admit_fixture)
+
+    @contextmanager
+    def observe_transaction(conn, remaining, *, interrupt):
+        assert conn.in_transaction() and remaining() > 0
+        assert conn.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NOT NULL"))
+        yield {"fixture": True}
+        assert conn.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NULL"))
+        if interrupt:
+            raise RuntimeError("fixture interrupted after authority switch")
+
+    phases = []
+    common = dict(clone=clone, placement=placement, execution=execution, expected_execution_hash=digest,
+                  receipts=receipts, candidate_witness=witness, store=store, limits=ArchiveVerificationLimits(),
+                  timeout_seconds=90, record=lambda phase, evidence: phases.append(phase))
+    with _fence_connections(storage) as (conn, control):
+        with pytest.raises(ValueError, match="witness"):
+            private.run_private_activation(
+                conn, control, **(common | {"candidate_witness": witness + b" "}),
+                supervise_capacity=partial(observe_transaction, interrupt=False),
+            )
+        with pytest.raises(RuntimeError, match="fixture interrupted after authority switch"):
+            private.run_private_activation(conn, control, **common,
+                                           supervise_capacity=partial(observe_transaction, interrupt=True))
+        with conn.begin():
+            assert conn.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NOT NULL"))
+            assert conn.scalar(text("SELECT layout_version FROM market.fact_storage_state")) == FACT_STORAGE_LAYOUT_VERSION
+            assert conn.scalar(text("SELECT count(*) FROM market.cold_fact_retired_days")) == 0
+            assert inspect_raw_mapping_index_member(conn)["tablespace_oid"] == 1663
+        outcome = private.run_private_activation(conn, control, **common,
+                                                 supervise_capacity=partial(observe_transaction, interrupt=False))
+    assert outcome["verified_rows"] == 2
+    assert outcome["raw_mapping_index"]["copy_bytes"] > 0 and outcome["custody_move"]["copy_bytes"] > 0
+    assert outcome["physical_supervision"] == {"fixture": True}
+    assert outcome["witness_hash"] == archive_evidence_hash(json.loads(witness))
+    assert "approved_package_hash" not in outcome and "independent_recovery" not in outcome
+    if workers_disabled:
+        assert phases.count("private_jobs_already_disabled") == 2
+        assert phases.count("private_jobs_remain_disabled") == 2
+        assert "jobs_stopping" not in phases
+    with storage.database._engine.begin() as conn:
+        certificate = conn.scalar(text("SELECT evidence FROM market.fact_storage_state"))
+        assert certificate["rehearsal"]["schema"] == private.SCHEMA
+        assert set(certificate["rehearsal"].values()) >= {"a" * 64, "b" * 64, sha256(witness).hexdigest()}
+        assert "approved_package_hash" not in certificate and "evidence" not in certificate
+        assert conn.scalar(text(f"SELECT '{PREVIOUS}'::regclass::oid")) == identity["old_oid"]
+        assert inspect_raw_mapping_index_member(conn)["tablespace_oid"] == raw_scope["tablespace_oid"]
+
+    restarted = Database(storage.dsn)
+    try:
+        assert restarted.ensure_schema(), str(restarted.last_error)
+        monkeypatch.setattr(market_data, "db", restarted)
+        monkeypatch.setattr(market_data, "canonical_fact_storage_repository", PostgresCanonicalFactStorageRepository(
+            object_store_factory=lambda: store, read_cache_factory=lambda: None,
+        ))
+        reader = market_data.PostgresMarketDataRepository()
+        assert reader.current_commit_seq() == source_commit
+        assert reader.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
+        selection = {"start": BASE - timedelta(seconds=1), "end": BASE + timedelta(seconds=1)}
+        assert reader.read_facts(series_id=storage.series_id, **selection)[0].fact.payload["raw_rate"] == "0.2"
+        assert len(reader.read_facts(series_id=retained_series, **selection)) == 1
     finally:
         restarted._reset_engine()
 
