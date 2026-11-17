@@ -9,7 +9,8 @@ from time import time
 import pytest
 
 from core.execution_control import ExecutionControl, ExecutionCancelledError, ExecutionBudgetExceededError, controlled_execution
-from market_data.fact_archive import encode_canonical_fact_archive, read_canonical_fact_archive
+from market_data import fact_archive
+from market_data.fact_archive import FactArchiveLimits, encode_canonical_fact_archive, read_canonical_fact_archive
 from market_data.history_read_cache import CanonicalArchiveReadCache, HistoryCacheLimits, CacheBypass
 from tests.test_market_data.test_canonical_fact_archive import _row
 from tests.test_market_data.test_fact_storage_reads import Session, _catalog, _cold
@@ -237,6 +238,36 @@ def test_corrupt_authoritative_source_is_not_hidden_by_fill(cache,tmp_path):
     with pytest.raises(RuntimeError,match="checksum_mismatch"):
         read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=cache)
     assert not list(cache.root.iterdir())
+
+
+def test_admitted_exact_reader_uses_cache_while_another_reader_holds_the_copy(cache, tmp_path, monkeypatch):
+    rows = [_row(index) for index in (1, 2, 3)]
+    limits = FactArchiveLimits(row_group_size=1)
+    encoded = encode_canonical_fact_archive(rows, temporary_directory=tmp_path / "encoding", limits=limits)
+    scope = {"expected": encoded.manifest, "ordinals": [2], "limits": limits, "cache": cache}
+    assert fact_archive.read_admitted_canonical_fact_rows(encoded.path, **scope) == {2: rows[2]}
+
+    original_hash = fact_archive._hash_handle
+
+    def overlap_after_hash(handle, *, max_bytes):
+        verified = original_hash(handle, max_bytes=max_bytes)
+        with cache.open_copy(encoded.path, digest=encoded.manifest.object_sha256, size=encoded.manifest.byte_count) as second:
+            assert second is not None and second.read(4) == b"PAR1"
+        return verified
+
+    control = ExecutionControl()
+    with monkeypatch.context() as patch, controlled_execution(control):
+        patch.setattr(fact_archive, "_hash_handle", overlap_after_hash)
+        assert fact_archive.read_admitted_canonical_fact_rows(encoded.path, **scope) == {2: rows[2]}
+    stats = control.snapshot()["consumed"]
+    assert stats["archive_cache_hits"] == 2 and stats["archive_cache_bytes"] >= encoded.manifest.byte_count
+    assert not stats.get("archive_source_bytes")
+    cached = cache.root / (encoded.manifest.object_sha256 + ".parquet")
+    damaged = bytearray(cached.read_bytes())
+    damaged[12] ^= 1
+    cached.write_bytes(damaged)
+    assert fact_archive.read_admitted_canonical_fact_rows(encoded.path, **scope) == {2: rows[2]}
+    assert not cached.exists()
 
 
 @pytest.mark.parametrize("decoded_reuse", [False, True])

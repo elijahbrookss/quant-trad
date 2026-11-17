@@ -64,7 +64,7 @@ def _isolated_parent_dsn() -> str:
 
 @contextmanager
 def fresh_migration_database(label: str, *, install_extensions: bool = True,
-                             _template_name: str | None = None) -> Iterator[str]:
+                             _template_name: str | None = None, benchmark=False) -> Iterator[str]:
     """Yield an isolated database and remove it afterward.
 
     Catalog/query-only fixtures may omit extension installation; existing
@@ -76,7 +76,8 @@ def fresh_migration_database(label: str, *, install_extensions: bool = True,
     safe_label = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:16]
     if not safe_label:
         raise ValueError("migration database label must contain a letter or digit")
-    database_name = f"qt_migration_{safe_label}_{uuid4().hex[:16]}"
+    prefix = "qt_bench" if benchmark else "qt_migration"
+    database_name = f"{prefix}_{safe_label}_{uuid4().hex[:16]}"
     if not _DATABASE_NAME.fullmatch(database_name):
         raise AssertionError(f"unsafe generated database name: {database_name!r}")
 
@@ -253,7 +254,7 @@ class _PristineSchemaTemplate:
 def storage_behavior_database(request):
     enabled = os.getenv("QT_SCHEMA_TEMPLATE_PILOT", "") == "1"
     if not enabled or request.node.nodeid not in _PILOT_CASES:
-        with fresh_migration_database("fact_storage") as dsn:
+        with fresh_migration_database("fact_storage", benchmark=getattr(request, "param", None) == "benchmark") as dsn:
             yield dsn
         return
     identity = _pilot_identity()

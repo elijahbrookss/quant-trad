@@ -157,3 +157,44 @@ def test_stop_after_committed_progress_keeps_scan_before_day(tmp_path,monkeypatc
     assert result["stop_reason"]=="stop_requested" and result["failure_count"]==0
     assert result["next_after_storage_day"]==(day-timedelta(days=1)).isoformat()
     assert not executor._retry_states
+
+
+@pytest.mark.parametrize("max_steps", [1, 4])
+def test_cold_history_and_registry_cleanup_both_progress_under_constant_backlog(tmp_path, monkeypatch, max_steps):
+    day = date(2026, 9, 21)
+    planned = _plan([_item("verify_page", day=day)]) | {"cold_layout": True}
+    executor = module.CanonicalFactRetentionExecutor(repository=SimpleNamespace(plan=lambda **_: planned, database=object()))
+    calls = []
+    clock = [100.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+
+    def prune(database, *, deadline):
+        calls.append("prune")
+        return {"status": "cold_identity_pruned", "rows_removed": 10_000}
+
+    def archive(**kwargs):
+        calls.append("verify")
+        return {"status": "page_verified"}
+
+    monkeypatch.setattr(module, "prune_oldest_retired_identities", prune)
+    monkeypatch.setattr(executor, "_execute_step", archive)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=max_steps)
+    for _ in range(2):
+        executor.run(policy=policy, storage_root=tmp_path, execute=True)
+        clock[0] += 1000
+    assert calls == ["prune", "verify"] * max_steps
+
+
+def test_cold_registry_cleanup_uses_spare_run_when_the_archive_scan_is_complete(tmp_path, monkeypatch):
+    planned = _plan([]) | {"cold_layout": True}
+    executor = module.CanonicalFactRetentionExecutor(repository=SimpleNamespace(plan=lambda **_: planned, database=object()))
+    calls = []
+
+    def prune(database, *, deadline):
+        calls.append("prune")
+        return {"status": "cold_identity_pruned", "rows_removed": 10_000}
+
+    monkeypatch.setattr(module, "prune_oldest_retired_identities", prune)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2)
+    executor.run(policy=policy, storage_root=tmp_path, execute=True)
+    assert calls == ["prune", "prune"]

@@ -156,6 +156,8 @@ def test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_pub
 
     with pytest.raises(RuntimeError, match="verification_generation_changed"):
         restarted.verify_partition(day)
+    with pytest.raises(RuntimeError, match="verify_page_scope_changed"):
+        restarted.verify_partition(day, expected_page_count=2)
     assert restarted.verify_next_page(day)["page_ordinal"] == 0
 
     def fail_receipt_commit(_conn, _cursor, statement, *_):
@@ -177,6 +179,9 @@ def test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_pub
             session.execute(text("DELETE FROM market.fact_archive_verifications"))
     with pytest.raises(RuntimeError, match="partition_page_budget_exceeded"):
         archive.verify_partition(day, limits=ArchiveVerificationLimits(max_pages=1))
+    for changed_scope in (1, 3):
+        with pytest.raises(RuntimeError, match="verify_page_scope_changed"):
+            archive.verify_partition(day, expected_page_count=changed_scope)
     with pytest.raises(RuntimeError, match="byte_budget_exceeded"):
         archive.verify_partition(day, limits=ArchiveVerificationLimits(max_bytes=1))
     with storage.database.session() as session:
@@ -197,7 +202,7 @@ def test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_pub
     # canonical rows again; the immutable page receipts carry that deep proof.
     with monkeypatch.context() as patch:
         patch.setattr(fact_archival, "read_canonical_fact_archive", lambda *_, **__: pytest.fail("unexpected page re-decode"))
-        verified = archive.verify_partition(day)
+        verified = archive.verify_partition(day, expected_page_count=2)
     assert verified["row_count"] == 3 and verified["page_count"] == verified["verified_objects"] == 2
     assert archive.verify_partition(day) == verified
     assert archive.inspect_partition(day)["state"] == "verified"

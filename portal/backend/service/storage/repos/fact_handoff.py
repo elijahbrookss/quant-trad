@@ -208,12 +208,13 @@ class FactHandoffProof:
         self.hot_days = {}
         self.cold_days = set()
         self.cold_manifests = {}
+        self.canonical_cold_sources = {}
         self.targets = set()
         self.retained_bytes = sum(sys.getsizeof(value) for value in (
             self.relations, self.pages, self.catalogs, self.generations,
             self.source_batches, self.source_commitments, self.relation_kinds,
             self.header_days, self.hot_days, self.cold_days,
-            self.cold_manifests, self.targets))
+            self.cold_manifests, self.canonical_cold_sources, self.targets))
         self.bound = None
         self.authority_prepared = False
         self.admitted = False
@@ -410,6 +411,21 @@ class FactHandoffProof:
         self.retained_bytes += sys.getsizeof(current) - before
         self.check_budget()
 
+    def capture_canonical_cold_sources(self, manifest_id, claims):
+        """Bind exact locators whose current Parquet bytes passed the first proof."""
+        if self.bound is not None or manifest_id not in self.source_batches:
+            raise RuntimeError("canonical_handoff_source_scope_invalid")
+        if manifest_id not in self.canonical_cold_sources:
+            self._assign(self.canonical_cold_sources, manifest_id, self._keep({}))
+        seen = self.canonical_cold_sources[manifest_id]
+        for identity, (location, row_hash) in claims.items():
+            manifest = location.manifest
+            if identity in seen:
+                raise RuntimeError("canonical_handoff_duplicate_cold_source")
+            self._assign(seen, self._keep(identity), self._keep((
+                manifest.manifest_id, manifest.manifest_hash, location.ordinal, row_hash,
+            )))
+
     def bind(self, day, relation_oid, evidence, limits):
         if (self.bound is not None or len(self.pages) != evidence["page_count"]
                 or set(self.generations) != set(self.pages)
@@ -564,6 +580,12 @@ class FactHandoffProof:
             "market.fact_archive_manifests", "market.fact_archive_active_generations",
         ):
             session.execute(text(f"LOCK TABLE ONLY {relation} IN SHARE MODE NOWAIT"))
+        if self.canonical_cold_sources:
+            from portal.backend.db.cold_history_models import assert_cold_history_immutability
+
+            for relation in ("cold_fact_pages", "cold_fact_locators", "cold_fact_retired_days"):
+                session.execute(text(f"LOCK TABLE ONLY market.{relation} IN SHARE MODE NOWAIT"))
+            assert_cold_history_immutability(session.connection())
         for oid, expected in sorted(self.relations.items()):
             name = expected["relname"]
             kind = self.relation_kinds[oid]
@@ -764,7 +786,8 @@ class FactHandoffProof:
             raise RuntimeError("canonical_handoff_preparation_scope_invalid")
         for manifest_id, commitment in self.source_commitments.items():
             witness = self.catalogs[manifest_id]["canonical_dependencies"]
-            if (sum(batch.header_count for batch in commitment.batches) != witness.count
+            cold_count = len(self.canonical_cold_sources.get(manifest_id, ()))
+            if (sum(batch.header_count for batch in commitment.batches) + cold_count != witness.count
                     or any(batch.cold_count > batch.header_count for batch in commitment.batches)
                     or not re.fullmatch(r"[0-9a-f]{64}", commitment.placement_hash)):
                 raise RuntimeError("canonical_handoff_source_commitment_invalid")
@@ -781,6 +804,23 @@ class FactHandoffProof:
     def verify_sources(self, session, manifest_id, check_budget):
         if not self.admitted or not self.headers_current or manifest_id not in self.fresh_catalogs:
             raise RuntimeError("canonical_handoff_source_proof_not_current")
+        sources = self.canonical_cold_sources.get(manifest_id)
+        if sources:
+            from .cold_history import cold_page_is_visible
+
+            ids = sorted(sources)
+            for offset in range(0, len(ids), 1000):
+                check_budget()
+                batch = ids[offset:offset+1000]
+                rows = session.execute(text(f"""
+                    SELECT loc.id,page.id,page.manifest_hash,loc.ordinal,encode(loc.row_hash,'hex')
+                    FROM market.cold_fact_locators AS loc
+                    JOIN market.cold_fact_pages AS page ON page.id=loc.page_id
+                    WHERE loc.id=ANY(:ids) AND {cold_page_is_visible("page")}
+                """), {"ids": batch}).all()
+                if (len(rows) != len(batch)
+                        or any(tuple(row[1:]) != sources.get(row[0]) for row in rows)):
+                    raise RuntimeError("canonical_handoff_cold_source_changed")
         before = sys.getsizeof(self.fresh_sources)
         self.fresh_sources.add(manifest_id)
         self.retained_bytes += sys.getsizeof(self.fresh_sources) - before

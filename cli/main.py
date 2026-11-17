@@ -1242,6 +1242,8 @@ def _cmd_data_ingest_candles(args: argparse.Namespace) -> int:
         "timeframe": args.timeframe,
         "source_revision": args.source_revision,
     }
+    if args.fill_missing_only:
+        payload["fill_missing_only"] = True
     _print_json(
         _client(args).request_json("POST", "/api/candles/ingest", payload=payload)
     )
@@ -3902,6 +3904,8 @@ def build_parser() -> argparse.ArgumentParser:
     data_ingest.add_argument("--end", required=True)
     data_ingest.add_argument("--timeframe", required=True)
     data_ingest.add_argument("--source-revision")
+    data_ingest.add_argument("--fill-missing-only", action="store_true",
+        help="Fill native Coinbase gaps outside the hot window at current availability.")
     data_ingest.set_defaults(func=_cmd_data_ingest_candles)
     data_derive = data_sub.add_parser("derive-candles",
         help="Coarsen exact frozen candles without provider access or gap filling.")

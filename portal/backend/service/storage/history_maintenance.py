@@ -21,6 +21,8 @@ from .header_filesystem import verify_header_filesystem
 from .header_journal import reserve_header_batch, cancel_unstarted_header_batch, _rows
 from .header_movement import execute_reserved_header_move
 from .header_resource_claims import reserve_header_resources, _limits, _hash
+from .repos.cold_history import cold_layout_active
+from .repos.market_lifecycle import market_storage_lifecycle_repository
 
 logger = logging.getLogger(__name__)
 _OPERATION = "qt.automatic_header_history.v1"
@@ -60,8 +62,11 @@ def _finish(session,plan,batch,move):
 
 def _prepare(database,*,pg_controldata,limits,cancelled):
     with database.session() as session:
+        market_storage_lifecycle_repository.acquire_publication_lock(session)
         lock_header_storage(session)
         _cancelled(cancelled)
+        if cold_layout_active(session):
+            return {"state": "disabled", "reason": "canonical_cold_authority"}
         config=session.get(StoragePolicyRecord,1,populate_existing=True)
         policy=StoragePolicy.from_dict(config.policy) if config is not None and config.policy is not None else None
         records=registered_header_targets(session)

@@ -299,6 +299,13 @@ pre-tail reducer against a watermark that can already include that same tail.
 When the immutable book Fact already exists, recovery reuses its persisted
 acceptance clock; an interrupted post-book feature stage can therefore be
 repaired without manufacturing a correction to the canonical source Fact.
+When the first complete snapshot follows a long stretch of invalid book or
+control frames, its raw dependency starts at the beginning of that connection.
+The collector verifies the raw prefix in small committed intervals using the
+same archive receipts as retention. Each retry starts after the last verified
+receive ordinal for that definition, session, connection epoch and product. Publication
+still checks the direct raw references and every uncovered position before it
+acknowledges the local spool.
 This rule belongs to the L2 projection adapter; lease, WAL, queue, lifecycle,
 and restart orchestration remain provider- and projection-neutral.
 

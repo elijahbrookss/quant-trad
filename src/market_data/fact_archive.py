@@ -13,12 +13,13 @@ import logging
 import os
 import struct
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
+from stat import S_ISREG
 from time import perf_counter
 from typing import Any, Callable
 
@@ -26,8 +27,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from core.storage_mounts import require_configured_archive_mount
-from core.execution_control import execution_checkpoint, consume_execution_resource, measure_execution_stage
+from core.execution_control import (
+    consume_execution_resource, current_execution_control, execution_checkpoint, measure_execution_stage,
+)
 from .archive import RawArchiveObjectStore
+from .archive_verification import _stamp
 from .canonical_storage import record_from_storage_row
 
 
@@ -38,6 +42,7 @@ FACT_ARCHIVE_RECORD_SELECTION = "all_canonical_revisions.v1"
 _INTEGER_COLUMNS = ("series_id", "source_id", "revision", "market_commit_seq")
 _TIME_COLUMNS = ("observation_time", "source_published_at", "received_at", "accepted_at", "known_at")
 _JSON_COLUMNS = ("payload", "provenance", "quality", "series_dimensions")
+_RANGE_COLUMNS = ("series_id", "observation_time", "market_commit_seq", "known_at", "source_identity_key")
 _STRING_COLUMNS = (
     "id", "ingestion_run_id", "observation_key", "fact_type", "payload_schema_id",
     "payload_contract_hash", "observation_time_method", "known_at_method",
@@ -210,6 +215,33 @@ class EncodedFactArchive:
     manifest: FactArchiveManifest
 
 
+def _validated_archive_record(row):
+    expected = set(_schema().names)
+    if set(row) != expected:
+        raise ValueError(
+            "canonical_archive_columns_invalid: "
+            f"missing={sorted(expected - set(row))} extra={sorted(set(row) - expected)}"
+        )
+    for name in _TIME_COLUMNS:
+        value = row[name]
+        if value is None and name in _NULLABLE:
+            continue
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            raise ValueError(f"canonical_archive_clock_invalid: field={name} id={row['id']}")
+    for name in _INTEGER_COLUMNS:
+        if type(row[name]) is not int or row[name] <= 0:
+            raise ValueError(f"canonical_archive_integer_invalid: field={name} id={row['id']}")
+    for name in _STRING_COLUMNS:
+        if row[name] is None and name in _NULLABLE:
+            continue
+        if not isinstance(row[name], str) or (name == "id" and not row[name]):
+            raise ValueError(f"canonical_archive_string_invalid: field={name} id={row['id']}")
+    for name in _JSON_COLUMNS:
+        if not isinstance(row[name], dict):
+            raise ValueError(f"canonical_archive_json_invalid: field={name} id={row['id']}")
+    return record_from_storage_row(row)
+
+
 class _Contents:
     def __init__(self, limits: FactArchiveLimits) -> None:
         self.limits = limits
@@ -226,30 +258,7 @@ class _Contents:
         self.series: dict[int, dict[str, Any]] = {}
 
     def add(self, row: Mapping[str, Any]) -> None:
-        expected = set(_schema().names)
-        if set(row) != expected:
-            raise ValueError(
-                "canonical_archive_columns_invalid: "
-                f"missing={sorted(expected - set(row))} extra={sorted(set(row) - expected)}"
-            )
-        for name in _TIME_COLUMNS:
-            value = row[name]
-            if value is None and name in _NULLABLE:
-                continue
-            if not isinstance(value, datetime) or value.tzinfo is None:
-                raise ValueError(f"canonical_archive_clock_invalid: field={name} id={row['id']}")
-        for name in _INTEGER_COLUMNS:
-            if type(row[name]) is not int or row[name] <= 0:
-                raise ValueError(f"canonical_archive_integer_invalid: field={name} id={row['id']}")
-        for name in _STRING_COLUMNS:
-            if row[name] is None and name in _NULLABLE:
-                continue
-            if not isinstance(row[name], str) or (name == "id" and not row[name]):
-                raise ValueError(f"canonical_archive_string_invalid: field={name} id={row['id']}")
-        for name in _JSON_COLUMNS:
-            if not isinstance(row[name], dict):
-                raise ValueError(f"canonical_archive_json_invalid: field={name} id={row['id']}")
-        record = record_from_storage_row(row)
+        record = _validated_archive_record(row)
         cursor = (record.market_commit_seq, str(record.fact_version_id))
         revision = (record.series_id, record.fact.observation_key, record.revision)
         if self.last is not None and cursor <= self.last:
@@ -377,6 +386,9 @@ class _MeteredArchiveFile(io.RawIOBase):
     def __init__(self, source, *, tier):
         self.source = source
         self.tier = tier
+        # Arrow can read chunks on a worker thread outside the calling
+        # ContextVar scope. Keep those reads in the originating budget.
+        self.control = current_execution_control()
 
     def readable(self):
         return True
@@ -388,15 +400,25 @@ class _MeteredArchiveFile(io.RawIOBase):
         return self.source.tell()
 
     def seek(self, offset, whence=0):
-        execution_checkpoint()
+        if self.control is not None:
+            self.control.check()
         return self.source.seek(offset, whence)
 
     def read(self, size=-1):
-        execution_checkpoint()
-        with measure_execution_stage("archive_read"):
+        if self.control is None:
+            return self.source.read(size)
+        self.control.check()
+        started = perf_counter()
+        error = None
+        try:
             value = self.source.read(size)
-        consume_execution_resource("archive_read_bytes", len(value))
-        consume_execution_resource("archive_cache_bytes" if self.tier == "cache" else "archive_source_bytes", len(value))
+        except BaseException as caught:
+            error = caught
+            raise
+        finally:
+            self.control.record_time("archive_read", perf_counter() - started, error=error)
+        self.control.consume("archive_read_bytes", len(value))
+        self.control.consume("archive_cache_bytes" if self.tier == "cache" else "archive_source_bytes", len(value))
         return value
 
     def readinto(self, buffer):
@@ -449,33 +471,182 @@ def read_canonical_fact_archive(
     Lifecycle/recovery callers omit cache and always inspect the durable object.
     A cache hit is never evidence that the HDD source passed a recovery check.
     """
+    return _read_archive(path, expected=expected, limits=limits, cache=cache, decoded_page=decoded_page)
+
+
+def read_admitted_canonical_fact_rows(
+    path: Path, *, expected: FactArchiveManifest, ordinals: Sequence[int],
+    limits: FactArchiveLimits = FactArchiveLimits(), cache=None,
+) -> dict[int, dict[str, Any]]:
+    """Read exact ordinals only from a manifest already admitted by a full verification."""
+    if (not ordinals or len(ordinals) > limits.max_rows
+            or any(type(value) is not int or not 0 <= value < expected.row_count for value in ordinals)):
+        raise ValueError("canonical_archive_ordinals_invalid")
+    positions = tuple(sorted(set(ordinals)))
+    return _read_archive(path, expected=expected, limits=limits, cache=cache, ordinals=positions)
+
+
+def read_admitted_canonical_fact_range(
+    path: Path, *, expected: FactArchiveManifest, matching_positions: Callable[[pa.RecordBatch], Sequence[int]],
+    limits: FactArchiveLimits = FactArchiveLimits(), cache=None,
+) -> tuple[dict[str, Any], ...]:
+    """Read matching revisions from an admitted page in its original ordinal order."""
+    if not callable(matching_positions):
+        raise ValueError("canonical_archive_range_predicate_invalid")
+    rows = _read_archive(path, expected=expected, limits=limits, cache=cache, matching_positions=matching_positions)
+    return tuple(rows.values())
+
+
+def _read_archive(path, *, expected, limits, cache, decoded_page=None, ordinals=None, matching_positions=None):
+    admitted = ordinals is not None or matching_positions is not None
+    if admitted and (expected.row_count > limits.max_rows or expected.logical_byte_count > limits.max_logical_bytes):
+        raise ValueError("canonical_archive_limit_exceeded: admitted manifest rows or logical bytes")
     require_configured_archive_mount(path, require_writable=False)
     if expected.byte_count > limits.max_file_bytes:
         raise ValueError("canonical_archive_file_limit_exceeded: manifest bytes")
+    arguments = dict(expected=expected, limits=limits, decoded_page=decoded_page, ordinals=ordinals,
+                     matching_positions=matching_positions)
     if cache is not None:
         corrupt = False
         with cache.open_copy(path, digest=expected.object_sha256, size=expected.byte_count) as handle:
             if handle is not None:
                 try:
-                    return _read_canonical_fact_archive_handle(handle, expected=expected, limits=limits, tier="cache", decoded_page=decoded_page)
+                    return _read_canonical_fact_archive_handle(handle, tier="cache", **arguments)
                 except ArchiveChecksumMismatch:
                     corrupt = True
         if corrupt:
             logging.getLogger(__name__).warning(
                 "history_cache_corrupt | object_sha256=%s fallback=authoritative_archive", expected.object_sha256)
             cache.invalidate(expected.object_sha256)
-    with Path(path).open("rb") as handle:
-        return _read_canonical_fact_archive_handle(handle, expected=expected, limits=limits, tier="source", decoded_page=decoded_page)
+    path = Path(path)
+    if not admitted:
+        with path.open("rb") as handle:
+            return _read_canonical_fact_archive_handle(handle, tier="source", **arguments)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(path, flags), "rb") as handle:
+        return _read_canonical_fact_archive_handle(handle, tier="source", source_path=path, **arguments)
 
 
-def _read_canonical_fact_archive_handle(source, *, expected, limits, tier, decoded_page=None):
-    contents = _Contents(limits)
-    rows = []
+def _assert_exact_file_unchanged(source, path, stamp, manifest_id):
+    try:
+        if _stamp(os.fstat(source.fileno())) == stamp and (path is None or _stamp(path.lstat()) == stamp):
+            return
+    except FileNotFoundError:
+        pass
+    raise ArchiveChecksumMismatch(f"canonical_archive_changed_during_read: manifest_id={manifest_id}")
+
+
+def _selected_groups(metadata, ordinals, *, limits):
+    """Check all authenticated chunks and resolve selected absolute ordinals."""
+    if not 1 <= metadata.num_row_groups <= metadata.num_rows:
+        raise RuntimeError("canonical_archive_incomplete: invalid footer row group count")
+    pending = iter(ordinals or ())
+    position = next(pending, None)
+    offset = uncompressed_bytes = 0
+    selected = {}
+    for index in range(metadata.num_row_groups):
+        execution_checkpoint()
+        group = metadata.row_group(index)
+        if not 1 <= group.num_rows <= metadata.num_rows - offset:
+            raise RuntimeError("canonical_archive_incomplete: invalid footer row group extent")
+        for column in range(group.num_columns):
+            info = group.column(column)
+            if info.compression != "ZSTD" or info.file_path or info.total_uncompressed_size < 0:
+                raise RuntimeError("canonical_archive_compression_mismatch: expected inline ZSTD")
+            uncompressed_bytes += info.total_uncompressed_size
+        end = offset + group.num_rows
+        if position is not None and position < end:
+            members = []
+            while position is not None and position < end:
+                members.append((position, position - offset))
+                position = next(pending, None)
+            selected[index] = group.num_rows, members
+        offset = end
+    if uncompressed_bytes > limits.max_file_bytes:
+        raise ValueError("canonical_archive_limit_exceeded: footer uncompressed bytes")
+    if offset != metadata.num_rows or position is not None:
+        raise RuntimeError("canonical_archive_incomplete: footer row group coverage")
+    return selected
+
+
+def _decode_json(row):
+    for name in _JSON_COLUMNS:
+        row[name] = json.loads(row[name])
+    return row
+
+
+def _matching_ordinals(parquet, matching_positions, *, limits):
+    ordinals = []
+    offset = 0
+    for batch in parquet.iter_batches(batch_size=limits.row_group_size, columns=_RANGE_COLUMNS, use_threads=False):
+        if offset + batch.num_rows > parquet.metadata.num_rows:
+            raise RuntimeError("canonical_archive_incomplete: footer/projection row count disagreement")
+        if any(column.null_count for column in batch.columns):
+            raise RuntimeError("canonical_archive_incomplete: null range projection")
+        consume_execution_resource("archive_predicate_rows", batch.num_rows)
+        execution_checkpoint()
+        previous = -1
+        for position in matching_positions(batch):
+            if type(position) is not int or not previous < position < batch.num_rows:
+                raise RuntimeError("canonical_archive_range_positions_invalid")
+            ordinals.append(offset + position)
+            previous = position
+        offset += batch.num_rows
+    if offset != parquet.metadata.num_rows:
+        raise RuntimeError("canonical_archive_incomplete: footer/projection row count disagreement")
+    return ordinals
+
+
+def _read_admitted_groups(parquet, selected, *, expected):
+    result = {}
+    logical_bytes = 0
+    bounds = {item.series_id: item for item in expected.series}
+    for group_index, (count, members) in selected.items():
+        consume_execution_resource("archive_decoded_rows", count)
+        consume_execution_resource("archive_decoded_row_groups", 1)
+        group = parquet.read_row_group(group_index, use_threads=False)
+        if group.num_rows != count:
+            raise RuntimeError("canonical_archive_incomplete: footer/content row group disagreement")
+        local_ordinals = pa.array([index for _, index in members], type=pa.int64())
+        for (ordinal, _), raw in zip(members, group.take(local_ordinals).to_pylist(), strict=True):
+            execution_checkpoint()
+            row = _decode_json(raw)
+            record = _validated_archive_record(row)
+            series = bounds.get(record.series_id)
+            fact = record.fact
+            cursor = (record.market_commit_seq, record.fact_version_id)
+            if (series is None or not expected.first_cursor <= cursor <= expected.last_cursor
+                    or (ordinal == 0 and cursor != expected.first_cursor)
+                    or (ordinal == expected.row_count - 1 and cursor != expected.last_cursor)
+                    or record.source_id not in series.source_ids
+                    or (fact.payload_schema_id, fact.payload_contract_hash) not in series.payload_contracts
+                    or not series.first_observation_at <= fact.observation_time <= series.last_observation_at
+                    or not series.first_known_at <= fact.known_at <= series.last_known_at
+                    or not series.first_accepted_at <= fact.accepted_at <= series.last_accepted_at):
+                raise RuntimeError(f"canonical_archive_manifest_mismatch: manifest_id={expected.manifest_id}")
+            logical_bytes += len(_json_bytes(row))
+            if logical_bytes > expected.logical_byte_count:
+                raise RuntimeError(f"canonical_archive_manifest_mismatch: manifest_id={expected.manifest_id}")
+            result[ordinal] = row
+    return result
+
+
+def _read_canonical_fact_archive_handle(source, *, expected, limits, tier, decoded_page=None,
+                                        ordinals=None, matching_positions=None, source_path=None):
+    stamp = None
+    if ordinals is not None or matching_positions is not None:
+        observed = os.fstat(source.fileno())
+        if not S_ISREG(observed.st_mode) or observed.st_size != expected.byte_count:
+            raise ArchiveChecksumMismatch(f"canonical_archive_checksum_mismatch: manifest_id={expected.manifest_id}")
+        stamp = _stamp(observed)
+        _assert_exact_file_unchanged(source, source_path, stamp, expected.manifest_id)
     with _MeteredArchiveFile(source, tier=tier) as handle:
         with measure_execution_stage("archive_verify"):
             sha256, byte_count = _hash_handle(handle, max_bytes=limits.max_file_bytes)
         if sha256 != expected.object_sha256 or byte_count != expected.byte_count:
             raise ArchiveChecksumMismatch(f"canonical_archive_checksum_mismatch: manifest_id={expected.manifest_id}")
+        if stamp is not None:
+            _assert_exact_file_unchanged(source, source_path, stamp, expected.manifest_id)
         if decoded_page is not None:
             retained = decoded_page._reuse(expected, limits)
             if retained is not None:
@@ -488,30 +659,38 @@ def _read_canonical_fact_archive_handle(source, *, expected, limits, tier, decod
         metadata = parquet.metadata
         if metadata.num_rows > limits.max_rows:
             raise ValueError("canonical_archive_limit_exceeded: footer row count")
-        uncompressed_bytes = 0
-        for index in range(metadata.num_row_groups):
-            group = metadata.row_group(index)
-            for column in range(group.num_columns):
-                info = group.column(column)
-                if info.compression != "ZSTD":
-                    raise RuntimeError("canonical_archive_compression_mismatch: expected ZSTD")
-                uncompressed_bytes += info.total_uncompressed_size
-        if uncompressed_bytes > limits.max_file_bytes:
-            raise ValueError("canonical_archive_limit_exceeded: footer uncompressed bytes")
+        if stamp is not None and metadata.num_rows != expected.row_count:
+            raise RuntimeError(f"canonical_archive_manifest_mismatch: manifest_id={expected.manifest_id}")
+        selected = _selected_groups(metadata, ordinals, limits=limits)
         with measure_execution_stage("archive_decode"):
+            if matching_positions is not None:
+                with measure_execution_stage("archive_predicate"):
+                    ordinals = _matching_ordinals(parquet, matching_positions, limits=limits)
+                if ordinals:
+                    selected = _selected_groups(metadata, ordinals, limits=limits)
+            if (ordinals is not None and len(ordinals) < metadata.num_rows
+                    and all(count <= limits.row_group_size for count, _ in selected.values())):
+                with measure_execution_stage("archive_selected_payload"):
+                    result = _read_admitted_groups(parquet, selected, expected=expected)
+                _assert_exact_file_unchanged(source, source_path, stamp, expected.manifest_id)
+                return result
+            contents, rows = _Contents(limits), []
             for batch in parquet.iter_batches(batch_size=limits.row_group_size):
-                execution_checkpoint()
+                consume_execution_resource("archive_decoded_rows", batch.num_rows)
                 for row in batch.to_pylist():
-                    for name in _JSON_COLUMNS:
-                        row[name] = json.loads(row[name])
+                    _decode_json(row)
                     contents.add(row)
                     rows.append(row)
         if contents.rows != metadata.num_rows:
             raise RuntimeError("canonical_archive_incomplete: footer/content row count disagreement")
+        if stamp is not None:
+            _assert_exact_file_unchanged(source, source_path, stamp, expected.manifest_id)
     observed = contents.manifest(sha256=sha256, byte_count=byte_count)
     if observed != expected:
         raise RuntimeError(f"canonical_archive_manifest_mismatch: manifest_id={expected.manifest_id}")
     rows = tuple(rows)
+    if ordinals is not None:
+        return {index: rows[index] for index in ordinals}
     if decoded_page is not None:
         decoded_page._remember(expected, limits, rows)
     return rows

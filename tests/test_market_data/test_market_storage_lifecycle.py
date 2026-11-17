@@ -345,6 +345,7 @@ def test_exact_canonical_action_invokes_only_selected_canonical_executor(tmp_pat
         "execute": True,
         "cancelled": None,
         "progress": None,
+        "verification_pages": None,
     }]
 
 

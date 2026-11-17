@@ -116,6 +116,17 @@ executor, and refuses if the fresh plan selects another action or becomes
 ineligible. It does not run raw history/recovery work and cannot be used as a
 generic planner override.
 
+For an exceptional sealed day with complete page verification, review the
+fresh plan for `--expected-action verify_partition` in a dry run. Bind exact
+`--verification-pages` and, where the restored measurement requires them,
+`--verification-bytes` and `--verification-objects`. The archive verifier
+counts distinct current objects and bytes, including cross-day references.
+Add `--execute` to commit the normal whole-day verification. The later
+`reclaim_partition` is separate and also binds the verified
+`--manifest-set-hash`. It rechecks the reviewed evidence under both locks.
+The selected limits apply to a single day and invocation. The saved storage
+policy and existing time and lock budgets still govern both actions.
+
 ## Consequences
 
 - This trades enforced immutable source authority and bounded relation/manifest

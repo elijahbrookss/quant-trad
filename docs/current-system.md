@@ -121,9 +121,10 @@ QT protects six high-consequence outcomes:
 5. **Credential confinement.** Provider secrets stay behind credential
    references and do not belong in normal configuration, logs, or research
    artifacts.
-6. **Durable persistence and recovery.** PostgreSQL is the one durable source of
-   platform truth, and destructive recovery is treated as a real operational
-   obligation rather than assumed from configuration alone.
+6. **Durable persistence and recovery.** PostgreSQL owns operational state.
+   Canonical archive objects and the PostgreSQL records that commit their
+   publication must be recoverable at the same boundary. Destructive recovery
+   requires an isolated rehearsal.
 
 The [core promises](core-promises.md) connect these outcomes to their platform
 contracts, accepted decisions, and normal engineering checks.

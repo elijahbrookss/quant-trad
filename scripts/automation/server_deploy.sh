@@ -381,7 +381,10 @@ select_release() {
     local release_commit
     release_commit="$(git -C "$repo_root" rev-parse --verify "${requested_ref}^{commit}")" \
       || die "git ref does not resolve to a commit: $requested_ref"
+    require_cold_release_ancestry "$release_commit"
     git -C "$repo_root" switch --detach "$release_commit"
+  else
+    require_cold_release_ancestry "$(git -C "$repo_root" rev-parse --verify HEAD)"
   fi
   compute_release_material
 }
@@ -688,6 +691,9 @@ require_no_alert_preview() {
 }
 
 show_release() {
+  if test -e "$state_root/canonical-cold-hold.json" || test -L "$state_root/canonical-cold-hold.json"; then
+    echo "Canonical cold cutover hold is active. Reconcile its database and runtime outcome before deployment."
+  fi
   if storage_online_pending; then
     echo "Storage online receipts retained; deployment admission checks the terminal handoff."
     echo "Receipt presence alone does not confirm migration or fleet health."
@@ -1030,8 +1036,27 @@ storage_online_pending() {
   return 1
 }
 
+require_cold_release_ancestry() {
+  local completion="$state_root/canonical-cold-completion.json" floor
+  if test ! -e "$completion" && test ! -L "$completion"; then
+    return
+  fi
+  floor="$(PYTHONPATH="$repo_root/src:$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import sys
+from pathlib import Path
+from scripts.automation.canonical_cold_release_guard import compatible_release_floor
+print(compatible_release_floor(Path(sys.argv[1])))
+' "$completion")" || die "canonical cold completion receipt cannot be verified"
+  if test -n "$floor" && ! git -C "$repo_root" merge-base --is-ancestor "$floor" "$1"; then
+    die "requested release predates canonical cold storage; use the approved paired restore procedure"
+  fi
+}
+
 # Presence alone is a hold: corrupt/partial state must never permit a restart.
 require_no_storage_handoff() {
+  if test -e "$state_root/canonical-cold-hold.json" || test -L "$state_root/canonical-cold-hold.json"; then
+    die "canonical cold cutover hold is active; reconcile the exact database and runtime outcome"
+  fi
   if storage_online_pending; then
     PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 - "$state_root" "$env_file" "$repo_root" "${action:-}" "${1:-}" <<'PY' || die "storage online intent is unresolved; preserve receipts and reconcile the database, mounts and runtime before resuming server operations"
 import sys

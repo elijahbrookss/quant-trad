@@ -165,6 +165,7 @@ def raw_archive_mapping_lookup_statement(*, mode: str, bound: bool,
         raise ValueError("canonical_raw_lineage_lookup_mode_invalid")
     bound_predicate = "AND manifests.id = ANY(:bound_ids)" if bound else ""
     manifest_table = "market.raw_archive_manifests"
+    mapping_table = "market.raw_archive_record_mappings"
     manifest_cte = ""
     record_join = ""
     position_join = ""
@@ -174,13 +175,28 @@ def raw_archive_mapping_lookup_statement(*, mode: str, bound: bool,
             FROM unnest(CAST(:ids AS text[])) AS requested(raw_record_id)
         )"""
         if bound:
-            manifest_cte += f""", candidate_manifests AS MATERIALIZED (
+            # A broad admitted manifest set can contain many unrelated raw
+            # records. Seek the leading key of the native (raw_record_id,
+            # manifest_id) primary index before intersecting placements. The
+            # lateral boundary keeps the planner from expanding all mappings
+            # of the admitted manifests or forming a key-by-manifest product.
+            manifest_cte += f""", matched_records AS MATERIALIZED (
+                SELECT mappings.* FROM requested_records AS records
+                CROSS JOIN LATERAL (
+                    SELECT mappings.* FROM market.raw_archive_record_mappings AS mappings
+                    WHERE records.raw_record_id=mappings.raw_record_id
+                    OFFSET 0
+                ) AS mappings
+            ), candidate_manifests AS MATERIALIZED (
                 SELECT manifests.* FROM market.raw_archive_manifests AS manifests
                 WHERE TRUE {bound_predicate}
             )"""
+            mapping_table = "matched_records"
             manifest_table = "candidate_manifests"
-        record_join = """JOIN requested_records AS records
-            ON records.raw_record_id=mappings.raw_record_id"""
+            bound_predicate = ""
+        else:
+            record_join = """JOIN requested_records AS records
+                ON records.raw_record_id=mappings.raw_record_id"""
         predicate = "TRUE"
     elif mode == "position":
         manifest_cte = f"""WITH requested_positions AS MATERIALIZED (
@@ -215,7 +231,7 @@ def raw_archive_mapping_lookup_statement(*, mode: str, bound: bool,
                mappings.spool_segment_id AS mapped_segment_id, mappings.session_id AS mapped_session_id,
                mappings.connection_epoch AS mapped_epoch, mappings.receive_ordinal AS mapped_ordinal,
                mappings.raw_frame_sha256 AS mapped_frame_sha256
-        FROM market.raw_archive_record_mappings AS mappings
+        FROM {mapping_table} AS mappings
         JOIN {manifest_table} AS manifests ON manifests.id=mappings.manifest_id
         {record_join}
         {position_join}

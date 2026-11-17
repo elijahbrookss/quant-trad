@@ -6,7 +6,7 @@ always comes from the existing fenced reclaimer's fresh evidence checks.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date, timedelta
 from math import isfinite
 import logging
@@ -18,24 +18,29 @@ from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.fact_archive import FactArchiveLimits
-from ..storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
+from ..storage.repos.cold_retirement import prune_oldest_retired_identities
+from ..storage.repos.fact_archival import (
+    PostgresCanonicalFactArchiveRepository, SelectedVerificationPage, validate_selected_verification_batch,
+)
 from ..storage.repos.fact_reclamation import FactReclamationLimits, PostgresCanonicalFactReclamationRepository
 from ..storage.repos.fact_retention import (
     archive_admission_blockers, canonical_fact_retention_repository, require_hot_window_elapsed,
 )
 from ..storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
+from ..storage.cold_stage_pressure import ColdStagePressure
 from ..storage.history_policy import saved_canonical_policy, require_saved_history_policy
 
 logger = logging.getLogger(__name__)
-# Exact full-partition counts are the only sealing statements with this larger
-# allowance. Each count remains bounded by the current run's remaining time.
-_SEAL_COUNT_STATEMENT_TIMEOUT_MS = 60_000
+# Exact full-partition counts have their own allowance. Each count remains
+# bounded by the current run and, during retirement, the exclusive handoff.
+_COUNT_STATEMENT_TIMEOUT_MS = 60_000
 
 _PAGE_PREREQUISITE_STATUSES = frozenset({"book_prefix_verified", "trade_prefix_verified"})
 _MAX_PAGE_PREREQUISITE_COMMITS = 64
-_SELECTED_ACTIONS = frozenset({"stage_page", "reclaim_partition"})
 _SELECTED_SUCCESS = {
     "stage_page": "page_acknowledged",
+    "verify_page": "page_verified",
+    "verify_partition": "partition_verified",
     "reclaim_partition": "partition_reclaimed",
 }
 
@@ -59,11 +64,14 @@ class CanonicalRetentionStopRequested(CanonicalRetentionBudgetExceeded):
 
 
 class CanonicalFactRetentionExecutor:
-    def __init__(self, *, repository=canonical_fact_retention_repository, use_saved_history_policy=False):
+    def __init__(self, *, repository=canonical_fact_retention_repository, use_saved_history_policy=False,
+                 cold_stage_admission=None):
         self.repository = repository
         self.use_saved_history_policy = use_saved_history_policy
+        self.cold_stage_admission = cold_stage_admission
         self._cursor = None
         self._retry_states = {}
+        self._prefer_cold_prune = True
         self._run_lock = Lock()
         self._archive = None
         self._archive_action = None
@@ -169,7 +177,9 @@ class CanonicalFactRetentionExecutor:
             raise RuntimeError(f"canonical_retention_archive_admission_failed: action={action} blockers={blockers}")
 
     def _execute_step(self, *, item, policy, storage_root, check_budget, remaining_seconds,
-                      storage_policy_witness=None, prerequisite_commits=None):
+                      storage_policy_witness=None, prerequisite_commits=None,
+                      expected_verification_pages=None, selected_verification_page=None,
+                      expected_manifest_set_hash=None):
         day = date.fromisoformat(item["storage_day"])
         action = item["action"]
         reusable = action in {"stage_page", "verify_page"}
@@ -259,7 +269,7 @@ class CanonicalFactRetentionExecutor:
             max_objects=policy.max_verification_objects, max_pages=policy.max_verification_pages)
         if action == "seal_partition":
             return {**archive.seal_partition(
-                day, count_statement_timeout_ms=_SEAL_COUNT_STATEMENT_TIMEOUT_MS,
+                day, count_statement_timeout_ms=_COUNT_STATEMENT_TIMEOUT_MS,
                 remaining_run_seconds=current_remaining_seconds,
             ), "status": "partition_sealed"}
         if action == "stage_page":
@@ -286,21 +296,32 @@ class CanonicalFactRetentionExecutor:
                 "prerequisite_commits": prerequisites,
             }
         if action == "verify_page":
-            return archive.verify_next_page(day)
+            if selected_verification_page is None:
+                return archive.verify_next_page(day)
+            return archive.verify_next_page(day, selected_page=selected_verification_page)
         if action == "verify_partition":
-            return archive.verify_partition(day, limits=verification)
+            return archive.verify_partition(
+                day, limits=verification, count_statement_timeout_ms=_COUNT_STATEMENT_TIMEOUT_MS,
+                remaining_run_seconds=current_remaining_seconds,
+                expected_page_count=expected_verification_pages,
+            )
         if action == "restart_verification":
             return archive.restart_partition_verification(day)
         if action == "reclaim_partition":
+            stage_options = {"cold_stage_admission": self.cold_stage_admission} if self.cold_stage_admission else {}
             reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True,
                 limits=FactReclamationLimits(
                     statement_timeout_ms=min(1000, timeout),
                     pinned_ranges_statement_timeout_ms=min(
                         policy.pinned_ranges_statement_timeout_ms, timeout),
                     max_handoff_seconds=policy.max_handoff_seconds,
-                ), remaining_run_seconds=current_remaining_seconds)
+                    count_statement_timeout_ms=_COUNT_STATEMENT_TIMEOUT_MS,
+                ), remaining_run_seconds=current_remaining_seconds, **stage_options)
+            reclaim_scope = ({"expected_page_count": expected_verification_pages,
+                              "expected_manifest_set_hash": expected_manifest_set_hash}
+                             if expected_manifest_set_hash is not None else {})
             return reclaimer.reclaim_partition(day, eligible_before=date.fromisoformat(item["eligible_before"]),
-                                                execute=True, verification_limits=verification)
+                                                execute=True, verification_limits=verification, **reclaim_scope)
         raise ValueError(f"canonical_retention_action_invalid: action={action}")
 
     def run(self, *, policy: CanonicalFactRetentionPolicy, storage_root: Path,
@@ -347,8 +368,11 @@ class CanonicalFactRetentionExecutor:
 
     def run_selected(self, *, policy: CanonicalFactRetentionPolicy, storage_root: Path,
                      storage_day: date, expected_action: str, execute: bool = False,
-                     cancelled=None, progress=None):
-        """Execute exactly one freshly planned private canary action.
+                     cancelled=None, progress=None, verification_pages: int | None = None,
+                     verification_page: SelectedVerificationPage | None = None,
+                     verification_batch: tuple[SelectedVerificationPage, ...] | None = None,
+                     verification_bytes=None, verification_objects=None, manifest_set_hash=None):
+        """Execute one exact action or a bounded batch of exact page verifications.
 
         This is deliberately narrower than ``run``: it never advances a scan,
         consults retry hints or performs another lifecycle family. The normal
@@ -356,13 +380,46 @@ class CanonicalFactRetentionExecutor:
         authoritative. A changed day/action/eligibility refuses before mutation.
         """
         if (type(execute) is not bool or type(storage_day) is not date
-                or type(expected_action) is not str or expected_action not in _SELECTED_ACTIONS):
+                or type(expected_action) is not str or expected_action not in _SELECTED_SUCCESS
+                or ((expected_action == "verify_page") !=
+                    (verification_page is not None or verification_batch is not None))
+                or (verification_page is not None and verification_batch is not None)
+                or (verification_page is not None and not isinstance(verification_page, SelectedVerificationPage))
+                or (verification_pages is not None and (
+                    expected_action not in {"verify_partition", "reclaim_partition"}
+                    or type(verification_pages) is not int or not 1 <= verification_pages <= 100_000
+                ))
+                or (any(value is not None for value in (verification_bytes, verification_objects))
+                    and verification_pages is None)
+                or ((expected_action == "reclaim_partition" and verification_pages is not None)
+                    != (manifest_set_hash is not None))
+                or (manifest_set_hash is not None and (
+                    not isinstance(manifest_set_hash, str) or len(manifest_set_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in manifest_set_hash)
+                ))):
             raise ValueError("canonical_retention_selected_request_invalid")
+        if verification_batch is not None:
+            validate_selected_verification_batch(verification_batch)
+        reviewed_limits = {}
+        if verification_pages is not None:
+            reviewed_limits["max_verification_pages"] = verification_pages
+        if verification_bytes is not None:
+            reviewed_limits["max_verification_bytes"] = verification_bytes
+        if verification_objects is not None:
+            reviewed_limits["max_verification_objects"] = verification_objects
+        if reviewed_limits:
+            policy = replace(policy, **reviewed_limits)
         witness = None
         if self.use_saved_history_policy:
             policy, witness = saved_canonical_policy(
                 self.repository.database, policy=policy, storage_root=storage_root,
             )
+        if verification_batch is not None and len(verification_batch) > min(
+                policy.max_steps_per_run, policy.max_verification_pages):
+            raise ValueError("canonical_retention_selected_batch_policy_limit")
+        effective_limits = {key: getattr(policy, key) for key in (
+            "max_verification_pages", "max_verification_bytes", "max_verification_objects",
+        )}
         if not policy.execution_enabled:
             return {
                 "schema_version": "market.canonical_retention_selected_run.v1",
@@ -381,8 +438,12 @@ class CanonicalFactRetentionExecutor:
                 policy=policy, storage_root=storage_root,
                 after_storage_day=storage_day - timedelta(days=1),
             )
-            item = self._selected_plan_item(
+            pending = self.repository.selected_verification_batch_suffix(
+                storage_day, verification_batch, statement_timeout_ms=policy.plan_statement_timeout_ms,
+            ) if verification_batch is not None else None
+            item = None if pending == () else self._selected_plan_item(
                 plan=plan, storage_day=storage_day, expected_action=expected_action,
+                verification_pages=verification_pages, manifest_set_hash=manifest_set_hash,
             )
             result = {
                 "schema_version": "market.canonical_retention_selected_run.v1",
@@ -396,6 +457,19 @@ class CanonicalFactRetentionExecutor:
             }
             if self.use_saved_history_policy:
                 result["storage_policy"] = witness
+            if verification_pages is not None:
+                result["expected_verification_pages"] = verification_pages
+                result["selected_verification_limits"] = effective_limits
+            if manifest_set_hash is not None:
+                result["expected_manifest_set_hash"] = manifest_set_hash
+            if verification_page is not None:
+                self.repository.check_selected_verification_page(
+                    storage_day, verification_page, statement_timeout_ms=policy.plan_statement_timeout_ms,
+                )
+                result["expected_verification_page"] = asdict(verification_page)
+            if verification_batch is not None:
+                result["expected_verification_batch"] = [asdict(page) for page in verification_batch]
+                result["already_verified_pages"] = len(verification_batch) - len(pending)
             return result
         if not self._run_lock.acquire(blocking=False):
             raise MarketStorageLifecycleBusyError("canonical_retention_worker_busy: retry later")
@@ -403,17 +477,24 @@ class CanonicalFactRetentionExecutor:
             # Selected canaries are an explicit operator boundary, not a
             # routine scheduler yield. They always start with fresh evidence.
             self._dispose_archive(reason="selected_action")
-            return self._run_selected(
+            result = self._run_selected(
                 policy=policy, storage_root=storage_root, storage_day=storage_day,
                 expected_action=expected_action, cancelled=cancelled,
                 storage_policy_witness=witness, progress=progress,
+                verification_pages=verification_pages, verification_page=verification_page,
+                verification_batch=verification_batch,
+                manifest_set_hash=manifest_set_hash,
             )
+            if reviewed_limits:
+                result["selected_verification_limits"] = effective_limits
+            return result
         finally:
             self._dispose_archive()
             self._run_lock.release()
 
     @staticmethod
-    def _selected_plan_item(*, plan, storage_day, expected_action):
+    def _selected_plan_item(*, plan, storage_day, expected_action, verification_pages=None,
+                            manifest_set_hash=None):
         matches = [
             item for item in plan["actions"]
             if date.fromisoformat(item["storage_day"]) == storage_day
@@ -432,10 +513,18 @@ class CanonicalFactRetentionExecutor:
                 f"actual_action={item['action']} eligible={item['eligible']} "
                 f"blockers={item.get('blockers', [])}"
             )
+        if verification_pages is not None and item.get("page_count") != verification_pages:
+            raise RuntimeError(
+                f"canonical_retention_selected_page_scope_changed: storage_day={storage_day} "
+                f"expected_pages={verification_pages} actual_pages={item.get('page_count')}"
+            )
+        if manifest_set_hash is not None and item.get("manifest_set_hash") != manifest_set_hash:
+            raise RuntimeError(f"canonical_retention_selected_manifest_set_changed: storage_day={storage_day}")
         return item
 
     def _run_selected(self, *, policy, storage_root, storage_day, expected_action,
-                      cancelled, storage_policy_witness=None, progress=None):
+                      cancelled, storage_policy_witness=None, progress=None, verification_pages=None,
+                      verification_page=None, verification_batch=None, manifest_set_hash=None):
         started = monotonic()
         deadline = started + policy.max_run_seconds
 
@@ -475,54 +564,33 @@ class CanonicalFactRetentionExecutor:
         )
         planning_seconds = perf_counter() - planning_started
         check_budget()
+        pending = self.repository.selected_verification_batch_suffix(
+            storage_day, verification_batch, statement_timeout_ms=min(
+                policy.plan_statement_timeout_ms, max(1, int(remaining_run_seconds() * 1000))),
+        ) if verification_batch is not None else (verification_page,)
         item = self._selected_plan_item(
             plan=plan, storage_day=storage_day, expected_action=expected_action,
-        )
-        observe(stage="executing", completed_steps=0, storage_day=storage_day.isoformat(),
-                action=expected_action)
-        failure_count = 0
-        status = "completed"
-        try:
-            raw_outcome = self._execute_step(
-                item=item, policy=policy, storage_root=storage_root,
-                check_budget=check_budget, remaining_seconds=remaining_run_seconds,
-                storage_policy_witness=storage_policy_witness, prerequisite_commits=[],
+            verification_pages=verification_pages, manifest_set_hash=manifest_set_hash,
+        ) if pending else None
+        outcomes, status, failure_count = [], "completed", 0
+        for page in pending:
+            observe(stage="executing", completed_steps=len(outcomes), storage_day=storage_day.isoformat(),
+                    action=expected_action)
+            outcome = self._selected_step(
+                item=item, policy=policy, storage_root=storage_root, storage_day=storage_day,
+                expected_action=expected_action, check_budget=check_budget, remaining_run_seconds=remaining_run_seconds,
+                storage_policy_witness=storage_policy_witness, verification_pages=verification_pages,
+                verification_page=page, manifest_set_hash=manifest_set_hash,
             )
-            if raw_outcome.get("status") != _SELECTED_SUCCESS[expected_action]:
-                status = "failed"
-                failure_count = 1
-                error = (
-                    "canonical_retention_selected_outcome_changed: "
-                    f"storage_day={storage_day} expected_action={expected_action} "
-                    f"expected_status={_SELECTED_SUCCESS[expected_action]} "
-                    f"actual_status={raw_outcome.get('status')}"
-                )
-                outcome = {
-                    **raw_outcome, "action": expected_action,
-                    "storage_day": storage_day.isoformat(), "status": "failed",
-                    "actual_status": raw_outcome.get("status"), "error": error,
-                }
-            else:
-                outcome = {**raw_outcome, "action": expected_action,
-                           "storage_day": storage_day.isoformat()}
-        except (CanonicalRetentionBudgetExceeded, MarketStorageLifecycleBusyError) as exc:
-            status = "deferred"
-            failure_count = 1
-            outcome = {"action": expected_action, "storage_day": storage_day.isoformat(),
-                       "status": "deferred", "reason": str(exc)}
-            logger.warning(
-                "canonical_retention_selected_step_deferred | storage_day=%s action=%s reason=%s",
-                storage_day, expected_action, exc,
-            )
-        except Exception as exc:
-            status = "failed"
-            failure_count = 1
-            outcome = {"action": expected_action, "storage_day": storage_day.isoformat(),
-                       "status": "failed", "error": str(exc)}
-            logger.exception(
-                "canonical_retention_selected_step_failed | storage_day=%s action=%s",
-                storage_day, expected_action,
-            )
+            if verification_batch is not None:
+                outcome["selected_page_ordinal"] = page.page_ordinal
+                if outcome.get("actual_status") in _PAGE_PREREQUISITE_STATUSES:
+                    outcome["status"] = "deferred"
+                    outcome["reason"] = outcome.pop("error")
+            outcomes.append(outcome)
+            if outcome["status"] != _SELECTED_SUCCESS[expected_action]:
+                status, failure_count = outcome["status"], 1
+                break
         finished = monotonic()
         result = {
             "schema_version": "market.canonical_retention_selected_run.v1",
@@ -532,25 +600,82 @@ class CanonicalFactRetentionExecutor:
             "storage_day": storage_day.isoformat(),
             "expected_action": expected_action,
             "plan": plan,
-            "outcomes": [outcome],
+            "outcomes": outcomes,
             "failure_count": failure_count,
             "planning_pages": 1,
             "planning_seconds": planning_seconds,
             "elapsed_seconds": finished - started,
             "resume_authority": "committed_partition_pages_and_verifications",
-            "prerequisite_commit_count": outcome.get("prerequisite_commit_count", 0),
+            "prerequisite_commit_count": sum(
+                outcome.get("prerequisite_commit_count", int(outcome.get("actual_status") in _PAGE_PREREQUISITE_STATUSES))
+                for outcome in outcomes
+            ),
         }
         if self.use_saved_history_policy:
             result["storage_policy"] = storage_policy_witness
-        observe(stage="finished", completed_steps=1, status=status,
+        if verification_pages is not None:
+            result["expected_verification_pages"] = verification_pages
+        if verification_page is not None:
+            result["expected_verification_page"] = asdict(verification_page)
+        if verification_batch is not None:
+            completed = len(outcomes) - failure_count
+            result["expected_verification_batch"] = [asdict(page) for page in verification_batch]
+            result["already_verified_pages"] = len(verification_batch) - len(pending)
+            result["newly_verified_pages"] = completed
+            result["next_reviewed_page_ordinal"] = pending[completed].page_ordinal if failure_count else None
+        if manifest_set_hash is not None:
+            result["expected_manifest_set_hash"] = manifest_set_hash
+        observe(stage="finished", completed_steps=len(outcomes), status=status,
                 storage_day=storage_day.isoformat(), action=expected_action)
         logger.info(
             "canonical_retention_selected_run_finished | storage_day=%s action=%s "
             "status=%s planning_seconds=%.6f elapsed_seconds=%.6f",
-            storage_day, expected_action, outcome.get("status"), planning_seconds,
+            storage_day, expected_action, status, planning_seconds,
             result["elapsed_seconds"],
         )
         return result
+
+    def _selected_step(self, *, item, policy, storage_root, storage_day, expected_action, check_budget,
+                       remaining_run_seconds, storage_policy_witness, verification_pages, verification_page,
+                       manifest_set_hash):
+        scope = {"action": expected_action, "storage_day": storage_day.isoformat()}
+        try:
+            check_budget()
+            with_pins = {}
+            if verification_page is not None:
+                with_pins["selected_verification_page"] = verification_page
+            if manifest_set_hash is not None:
+                with_pins["expected_manifest_set_hash"] = manifest_set_hash
+            outcome = self._execute_step(
+                item=item, policy=policy, storage_root=storage_root,
+                check_budget=check_budget, remaining_seconds=remaining_run_seconds,
+                storage_policy_witness=storage_policy_witness, prerequisite_commits=[],
+                expected_verification_pages=(item.get("page_count") if expected_action == "verify_partition"
+                                             else verification_pages),
+                **with_pins,
+            )
+            if outcome.get("status") == _SELECTED_SUCCESS[expected_action]:
+                return {**outcome, **scope}
+            return {
+                **outcome, **scope, "status": "failed", "actual_status": outcome.get("status"),
+                "error": (
+                    "canonical_retention_selected_outcome_changed: "
+                    f"storage_day={storage_day} expected_action={expected_action} "
+                    f"expected_status={_SELECTED_SUCCESS[expected_action]} actual_status={outcome.get('status')}"
+                ),
+            }
+        except (CanonicalRetentionBudgetExceeded, MarketStorageLifecycleBusyError) as exc:
+            logger.warning(
+                "canonical_retention_selected_step_deferred | storage_day=%s action=%s reason=%s",
+                storage_day, expected_action, exc,
+            )
+            return {**scope, "status": "deferred", "reason": str(exc)}
+        except Exception as exc:
+            logger.exception(
+                "canonical_retention_selected_step_failed | storage_day=%s action=%s",
+                storage_day, expected_action,
+            )
+            return {**scope, "status": "failed", "error": str(exc)}
 
     def _run(self, *, policy, storage_root, after_storage_day, cancelled, storage_policy_witness=None,
              progress=None):
@@ -602,6 +727,25 @@ class CanonicalFactRetentionExecutor:
             check_budget()
             return deadline - monotonic()
 
+        def prune_one():
+            # Advance the other lane even when this attempt exhausts its time budget.
+            self._prefer_cold_prune = False
+            try:
+                cleanup = prune_oldest_retired_identities(self.repository.database, deadline=check_budget)
+            except MarketStorageLifecycleBusyError:
+                logger.info("canonical_cold_identity_cleanup_deferred | reason=lifecycle_busy")
+                return False
+            except Exception as exc:
+                sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
+                if sqlstate not in {"55P03", "57014"}:
+                    raise
+                logger.info("canonical_cold_identity_cleanup_deferred | sqlstate=%s", sqlstate)
+                return False
+            if cleanup is None:
+                return False
+            outcomes.append({**cleanup, "action": "prune_cold_identities"})
+            return True
+
         for _ in range(policy.max_steps_per_run):
             planning_started = perf_counter()
             planning_outcome = "failed"
@@ -627,6 +771,15 @@ class CanonicalFactRetentionExecutor:
                     "after_storage_day=%s",
                     planning_outcome, planning_elapsed, scans, cursor,
                 )
+            cold_cleanup = plan.get("cold_layout") and not explicit_cursor
+            prune_attempted = cold_cleanup and self._prefer_cold_prune
+            if prune_attempted:
+                try:
+                    if prune_one():
+                        continue
+                except CanonicalRetentionBudgetExceeded as exc:
+                    stop_reason = exc.stop_reason
+                    break
             candidates = [item for item in plan["actions"] if item["eligible"]]
             item = None
             if retry_day is not None and not retry_attempted:
@@ -662,6 +815,13 @@ class CanonicalFactRetentionExecutor:
                 next_day = plan["next_after_storage_day"]
                 cursor = date.fromisoformat(next_day) if next_day else None
                 if cursor is None:
+                    if cold_cleanup and not prune_attempted:
+                        try:
+                            if prune_one():
+                                continue
+                        except CanonicalRetentionBudgetExceeded as exc:
+                            stop_reason = exc.stop_reason
+                            break
                     stop_reason = "scan_complete"
                     if plan["actions"]:
                         waiting = {"active_or_future_storage_day", "hot_window_not_elapsed"}
@@ -670,6 +830,8 @@ class CanonicalFactRetentionExecutor:
                     break
                 continue
             item = item or candidates[0]
+            if cold_cleanup:
+                self._prefer_cold_prune = True
             day = date.fromisoformat(item["storage_day"])
             # Revisit this day's durable progress on success/budget suspension;
             # skip a failed/busy day this cycle so it cannot starve later days.
@@ -730,7 +892,8 @@ class CanonicalFactRetentionExecutor:
                      "status": "deferred", "reason": str(exc)}
                 ))
                 self._schedule_retry(
-                    day=day, reason="lifecycle_busy", policy=policy, now=monotonic(),
+                    day=day, reason=("cold_stage_pressure" if isinstance(exc, ColdStagePressure) else "lifecycle_busy"),
+                    policy=policy, now=monotonic(),
                 )
                 if day == retry_day:
                     retry_followthrough = False

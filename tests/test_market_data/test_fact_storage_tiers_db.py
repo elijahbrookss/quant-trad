@@ -323,6 +323,103 @@ def test_candle_paging_summaries_and_causal_selection_survive_cooling(storage, t
         candle_repo.read_frozen_dataset_candles(**frozen_window)
 
 
+def test_direct_cold_historical_candle_ingest_is_retryable_and_freezes_exactly(storage, tmp_path, monkeypatch):
+    from market_data.archive import FilesystemRawArchiveObjectStore
+    from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, CandleFact, DatasetSeriesRequest
+    from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES
+    from portal.backend.db.models import Base
+    from portal.backend.service.storage import history_policy
+    from portal.backend.service.storage.repos import cold_history
+    from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+    from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    monkeypatch.setattr(cold_history, "configured_archive_root", lambda: archive)
+    monkeypatch.setattr(cold_history, "require_cold_acquisition_headroom", lambda session: None)
+    monkeypatch.setattr(history_policy, "_read", lambda session: (SimpleNamespace(movement_enabled=True), None))
+    monkeypatch.setattr(history_policy, "_archive_policy", lambda session, saved, defaults, root: defaults)
+    monkeypatch.setattr(repository_module, "canonical_fact_storage_repository", PostgresCanonicalFactStorageRepository(
+        object_store_factory=lambda: FilesystemRawArchiveObjectStore(archive / "objects"),
+        read_cache_factory=lambda: None,
+    ))
+    with storage.database.session() as session:
+        for table in Base.metadata.sorted_tables:
+            if table.schema == "market" and table.name in COLD_TABLE_NAMES:
+                table.create(session.connection(), checkfirst=True)
+        database_identity = session.scalar(text("""
+            SELECT c.system_identifier::text || '/' || d.oid::text
+            FROM pg_control_system() AS c CROSS JOIN pg_database AS d WHERE d.datname=current_database()
+        """))
+        _configure_fixture_catalog(session.connection(), database_identity, archive)
+        session.execute(text("UPDATE market.fact_storage_state SET layout_version=:version"),
+                        {"version": COLD_HISTORY_LAYOUT_VERSION})
+        session.execute(text("""
+            INSERT INTO public.portal_storage_policy(id, revision, policy, updated_at)
+            VALUES (1,1,jsonb_build_object('recent_days', 14),clock_timestamp())
+        """))
+
+    series_id = storage.repo.register_series(instrument_id="storage-fixture", fact_type=CANDLE_FACT_TYPE,
+                                            timeframe_seconds=60, contract_version=CANDLE_FACT_VERSION)
+    source_id = storage.repo.register_source(SourceIdentity(
+        provider="COINBASE", venue="COINBASE_DIRECT", source_kind="historical_api", adapter_version="cold.fixture.v1",
+    ), lineage={"fixture": "direct-cold"})
+    start = datetime.combine(storage.today - timedelta(days=60), datetime.min.time(), tzinfo=UTC)
+    end = start + timedelta(minutes=1)
+    fact = CandleFact(open_time=start, close_time=end, open=100, high=110, low=90, close=101, volume=None,
+                      known_at=end, known_at_method="provider_close_time", accepted_at=end)
+    first = storage.repo.ingest_candles(series_id=series_id, source_id=source_id, facts=[fact])
+    repeated = storage.repo.ingest_candles(series_id=series_id, source_id=source_id, facts=[fact])
+    assert first.inserted_count == 1 and repeated.noop_count == 1
+    frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(series_id, start, end)])
+    correction = replace(fact, close=108, known_at=end + timedelta(seconds=1), accepted_at=end + timedelta(seconds=1))
+    second = storage.repo.ingest_candles(series_id=series_id, source_id=source_id, facts=[correction])
+    assert second.corrected_count == 1
+    revisions = storage.repo.read_fact_revisions(series_id=series_id, start=start, end=end)
+    assert [row.revision for row in revisions] == [1, 2]
+    assert [row.market_commit_seq for row in revisions] == [first.max_commit_seq, second.max_commit_seq]
+    frozen_rows = storage.repo.read_dataset_series(dataset_id=frozen.dataset_id, series_id=series_id,
+                                                  start=start, end=end)
+    assert len(frozen_rows) == 1 and frozen_rows[0].fact.close == 101
+    with storage.database.session() as session:
+        for relation in ("fact_versions", "fact_hot_payloads", "fact_identities"):
+            assert session.execute(text(f"SELECT count(*) FROM market.{relation} WHERE series_id=:id"),
+                                   {"id": series_id}).scalar_one() == 0
+        assert session.execute(text("SELECT count(*) FROM market.cold_fact_locators WHERE series_id=:id"),
+                               {"id": series_id}).scalar_one() == 2
+
+    old_start = start + timedelta(minutes=1)
+    recent_start = datetime.combine(storage.today - timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+    mixed = [replace(fact, open_time=opened, close_time=opened + timedelta(minutes=1),
+                     known_at=opened + timedelta(minutes=1), accepted_at=recent_start + timedelta(minutes=1))
+             for opened in (old_start, recent_start)]
+    assert storage.repo.ingest_candles(series_id=series_id, source_id=source_id, facts=mixed).inserted_count == 2
+    with storage.database.session() as session:
+        hot_times = session.execute(text("""
+            SELECT observation_time FROM market.fact_versions WHERE series_id=:id
+        """), {"id": series_id}).scalars().all()
+        cold_count = session.scalar(text("SELECT count(*) FROM market.cold_fact_locators WHERE series_id=:id"),
+                                    {"id": series_id})
+    assert hot_times == [recent_start]
+    assert cold_count == 3
+
+    acquired = datetime.combine(storage.today, datetime.min.time(), tzinfo=UTC)
+    missing = start - timedelta(minutes=1)
+    gap = replace(fact, open_time=missing, close_time=start, known_at=acquired, accepted_at=acquired,
+                  known_at_method="platform_acceptance")
+    overlap = replace(correction, known_at=acquired, accepted_at=acquired, known_at_method="platform_acceptance")
+    scope = {"series_id": series_id, "source_id": source_id, "fill_missing_only": True}
+    imported = storage.repo.ingest_candles(**scope, facts=[gap, overlap])
+    assert (imported.inserted_count, imported.corrected_count, imported.noop_count) == (1, 0, 1)
+    next_fetch = replace(gap, known_at=acquired + timedelta(seconds=1), accepted_at=acquired + timedelta(seconds=1))
+    assert storage.repo.ingest_candles(**scope, facts=[next_fetch]).noop_count == 1
+    with pytest.raises(RuntimeError, match="market_data_gap_acquisition_overlap_changed"):
+        storage.repo.ingest_candles(**scope, facts=[replace(overlap, close=107)])
+    assert storage.repo.read_candles(series_id=series_id, start=missing, end=start, known_at_lte=start) == []
+    current = storage.repo.read_candles(series_id=series_id, start=missing, end=start)
+    assert len(current) == 1 and current[0].fact.known_at == acquired
+
+
 def test_a_header_cannot_commit_without_its_payload(storage, monkeypatch):
     original_execute = None
     with pytest.raises(DBAPIError, match="fact_hot_payload_missing"):

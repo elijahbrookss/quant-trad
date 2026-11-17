@@ -12,7 +12,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from itertools import islice
 from typing import Any, Optional
+from urllib.parse import quote
 
 from sqlalchemy import text
 
@@ -72,6 +74,7 @@ from market_data.order_book import (
     L2SnapshotFact,
 )
 from market_data.structure import (
+    MARKET_TRADE_FACT_VERSION,
     MarketSide,
     MarketTradeFact,
     MarketTradeRecord,
@@ -85,6 +88,8 @@ from market_data.structure import (
 from market_data.stream_quality import normalize_stream_quality_classification
 
 from ._shared import db
+from .cold_history import cold_page_is_visible
+from .fact_dependencies import _cold_enabled
 from .market_data import market_data_repo
 from .market_lifecycle import market_storage_lifecycle_repository
 from .fact_storage import canonical_fact_storage_repository
@@ -358,18 +363,32 @@ def _require_book_state_source(
     """Require a canonical archive-acknowledged snapshot or mutation state."""
 
     observation_key = _book_observation_key(position)
+    def matches(row):
+        evidence = row["provenance"].get("_qt_l2_evidence", {})
+        return (isinstance(evidence, Mapping)
+                and all(str(evidence.get(key)) == str(int(position[key]))
+                        for key in ("connection_epoch", "receive_ordinal", "event_ordinal"))
+                and row["payload"].get("validity_interval_id") == str(validity_interval_id)
+                and row["payload"].get("after_state_hash") == str(state_hash))
+
     with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
         SELECT id FROM market.fact_versions
         WHERE series_id=:series_id AND observation_key=:observation_key AND payload_schema_id='market.l2_book.v1'
         ORDER BY revision DESC,id
     """), {"series_id": int(series_id), "observation_key": observation_key}) as rows:
         for row in rows:
-            evidence = row["provenance"].get("_qt_l2_evidence", {})
-            if (isinstance(evidence, Mapping)
-                    and all(str(evidence.get(key)) == str(int(position[key]))
-                            for key in ("connection_epoch", "receive_ordinal", "event_ordinal"))
-                    and row["payload"].get("validity_interval_id") == str(validity_interval_id)
-                    and row["payload"].get("after_state_hash") == str(state_hash)):
+            if matches(row):
+                return
+    if _cold_enabled(session):
+        cold = canonical_fact_storage_repository.cold_history(session)
+        candidates = cold.key_candidate_ids(
+            session, series_id=int(series_id), key=observation_key, max_candidates=1000,
+        )
+        for row in cold.read_by_ids(session, candidates).values():
+            if (row["series_id"] != int(series_id) or row["observation_key"] != observation_key
+                    or row["payload_schema_id"] != "market.l2_book.v1"):
+                raise RuntimeError(f"market_book_cold_source_mismatch: fact_version_id={row['id']}")
+            if matches(row):
                 return
     raise ValueError("market_feature_source_incomplete: canonical acknowledged book state is missing")
 
@@ -377,23 +396,29 @@ def _require_book_state_source(
 def _require_material_source(
     session,
     *,
-    table_name: str,
     series_id: int,
     material_hash: str,
 ) -> None:
-    if not str(table_name).replace("_", "").isalnum():
-        raise ValueError("market_feature_storage_invalid: unsafe source table")
     found = session.execute(
         text(
-            f"SELECT 1 FROM market.{table_name} "
+            "SELECT 1 FROM market.fact_versions "
             "WHERE series_id = :series_id AND material_hash = :material_hash LIMIT 1"
         ),
         {"series_id": int(series_id), "material_hash": str(material_hash)},
     ).scalar_one_or_none()
-    if found is None:
-        raise ValueError(
-            f"market_feature_source_incomplete: {table_name} source material is missing"
+    if found is None and _cold_enabled(session):
+        cold = canonical_fact_storage_repository.cold_history(session)
+        candidates = cold.material_candidates(
+            session, series_ids=[series_id], material_hashes=[material_hash], include_legacy=False,
         )
+        if candidates:
+            fact_id, claim = candidates[0]
+            row = cold.read_by_ids(session, [fact_id])[fact_id]
+            if row["series_id"] != series_id or row["material_hash"] != claim:
+                raise RuntimeError(f"market_feature_cold_material_mismatch: fact_version_id={fact_id}")
+            found = 1
+    if found is None:
+        raise ValueError("market_feature_source_incomplete: canonical source material is missing")
 
 
 def _require_canonical_typed_material_source(
@@ -415,7 +440,51 @@ def _require_canonical_typed_material_source(
         )
 
 
-def _trade_flow_status_rows(session, series_ids):
+def _matched_provider_trade_ids(session, scope, trade_ids):
+    """Find accepted provider trade identities in the exact stream series/source."""
+    product = str(scope["provider_product_id"])
+    series_id, source_id = int(scope["series_id"]), int(scope["source_id"])
+    cold = None
+    found = set()
+    for offset in range(0, len(trade_ids), 256):
+        requested = {f"{product}:{trade_id}": trade_id for trade_id in trade_ids[offset:offset+256]}
+        hot = session.execute(text("""
+            SELECT DISTINCT external_event_key FROM market.fact_versions
+            WHERE series_id=:series AND source_id=:source AND fact_type='market.trade'
+              AND external_event_group_key=:product AND observation_key=ANY(:keys)
+              AND external_event_key=ANY(:trade_ids)
+              AND observation_key=external_event_group_key || ':' || external_event_key
+        """), {"series": series_id, "source": source_id, "product": product,
+               "keys": list(requested), "trade_ids": list(requested.values())}).scalars()
+        found.update(hot)
+        remaining = [key for key, trade_id in requested.items() if trade_id not in found]
+        if not remaining or not _cold_enabled(session):
+            continue
+        if cold is None:
+            cold = canonical_fact_storage_repository.cold_history(session)
+        claims = cold.key_candidates(session, series_id=series_id, keys=remaining, max_candidates=4096)
+        for fact_id, row in cold.read_by_ids(session, list(claims)).items():
+            observation_key = claims[fact_id]
+            if (row["series_id"] != series_id or row["observation_key"] != observation_key
+                    or row["fact_type"] != "market.trade"):
+                raise RuntimeError(f"market_trade_cold_source_mismatch: fact_version_id={fact_id}")
+            if (row["source_id"] == source_id and row["external_event_group_key"] == product
+                    and row["external_event_key"] == requested[observation_key]):
+                found.add(requested[observation_key])
+    return found
+
+
+def _trade_flow_archive_status(session, series_ids):
+    if not series_ids:
+        return [], {"state": "not_applicable"}
+    if _cold_enabled(session) and session.scalar(text(f"""
+        SELECT EXISTS (
+            SELECT FROM market.cold_fact_page_series AS scope
+            JOIN market.cold_fact_pages AS page ON page.id=scope.page_id
+            WHERE scope.series_id=ANY(:series_ids) AND {cold_page_is_visible("page")}
+        )
+    """), {"series_ids": series_ids}):
+        return [], {"state": "unavailable", "reason": "exact_lifetime_aggregate_requires_cold_history_scan"}
     aggregates = {}
     with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
         WITH latest AS (
@@ -435,7 +504,8 @@ def _trade_flow_status_rows(session, series_ids):
             summary["complete_bucket_count"] += int(fact.aggregate_complete)
             summary["incomplete_bucket_count"] += int(not fact.aggregate_complete)
             summary["latest_bucket_end"] = max(summary["latest_bucket_end"], fact.bucket_end)
-    return sorted(aggregates.values(), key=lambda row: (row["interval_seconds"], row["series_id"]))
+    rows = sorted(aggregates.values(), key=lambda row: (row["interval_seconds"], row["series_id"]))
+    return rows, {"state": "complete"}
 
 def _book_position_from_material(value: Mapping[str, Any]) -> BookSourcePosition:
     return BookSourcePosition(
@@ -2179,7 +2249,15 @@ class PostgresMarketStructureRepository:
                     "observation_keys": list(observation_keys),
                 },
             ).mappings().all()
-        return {str(row["observation_key"]): dict(row) for row in rows}
+            heads = {str(row["observation_key"]): dict(row) for row in rows}
+            missing = sorted(set(observation_keys) - heads.keys())
+            if missing and _cold_enabled(session):
+                cold = canonical_fact_storage_repository.cold_history(session)
+                for key, row in cold.latest_for_keys(session, series_id=int(series_id), keys=missing).items():
+                    heads[key] = {name: row[name] for name in (
+                        "observation_key", "material_hash", "row_hash", "market_commit_seq",
+                    )}
+        return heads
 
     @staticmethod
     def _resolve_derived_source_id(series_id: int) -> int:
@@ -2205,8 +2283,12 @@ class PostgresMarketStructureRepository:
                 ),
                 {"series_id": int(series_id)},
             ).mappings().one()
-        min_source_id = row["min_source_id"]
-        max_source_id = row["max_source_id"]
+            source_ids = {value for value in (row["min_source_id"], row["max_source_id"]) if value is not None}
+            if _cold_enabled(session) and len(source_ids) < 2:
+                cold = canonical_fact_storage_repository.cold_history(session)
+                source_ids.update(cold.trade_source_ids(session, derived_series_id=int(series_id)))
+        min_source_id = min(source_ids, default=None)
+        max_source_id = max(source_ids, default=None)
         if min_source_id is None or min_source_id != max_source_id:
             source_count = "0" if min_source_id is None else ">1"
             raise RuntimeError(
@@ -2546,6 +2628,35 @@ class PostgresMarketStructureRepository:
                 f"actual={invalid[0]}"
             )
         return sorted(records, key=lambda record: record.fact.bucket_start)
+
+    def prepare_level2_raw_prefix(self, claim, *, prefix, object_store, temporary_directory, check_budget):
+        """Verify and commit one raw prefix interval under the current stream claim."""
+        from market_data.archive import RawArchiveReadLimits
+        from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+        from . import fact_references
+        from .fact_book_prefix import prepare_next_book_prefix_range
+        from .market_lifecycle import market_storage_lifecycle_repository
+
+        if ("level2" not in claim.channels or any(prefix.get(name) != getattr(claim, name)
+                for name in ("definition_id", "session_id", "provider_product_id"))):
+            raise ValueError("market_l2_prefix_claim_mismatch")
+        limits = ArchiveVerificationLimits(max_objects=5_000, max_bytes=1024**3)
+        with db.session() as session:
+            session.execute(text("SET LOCAL statement_timeout = '5s'"))
+            market_storage_lifecycle_repository.acquire_publication_lock(session)
+            check_budget()
+            progress = prepare_next_book_prefix_range(
+                session, prefix=prefix, object_store=object_store,
+                byte_verifier=ArchiveVerificationBatch(object_store, limits=limits, check_budget=check_budget),
+                limits=RawArchiveReadLimits(), max_mapping_rows=fact_references.RAW_REFERENCE_MAPPING_LIMIT,
+                max_objects=limits.max_objects, check_budget=check_budget, identity_spool_directory=temporary_directory,
+            )
+            # A stale worker may read and verify bytes but cannot persist a
+            # hold. Take the lease row for the final commit only, so this
+            # archive work does not prevent heartbeats.
+            self._require_fence(session, claim)
+            check_budget()
+        return progress
 
     def ingest_book_facts(
         self,
@@ -3025,6 +3136,33 @@ class PostgresMarketStructureRepository:
         with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             ordered = {"snapshot": [], "update": []}
             terminal = None
+            claimed = {}
+
+            def add(row, *, from_cold=False):
+                nonlocal terminal
+                evidence = row["provenance"].get("_qt_l2_evidence", {})
+                if evidence.get("definition_id") != definition_id or evidence.get("session_id") != session_id:
+                    if from_cold:
+                        raise RuntimeError(f"market_book_cold_session_mismatch: fact_version_id={row['id']}")
+                    return
+                if row["id"] in claimed:
+                    if claimed[row["id"]] != row["row_hash"]:
+                        raise RuntimeError(f"market_book_replay_overlap_mismatch: fact_version_id={row['id']}")
+                    return
+                claimed[row["id"]] = row["row_hash"]
+                if len(claimed) > len(snapshot_ids) + len(batch_ids):
+                    raise RuntimeError("market_book_replay_reconciliation_failed: extra canonical event")
+                event_type = row["payload"]["event_type"]
+                if event_type in ordered:
+                    position = tuple(int(evidence[key]) for key in ("connection_epoch", "receive_ordinal", "event_ordinal"))
+                    ordered[event_type].append((position, str(row["external_event_component_key"])))
+                    if terminal is None or position > terminal["position"]:
+                        terminal = {
+                            "position": position, "series_id": row["series_id"],
+                            "interval_id": row["payload"]["validity_interval_id"],
+                            "state_hash": row["payload"]["after_state_hash"],
+                        }
+
             # Canonical L2 observation keys carry this exact source prefix.
             # Check the hydrated provenance too; the key is a lookup bound,
             # never substitute evidence for another definition/session.
@@ -3034,19 +3172,16 @@ class PostgresMarketStructureRepository:
                 ORDER BY market_commit_seq,id
             """), {"prefix": f"{definition_id}:{session_id}:"}) as rows:
                 for row in rows:
-                    evidence = row["provenance"].get("_qt_l2_evidence", {})
-                    if evidence.get("definition_id") != definition_id or evidence.get("session_id") != session_id:
-                        continue
-                    event_type = row["payload"]["event_type"]
-                    if event_type in ordered:
-                        position = tuple(int(evidence[key]) for key in ("connection_epoch", "receive_ordinal", "event_ordinal"))
-                        ordered[event_type].append((position, str(row["external_event_component_key"])))
-                        if terminal is None or position > terminal["position"]:
-                            terminal = {
-                                "position": position, "series_id": row["series_id"],
-                                "interval_id": row["payload"]["validity_interval_id"],
-                                "state_hash": row["payload"]["after_state_hash"],
-                            }
+                    add(row)
+            if _cold_enabled(session):
+                cold = canonical_fact_storage_repository.cold_history(session)
+                ids = cold.book_session_ids(session, definition_id=definition_id, session_id=session_id)
+                try:
+                    while batch := list(islice(ids, 128)):
+                        for row in cold.read_by_ids(session, batch).values():
+                            add(row, from_cold=True)
+                finally:
+                    ids.close()
             stored_snapshots = tuple(identity for _position, identity in sorted(ordered["snapshot"], key=lambda item: item[0]))
             stored_batches = tuple(identity for _position, identity in sorted(ordered["update"], key=lambda item: item[0]))
             # The current projection is disposable and may belong to a later
@@ -3439,25 +3574,19 @@ class PostgresMarketStructureRepository:
                 ),
                 {"definition_id": definition_id},
             ).mappings().all()
-            trade_count = int(
-                session.execute(
-                    text(
-                        """
-                        SELECT count(*) FROM market.market_trade_identities
-                        WHERE source_id = (
-                            SELECT source_id FROM market.stream_definitions
-                            WHERE id = :definition_id
-                        )
-                          AND provider_product_id = :product_id
-                        """
-                    ),
-                    {
-                        "definition_id": definition_id,
-                        "product_id": str(definition["provider_product_id"]),
+            trade_count_status = {"state": "not_applicable"}
+            if definition["contract_version"] == MARKET_TRADE_FACT_VERSION:
+                trade_count_status = {
+                    "state": "unavailable",
+                    "reason": "exact_lifetime_count_requires_history_scan",
+                    "recent_reconciliation": {
+                        "method": "POST",
+                        "path": "/api/market-data/market-structure/definitions/"
+                                f"{quote(definition_id, safe='')}/reconcile-recent",
+                        "max_trades": 1000,
                     },
-                ).scalar_one()
-            )
-            aggregates = _trade_flow_status_rows(session, aggregate_series_ids)
+                }
+            aggregates, aggregate_status = _trade_flow_archive_status(session, aggregate_series_ids)
             book_state = session.execute(
                 text(
                     """
@@ -3516,6 +3645,10 @@ class PostgresMarketStructureRepository:
             latest_fact_commit_seq = int(
                 book_reconstruction.pop("latest_fact_commit_seq") or 0
             )
+            if str(definition["contract_version"]) == L2_BOOK_FACT_VERSION and _cold_enabled(session):
+                latest_fact_commit_seq = market_data_repo._series_commit_seq_with_session(
+                    session, int(definition["series_id"]),
+                )
             latest_checkpoint_id = book_reconstruction.pop("latest_checkpoint_id")
             latest_checkpoint_acknowledged_at = book_reconstruction.pop(
                 "latest_checkpoint_acknowledged_at"
@@ -3605,8 +3738,10 @@ class PostgresMarketStructureRepository:
             "archived_records": int(manifest["archived_records"]),
             "archive_mapping_lag_records": int(manifest["mapping_lag_records"]),
             "last_acknowledged_at": manifest["last_acknowledged_at"],
-            "canonical_trade_count": trade_count,
+            "canonical_trade_count": None,
+            "canonical_trade_count_status": trade_count_status,
             "trade_flow_aggregates": [dict(row) for row in aggregates],
+            "trade_flow_aggregate_status": aggregate_status,
             "book_reconstruction": book_reconstruction,
             "book_validity_intervals": [dict(row) for row in book_validity],
             "quality_counts": {str(row["classification"]): int(row["count"]) for row in quality},
@@ -3991,6 +4126,7 @@ class PostgresMarketStructureRepository:
         """Return the immutable acceptance clock for an already-persisted event."""
 
         with db.session() as session:
+            observation_key = _book_observation_key(position)
             value = session.execute(
                 text(
                     """
@@ -4005,9 +4141,16 @@ class PostgresMarketStructureRepository:
                 ),
                 {
                     "series_id": int(series_id),
-                    "observation_key": _book_observation_key(position),
+                    "observation_key": observation_key,
                 },
             ).scalar_one_or_none()
+            if value is None and _cold_enabled(session):
+                cold = canonical_fact_storage_repository.cold_history(session)
+                row = cold.latest_for_keys(session, series_id=int(series_id), keys=[observation_key]).get(observation_key)
+                if row is not None:
+                    if row["payload_schema_id"] != "market.l2_book.v1":
+                        raise RuntimeError(f"market_book_cold_source_mismatch: fact_version_id={row['id']}")
+                    value = row["accepted_at"]
         return _utc(value) if value is not None else None
 
     def get_book_validity_opening(
@@ -4046,12 +4189,12 @@ class PostgresMarketStructureRepository:
         trade_ids = sorted(
             {str(value).strip() for value in provider_trade_ids if str(value).strip()}
         )
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             manifest = session.execute(
                 text(
                     """
                     SELECT manifests.record_count, definitions.source_id,
-                           definitions.provider_product_id
+                           definitions.provider_product_id, definitions.series_id
                     FROM market.raw_archive_manifests AS manifests
                     JOIN market.stream_definitions AS definitions
                       ON definitions.id = manifests.definition_id
@@ -4079,25 +4222,7 @@ class PostgresMarketStructureRepository:
                     {"manifest_id": manifest_id},
                 ).scalar_one()
             )
-            found = set(
-                str(value)
-                for value in session.execute(
-                    text(
-                        """
-                        SELECT provider_trade_id
-                        FROM market.market_trade_identities
-                        WHERE source_id = :source_id
-                          AND provider_product_id = :product_id
-                          AND provider_trade_id = ANY(:trade_ids)
-                        """
-                    ),
-                    {
-                        "source_id": int(manifest["source_id"]),
-                        "product_id": str(provider_product_id),
-                        "trade_ids": trade_ids,
-                    },
-                ).scalars().all()
-            )
+            found = _matched_provider_trade_ids(session, manifest, trade_ids)
         missing = sorted(set(trade_ids) - found)
         return {
             "schema_version": "market.archive_trade_reconciliation.v1",
@@ -4119,11 +4244,11 @@ class PostgresMarketStructureRepository:
         trade_ids = sorted(
             {str(value).strip() for value in provider_trade_ids if str(value).strip()}
         )
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             definition = session.execute(
                 text(
                     """
-                    SELECT source_id, provider_product_id
+                    SELECT source_id, series_id, provider_product_id
                     FROM market.stream_definitions
                     WHERE id = :definition_id
                     """
@@ -4134,25 +4259,7 @@ class PostgresMarketStructureRepository:
                 raise ValueError(
                     f"market_stream_definition_unknown: definition_id={definition_id}"
                 )
-            found = sorted(
-                str(value)
-                for value in session.execute(
-                    text(
-                        """
-                        SELECT provider_trade_id
-                        FROM market.market_trade_identities
-                        WHERE source_id = :source_id
-                          AND provider_product_id = :product_id
-                          AND provider_trade_id = ANY(:trade_ids)
-                        """
-                    ),
-                    {
-                        "source_id": int(definition["source_id"]),
-                        "product_id": str(definition["provider_product_id"]),
-                        "trade_ids": trade_ids,
-                    },
-                ).scalars().all()
-            )
+            found = sorted(_matched_provider_trade_ids(session, definition, trade_ids))
         return {
             "provider_product_id": str(definition["provider_product_id"]),
             "requested_trade_ids": trade_ids,
@@ -4242,6 +4349,18 @@ class PostgresMarketStructureRepository:
                     "known_at": decision_time,
                 },
             ).scalar_one()
+            if _cold_enabled(session):
+                cold = canonical_fact_storage_repository.cold_history(session)
+                scopes = ((futures_bbo, "payload_schema_id", "market.bbo.v1"),
+                          (spot_bbo, "payload_schema_id", "market.bbo.v1"),
+                          (oi_series, "fact_type", "derivatives.open_interest"),
+                          (funding_series, "fact_type", "derivatives.funding_rate"))
+                for series_id, field, expected in scopes:
+                    if series_id <= 0:
+                        continue
+                    window = dict(series_id=series_id, start=start_at, end=end_at)
+                    rows = cold.iter_range(session, **window, known_at_lte=decision_time)
+                    value = max(value, max((row["market_commit_seq"] for row in rows if row[field] == expected), default=0))
         return int(value)
 
     def ingest_market_state_features(
@@ -4345,7 +4464,6 @@ class PostgresMarketStructureRepository:
             for fact in flow_rows:
                 _require_material_source(
                     session,
-                    table_name="fact_versions",
                     series_id=fact.source_trade_flow_series_id,
                     material_hash=fact.aggregate_material_hash,
                 )
@@ -4380,6 +4498,14 @@ class PostgresMarketStructureRepository:
                             "commit_seq": int(commit_seq),
                         },
                     ).scalar_one_or_none()
+                    if found is None and _cold_enabled(session):
+                        cold = canonical_fact_storage_repository.cold_history(session)
+                        fact_id = cold.commit_candidate_id(session, series_id=int(series_id), commit_seq=int(commit_seq))
+                        if fact_id is not None:
+                            source = cold.read_by_ids(session, [fact_id])[fact_id]
+                            if source["series_id"] != int(series_id) or source["market_commit_seq"] != int(commit_seq):
+                                raise RuntimeError(f"market_derivative_cold_source_mismatch: fact_version_id={fact_id}")
+                            found = 1
                     if found is None:
                         raise ValueError(
                             "market_feature_source_incomplete: canonical "

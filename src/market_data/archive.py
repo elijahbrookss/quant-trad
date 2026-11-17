@@ -698,6 +698,13 @@ def _read_spool_file(
             handle.flush()
             os.fsync(handle.fileno())
         _fsync_directory(Path(path).parent)
+    header, rows = _parse_spool_bytes(raw)
+    for _ in _validated_spool_records(header, rows):
+        pass
+    return header, rows, truncated
+
+
+def _parse_spool_bytes(raw: bytes) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
     parsed: list[Mapping[str, Any]] = []
     for ordinal, line in enumerate(raw.splitlines()):
         try:
@@ -714,7 +721,10 @@ def _read_spool_file(
     header = parsed[0]
     if header.get("schema_version") != SPOOL_SCHEMA_VERSION:
         raise RuntimeError("market_spool_corrupt: schema version mismatch")
-    rows = parsed[1:]
+    return header, parsed[1:]
+
+
+def _validated_spool_records(header, rows) -> Iterator[RawStreamRecord]:
     previous_ordinal = 0
     for row in rows:
         if row.get("record_kind") != "raw_frame":
@@ -725,7 +735,17 @@ def _read_spool_file(
         if record.receive_ordinal <= previous_ordinal:
             raise RuntimeError("market_spool_corrupt: receive ordinal is not increasing")
         previous_ordinal = record.receive_ordinal
-    return header, rows, truncated
+        yield record
+
+
+def read_sealed_spool_bytes(raw: bytes) -> tuple[Mapping[str, Any], list[RawStreamRecord]]:
+    """Validate immutable copied bytes without consulting or repairing a live spool path."""
+    if not raw.endswith(b"\n"):
+        raise RuntimeError("market_spool_corrupt: sealed segment has an incomplete tail")
+    header, rows = _parse_spool_bytes(raw)
+    if not rows:
+        raise RuntimeError("market_spool_corrupt: sealed segment is empty")
+    return header, list(_validated_spool_records(header, rows))
 
 
 def _raw_record_from_spool_row(row: Mapping[str, Any]) -> RawStreamRecord:

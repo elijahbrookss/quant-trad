@@ -18,7 +18,10 @@ from core.storage_mounts import (
 )
 from portal.backend.db.fact_storage_schema import fact_partition_name
 from ._shared import db
-from .fact_archival import FACT_ARCHIVE_VERIFIER_VERSION, _partition_manifest_set_hash
+from .cold_history import cold_layout_active
+from .fact_archival import (
+    FACT_ARCHIVE_VERIFIER_VERSION, _partition_manifest_set_hash, _unverified_batch_suffix, _unverified_page,
+)
 from .fact_reclamation import unproven_reclamation_fact_types
 
 
@@ -77,6 +80,15 @@ RETENTION_PROGRESS_QUERY = text("""
     SELECT storage_day,state,expected_rows,manifest_set_hash FROM market.fact_retention_partitions
     WHERE state <> 'reclaimed' ORDER BY storage_day LIMIT :limit
 """)
+_COLD_RETENTION_PROGRESS_QUERY = text("""
+    SELECT partition.storage_day,partition.state,partition.expected_rows,partition.manifest_set_hash
+    FROM market.fact_retention_partitions AS partition
+    WHERE partition.state <> 'reclaimed'
+      AND NOT EXISTS (
+          SELECT FROM market.cold_fact_retired_days AS retired WHERE retired.storage_day=partition.storage_day
+      )
+    ORDER BY partition.storage_day LIMIT :limit
+""")
 RETENTION_PHYSICAL_CHILDREN_QUERY = text("""
     SELECT child.relname,pg_total_relation_size(child.oid) AS bytes
     FROM pg_inherits JOIN pg_class AS child ON child.oid=inhrelid
@@ -96,6 +108,20 @@ RETENTION_PAGE_COUNTS_QUERY = text("""
 class PostgresCanonicalFactRetentionRepository:
     def __init__(self, *, database=db):
         self.database = database
+
+    def check_selected_verification_page(self, day, page, *, statement_timeout_ms):
+        with self.database.session() as session:
+            session.execute(text("SET TRANSACTION READ ONLY"))
+            session.execute(text("SELECT set_config('statement_timeout',:value,true)"),
+                            {"value": str(statement_timeout_ms)})
+            _unverified_page(session, day, page)
+
+    def selected_verification_batch_suffix(self, day, pages, *, statement_timeout_ms):
+        with self.database.session() as session:
+            session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            session.execute(text("SELECT set_config('statement_timeout',:value,true)"),
+                            {"value": str(statement_timeout_ms)})
+            return _unverified_batch_suffix(session, day, pages)
 
     def _inventory(self, policy: CanonicalFactRetentionPolicy, *, after_storage_day: date | None):
         deadline = monotonic() + policy.max_plan_seconds
@@ -123,7 +149,9 @@ class PostgresCanonicalFactRetentionRepository:
             if len(headers) > policy.max_inventory_partitions + 1:
                 raise RuntimeError("canonical_retention_inventory_budget_exceeded: no partial storage total is reported")
             sizes["canonical_header_bytes"] = sum(int(row["bytes"]) for row in headers)
-            partitions = [dict(row) for row in query(RETENTION_PROGRESS_QUERY, {
+            cold_layout = cold_layout_active(session)
+            progress_query = _COLD_RETENTION_PROGRESS_QUERY if cold_layout else RETENTION_PROGRESS_QUERY
+            partitions = [dict(row) for row in query(progress_query, {
                 "limit": policy.max_inventory_partitions + 1,
             }).mappings()]
             physical = list(query(RETENTION_PHYSICAL_CHILDREN_QUERY, {
@@ -151,7 +179,7 @@ class PostgresCanonicalFactRetentionRepository:
                 row.update(query(RETENTION_PAGE_COUNTS_QUERY, {
                     "day": row["storage_day"], "version": FACT_ARCHIVE_VERIFIER_VERSION,
                 }).mappings().one())
-            return {**sizes, "partitions": candidates,
+            return {**sizes, "partitions": candidates, "cold_layout": cold_layout,
                     "next_after_storage_day": candidates[-1]["storage_day"] if deferred else None}
 
     @staticmethod
@@ -230,6 +258,7 @@ class PostgresCanonicalFactRetentionRepository:
                 "hot_payload_bytes": row["hot_payload_bytes"],
                 "expected_rows": row["expected_rows"], "archived_rows": int(row["archived_rows"]),
                 "page_count": int(row["page_count"]), "verified_page_count": int(row["verified_page_count"]),
+                "manifest_set_hash": row.get("manifest_set_hash"),
             })
         if hot_pressure:
             actions.sort(key=lambda row: (row["action"] != "reclaim_partition", not row["eligible"], row["storage_day"]))
@@ -245,6 +274,7 @@ class PostgresCanonicalFactRetentionRepository:
             "schema_version": "market.canonical_retention_plan.v1",
             "database_day": today.isoformat(), "policy": policy.to_dict(),
             "execution_available": True,
+            "cold_layout": inventory.get("cold_layout", False),
             "execution_enabled": policy.execution_enabled,
             "execution_blockers": [] if policy.execution_enabled else ["canonical_retention_execution_disabled"],
             "inventory": {name: inventory[name] for name in (

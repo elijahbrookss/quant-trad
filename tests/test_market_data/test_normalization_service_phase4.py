@@ -72,7 +72,7 @@ class _Store:
         self.read_calls = []
         self.gap_calls = []
 
-    def list_series(self):
+    def list_series_metadata(self):
         return [
             {
                 "id": 11,

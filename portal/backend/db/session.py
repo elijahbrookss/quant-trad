@@ -36,6 +36,7 @@ from .models import (
     REQUIRED_RESEARCH_LINK_INDEXES,
 )
 from . import execution_control as _execution_control  # noqa: F401 - scoped SQL hooks
+from .cold_history_models import COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES, cold_page_is_visible
 from .fact_storage_schema import (
     FACT_STORAGE_TABLES, FACT_STORAGE_IMMUTABLE_TABLES, FACT_STORAGE_LAYOUT_VERSION,
     assert_fact_storage_contract, ensure_fact_payload_partition, install_fact_storage_functions,
@@ -99,6 +100,7 @@ _CLEAN_BOOTSTRAP_ONLY_TABLES = frozenset(
         ("market", "fact_acquisition_coverage"),
         ("market", "book_operational_rollups"),
         *(("market", name) for name in FACT_STORAGE_TABLES),
+        *(("market", name) for name in COLD_TABLE_NAMES),
     }
 )
 # These additive performance indexes require bounded operator creation on existing
@@ -1392,13 +1394,28 @@ class Database:
                 "scripts/db/manual_migration_book_operational_rollups_v1.sql "
                 "with writers stopped before starting this code."
             )
+        authoritative_cold = conn.scalar(text("""
+            SELECT EXISTS (SELECT FROM market.fact_storage_state
+                WHERE layout_version=:layout AND state='ready' AND completed_at IS NOT NULL)
+        """), {"layout": COLD_HISTORY_LAYOUT_VERSION})
+        latest_commit = "COALESCE(latest.market_commit_seq, 0)"
+        cold_watermark = ""
+        if authoritative_cold:
+            cold_watermark = f"""
+                LEFT JOIN LATERAL (
+                    SELECT MAX(bounds.last_commit_seq) AS market_commit_seq
+                    FROM market.cold_fact_page_series AS bounds
+                    JOIN market.cold_fact_pages AS page ON page.id=bounds.page_id
+                    WHERE bounds.series_id=rollups.series_id AND {cold_page_is_visible("page")}
+                ) AS history ON TRUE
+            """
+            latest_commit = "COALESCE(GREATEST(latest.market_commit_seq, history.market_commit_seq), 0)"
         stale_fact = conn.execute(
             text(
-                """
+                f"""
                 SELECT rollups.series_id,
                        rollups.fact_high_water_commit_seq,
-                       COALESCE(latest.market_commit_seq, 0)
-                           AS latest_fact_commit_seq
+                       {latest_commit} AS latest_fact_commit_seq
                 FROM market.book_operational_rollups AS rollups
                 JOIN market.series AS series
                   ON series.id = rollups.series_id
@@ -1410,9 +1427,9 @@ class Database:
                     ORDER BY facts.market_commit_seq DESC
                     LIMIT 1
                 ) AS latest ON TRUE
+                {cold_watermark}
                 WHERE series.contract_version = 'market.l2_book.v1'
-                  AND COALESCE(latest.market_commit_seq, 0)
-                      <> rollups.fact_high_water_commit_seq
+                  AND {latest_commit} <> rollups.fact_high_water_commit_seq
                 ORDER BY rollups.series_id
                 LIMIT 1
                 """
@@ -1563,8 +1580,16 @@ class Database:
         """Fail loud when an existing table does not match the current column contract."""
 
         inspector = inspect(conn)
+        market_tables = set(inspector.get_table_names(schema="market"))
         for table in Base.metadata.sorted_tables:
             schema_name = str(table.schema or "").strip() or None
+            if (
+                schema_name == "market" and table.name in COLD_TABLE_NAMES
+                and table.name not in market_tables
+            ):
+                # Existing v2 installations can be used for rehearsal. The cold
+                # authority certificate requires all of these relations.
+                continue
             expected = {column.name for column in table.columns}
             existing = {col["name"] for col in inspector.get_columns(table.name, schema=schema_name)}
             missing = sorted(expected - existing)

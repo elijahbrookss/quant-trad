@@ -189,7 +189,8 @@ def test_frozen_candle_read_enforces_resolved_source_binding() -> None:
     assert frame.iloc[0]["source_identity_key"] == allowed.identity_key
 
 
-def test_historical_acquisition_is_explicit_and_persists_closed_facts(monkeypatch) -> None:
+@pytest.mark.parametrize("fill_missing_only", [False, True])
+def test_historical_acquisition_is_explicit_and_persists_closed_facts(monkeypatch, fill_missing_only) -> None:
     class Provider:
         def fetch_from_api(self, symbol, start, end, interval):
             return pd.DataFrame(
@@ -217,19 +218,29 @@ def test_historical_acquisition_is_explicit_and_persists_closed_facts(monkeypatc
 
     store = FakeStore()
     monkeypatch.setattr(feed_service, "get_provider", lambda *args, **kwargs: Provider())
+    instrument = _instrument()
+    if fill_missing_only:
+        instrument = {**instrument, "datasource": "COINBASE", "exchange": "COINBASE_DIRECT"}
     result = feed_service.HistoricalCandleIngestor(store).ingest_by_instrument(
-        _instrument(),
+        instrument,
         start="2024-01-01T00:00:00Z",
         end="2024-01-01T00:02:00Z",
         interval="1m",
+        fill_missing_only=fill_missing_only,
     )
 
     assert result.series_id == 7
     assert result.outcome.inserted_count == 2
     assert result.gap_evidence_count == 0
     facts = store.ingest_calls[0]["facts"]
-    assert [fact.known_at for fact in facts] == [fact.close_time for fact in facts]
-    assert all(fact.known_at_method == "interval_close_inferred" for fact in facts)
+    if fill_missing_only:
+        assert store.ingest_calls[0]["fill_missing_only"] is True
+        assert store.ingest_calls[0]["request"]["fill_missing_only"] is True
+        assert [fact.known_at for fact in facts] == [fact.accepted_at for fact in facts]
+        assert all(fact.known_at_method == "platform_acceptance" for fact in facts)
+    else:
+        assert [fact.known_at for fact in facts] == [fact.close_time for fact in facts]
+        assert all(fact.known_at_method == "interval_close_inferred" for fact in facts)
 
 
 def test_historical_acquisition_rejects_duplicate_provider_candles(monkeypatch) -> None:

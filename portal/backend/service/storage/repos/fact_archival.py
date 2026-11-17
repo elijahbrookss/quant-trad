@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 import hashlib
+import re
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date
 import logging
 from math import isfinite
@@ -134,12 +135,114 @@ _ARCHIVE_SOURCE_PAGE_QUERY = text(f"""
 """)
 
 _ARCHIVE_UNVERIFIED_PAGE_QUERY = text("""
-    SELECT pages.* FROM market.fact_archive_manifests AS pages
+    SELECT pages.*, active.generation AS selected_generation,
+           active.preparation_id AS selected_preparation_id, active.catalog_commitment AS selected_catalog_commitment
+    FROM market.fact_archive_manifests AS pages
     LEFT JOIN market.fact_archive_verifications AS proof
       ON proof.manifest_id=pages.id AND proof.verifier_version=:version
+    LEFT JOIN market.fact_archive_active_generations AS active ON active.manifest_id=pages.id
     WHERE pages.storage_day=:day AND proof.manifest_id IS NULL
-    ORDER BY pages.page_ordinal LIMIT 1
+    ORDER BY pages.page_ordinal LIMIT :limit
 """)
+
+
+@dataclass(frozen=True)
+class SelectedVerificationPage:
+    page_ordinal: int
+    manifest_id: str
+    manifest_hash: str
+    generation: int
+    preparation_id: str | None = None
+    catalog_commitment: str | None = None
+
+    def __post_init__(self):
+        if (type(self.page_ordinal) is not int or not 0 <= self.page_ordinal <= 2**31 - 1
+                or type(self.generation) is not int or not 0 <= self.generation <= 2**63 - 1
+                or not isinstance(self.manifest_id, str) or re.fullmatch(r"cfa_[0-9a-f]{64}", self.manifest_id) is None
+                or not isinstance(self.manifest_hash, str) or re.fullmatch(r"[0-9a-f]{64}", self.manifest_hash) is None):
+            raise ValueError("canonical_archive_selected_page_invalid")
+        if self.generation == 0:
+            if self.preparation_id is not None or self.catalog_commitment is not None:
+                raise ValueError("canonical_archive_selected_legacy_generation_invalid")
+        elif (not isinstance(self.preparation_id, str) or re.fullmatch(r"fap_[0-9a-f]{48}", self.preparation_id) is None
+                or not isinstance(self.catalog_commitment, str)
+                or re.fullmatch(r"[0-9a-f]{64}", self.catalog_commitment) is None):
+            raise ValueError("canonical_archive_selected_generation_invalid")
+
+
+def validate_selected_verification_batch(pages):
+    if (type(pages) is not tuple or not 2 <= len(pages) <= 128
+            or any(not isinstance(page, SelectedVerificationPage) for page in pages)
+            or any(right.page_ordinal != left.page_ordinal + 1 for left, right in zip(pages, pages[1:]))
+            or len({page.manifest_id for page in pages}) != len(pages)):
+        raise ValueError("canonical_archive_selected_batch_invalid: require 2 to 128 contiguous exact page pins")
+    return pages
+
+
+def _unverified_page(session, day, expected=None):
+    page = session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
+        "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION, "limit": 1,
+    }).mappings().one_or_none()
+    if expected is not None and (page is None or _page_pin(page) != expected):
+        raise RuntimeError(f"canonical_archive_selected_page_changed: storage_day={day}")
+    return page
+
+
+def _page_pin(page):
+    return SelectedVerificationPage(page["page_ordinal"], page["id"], page["manifest_hash"],
+                                    page["selected_generation"] or 0, page["selected_preparation_id"],
+                                    page["selected_catalog_commitment"])
+
+
+def prepare_selected_verification_batch(session, day, *, first_page_ordinal, page_count):
+    """Read only the exact next bounded contiguous archive cursor."""
+    if (type(first_page_ordinal) is not int or not 0 <= first_page_ordinal <= 2**31 - 1
+            or type(page_count) is not int or not 2 <= page_count <= 128):
+        raise ValueError("canonical_archive_selected_batch_invalid")
+    pages = tuple(_page_pin(row) for row in session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
+        "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION, "limit": page_count,
+    }).mappings())
+    if len(pages) != page_count or pages[0].page_ordinal != first_page_ordinal:
+        raise RuntimeError(f"canonical_archive_selected_batch_changed: storage_day={day}")
+    return validate_selected_verification_batch(pages)
+
+
+def _unverified_batch_suffix(session, day, expected):
+    """Reconcile a reviewed batch with exact current receipts and the live cursor."""
+    rows = session.execute(text("""
+        SELECT pages.page_ordinal,pages.id,pages.manifest_hash,
+               active.generation AS selected_generation,active.preparation_id AS selected_preparation_id,
+               active.catalog_commitment AS selected_catalog_commitment,
+               proof.manifest_id IS NOT NULL AS has_receipt,
+               proof.manifest_hash=pages.manifest_hash AND (
+                   (active.manifest_id IS NULL AND binding.manifest_id IS NULL) OR
+                   (active.manifest_id IS NOT NULL AND
+                    (active.preparation_id,active.catalog_commitment)=(binding.preparation_id,binding.catalog_commitment))
+               ) AS receipt_current
+        FROM market.fact_archive_manifests AS pages
+        LEFT JOIN market.fact_archive_active_generations AS active ON active.manifest_id=pages.id
+        LEFT JOIN market.fact_archive_verifications AS proof
+          ON proof.manifest_id=pages.id AND proof.verifier_version=:version
+        LEFT JOIN market.fact_archive_verification_generations AS binding
+          ON binding.manifest_id=pages.id AND binding.verifier_version=:version
+        WHERE pages.storage_day=:day AND pages.page_ordinal BETWEEN :first AND :last
+        ORDER BY pages.page_ordinal LIMIT :limit
+    """), {"day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION, "first": expected[0].page_ordinal,
+            "last": expected[-1].page_ordinal, "limit": len(expected)}).mappings().all()
+    changed = f"canonical_archive_selected_batch_changed: storage_day={day}"
+    if tuple(_page_pin(row) for row in rows) != expected:
+        raise RuntimeError(changed)
+    completed = 0
+    for index, row in enumerate(rows):
+        if row["has_receipt"]:
+            if completed != index or not row["receipt_current"]:
+                raise RuntimeError(changed)
+            completed += 1
+    pending = expected[completed:]
+    if pending:
+        _unverified_page(session, day, pending[0])
+    return pending
+
 
 _ARCHIVE_SOURCE_ENVELOPES_QUERY = text(f"""
     SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
@@ -709,21 +812,21 @@ class PostgresCanonicalFactArchiveRepository:
                 raise RuntimeError(f"canonical_archive_partition_unknown: storage_day={day}")
             return dict(row)
 
-    def _set_seal_timeout(self, session, timeout_ms, remaining_run_seconds):
+    def _set_archive_timeout(self, session, timeout_ms, remaining_run_seconds, *, phase):
         self._check_budget()
         if remaining_run_seconds is not None:
             remaining = remaining_run_seconds()
             if (type(remaining) not in {int, float} or not isfinite(remaining)
                     or int(remaining * 1000) <= 0):
-                raise RuntimeError("canonical_archive_seal_run_budget_exceeded")
+                raise RuntimeError(f"canonical_archive_{phase}_run_budget_exceeded")
             timeout_ms = min(timeout_ms, int(remaining * 1000))
         session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
                         {"timeout": str(timeout_ms)})
         return timeout_ms
 
-    def _seal_source_count(self, session, day, *, relation, timeout_ms,
-                           remaining_run_seconds):
-        # Relation names are fixed by seal_partition, never supplied by a caller.
+    def _source_count(self, session, day, *, relation, timeout_ms,
+                      remaining_run_seconds, phase):
+        # Relation names are fixed by the archive methods.
         query = text(f"SELECT count(*) FROM market.{relation} WHERE storage_day=:day")
         if timeout_ms is None:
             return session.execute(query, {"day": day}).scalar_one()
@@ -735,21 +838,21 @@ class PostgresCanonicalFactArchiveRepository:
             # before releasing the savepoint or running any other statement.
             with session.begin_nested():
                 previous = session.execute(text("SHOW statement_timeout")).scalar_one()
-                effective_timeout = self._set_seal_timeout(
-                    session, timeout_ms, remaining_run_seconds,
+                effective_timeout = self._set_archive_timeout(
+                    session, timeout_ms, remaining_run_seconds, phase=phase,
                 )
                 count = session.execute(query, {"day": day}).scalar_one()
                 self._check_budget()
                 session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
                                 {"timeout": previous})
-            logger.info("canonical_archive_seal_count | storage_day=%s source=%s "
+            logger.info("canonical_archive_%s_count | storage_day=%s source=%s "
                         "outcome=completed rows=%s timeout_ms=%s seconds=%.6f",
-                        day, relation, count, effective_timeout, perf_counter() - started)
+                        phase, day, relation, count, effective_timeout, perf_counter() - started)
             return count
         except BaseException:
-            logger.info("canonical_archive_seal_count | storage_day=%s source=%s "
+            logger.info("canonical_archive_%s_count | storage_day=%s source=%s "
                         "outcome=failed timeout_ms=%s seconds=%.6f",
-                        day, relation, effective_timeout, perf_counter() - started)
+                        phase, day, relation, effective_timeout, perf_counter() - started)
             raise
 
     def seal_partition(self, day: date, *, count_statement_timeout_ms: int | None = None,
@@ -774,22 +877,22 @@ class PostgresCanonicalFactArchiveRepository:
             """), {"relation": relation}).scalar_one()
             if not attached:
                 raise RuntimeError(f"canonical_archive_partition_not_attached: storage_day={day}")
-            count = self._seal_source_count(
+            count = self._source_count(
                 session, day, relation="fact_versions", timeout_ms=count_statement_timeout_ms,
-                remaining_run_seconds=remaining_run_seconds,
+                remaining_run_seconds=remaining_run_seconds, phase="seal",
             )
-            hot_count = self._seal_source_count(
+            hot_count = self._source_count(
                 session, day, relation="fact_hot_payloads", timeout_ms=count_statement_timeout_ms,
-                remaining_run_seconds=remaining_run_seconds,
+                remaining_run_seconds=remaining_run_seconds, phase="seal",
             )
             if count != hot_count:
                 raise RuntimeError(f"canonical_archive_source_incomplete: storage_day={day} expected={count} hot={hot_count}")
             if self.statement_timeout_ms is not None:
-                self._set_seal_timeout(session, self.statement_timeout_ms, remaining_run_seconds)
+                self._set_archive_timeout(session, self.statement_timeout_ms, remaining_run_seconds, phase="seal")
             source_bytes = session.execute(text("SELECT pg_total_relation_size(to_regclass(:relation))"),
                                            {"relation": relation}).scalar_one()
             if self.statement_timeout_ms is not None:
-                self._set_seal_timeout(session, self.statement_timeout_ms, remaining_run_seconds)
+                self._set_archive_timeout(session, self.statement_timeout_ms, remaining_run_seconds, phase="seal")
             result = session.execute(text("""
                 UPDATE market.fact_retention_partitions
                 SET state='sealed', sealed_at=clock_timestamp(), expected_rows=:count, source_bytes=:bytes
@@ -1553,7 +1656,7 @@ class PostgresCanonicalFactArchiveRepository:
         return {"storage_day": day, "status": "partition_verification_restarted",
                 "prior_manifest_set_hash": partition["manifest_set_hash"], "verifier_version": FACT_ARCHIVE_VERIFIER_VERSION}
 
-    def verify_next_page(self, day: date) -> dict:
+    def verify_next_page(self, day: date, *, selected_page: SelectedVerificationPage | None = None) -> dict:
         """Deep-check one unverified page; commit its receipt only after all checks.
 
         The codec validates every full-row hash. Comparing every permanent
@@ -1568,9 +1671,7 @@ class PostgresCanonicalFactArchiveRepository:
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
-            page = session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
-                "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION,
-            }).mappings().one_or_none()
+            page = _unverified_page(session, day, selected_page)
             if page is None:
                 return {"storage_day": day, "status": "no_unverified_pages"}
             manifest = _catalog_manifest(page)
@@ -1742,6 +1843,8 @@ class PostgresCanonicalFactArchiveRepository:
                     page=plan["page"], operation=lambda: self._generation.supersede_verified(
                         day=day, preparation=ready,
                         verification_receipt=plan["receipt"],
+                        **({"verify_selected_page": lambda session: _unverified_page(session, day, selected_page)}
+                           if selected_page is not None else {}),
                     ),
                 )
             except BaseException:
@@ -1774,7 +1877,9 @@ class PostgresCanonicalFactArchiveRepository:
             if expired is not None:
                 raise RuntimeError(f"canonical_archive_dependency_expired: target_id={expired}")
 
-    def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None, handoff=None):
+    def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None,
+                            handoff=None, retired=None, count_statement_timeout_ms=None,
+                            remaining_count_seconds=None):
         """Check bounded catalogs/receipts and exact sealed-source coverage.
 
         Supplying a byte verifier additionally checks every current cold object.
@@ -1894,9 +1999,11 @@ class PostgresCanonicalFactArchiveRepository:
                 raise RuntimeError("canonical_handoff_page_scope_changed")
         if check_budget is not None:
             check_budget()
-        count = session.execute(text(
-            "SELECT count(*) FROM market.fact_versions WHERE storage_day=:day"
-        ), {"day": day}).scalar_one()
+        count = retired["row_count"] if retired is not None else self._source_count(
+            session, day, relation="fact_versions", timeout_ms=count_statement_timeout_ms,
+            remaining_run_seconds=remaining_count_seconds,
+            phase="handoff" if final_handoff else "partition_evidence",
+        )
         # Each verified interval equals its complete header range. Nonoverlap
         # plus equal total cardinality proves no headers were skipped between
         # pages, before the first, or after the last page.
@@ -1909,20 +2016,61 @@ class PostgresCanonicalFactArchiveRepository:
                 "manifest_set_hash": _partition_manifest_set_hash(day, count, proofs),
                 "source_placement_hash": archive_evidence_hash({"pages": source_placements})}
 
-    def verify_partition(self, day: date, *, limits: ArchiveVerificationLimits = ArchiveVerificationLimits()) -> dict:
+    def verify_partition(self, day: date, *, limits: ArchiveVerificationLimits = ArchiveVerificationLimits(),
+                         count_statement_timeout_ms=None, remaining_run_seconds=None,
+                         expected_page_count: int | None = None) -> dict:
         """Admit complete, currently readable cold coverage; retain all hot data.
 
         Expensive per-page decoding resumes via immutable receipts. This final
         bounded pass still rehashes current files; stale receipts cannot hide
         missing/corrupted bytes. Reclamation must repeat this fresh-byte gate.
         """
+        if (count_statement_timeout_ms is not None
+                and (type(count_statement_timeout_ms) is not int
+                     or not 1 <= count_statement_timeout_ms <= 60_000)):
+            raise ValueError("canonical_archive_verify_count_timeout_invalid")
+        if remaining_run_seconds is not None and not callable(remaining_run_seconds):
+            raise ValueError("canonical_archive_verify_remaining_budget_invalid")
+        if expected_page_count is not None and (
+            type(expected_page_count) is not int or not 0 <= expected_page_count <= limits.max_pages
+        ):
+            raise ValueError("canonical_archive_verify_page_scope_invalid")
         with self.database.session() as session:
             partition = self._lock(session, day)
             if partition["state"] not in {"sealed", "verified"}:
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
+            if expected_page_count is not None:
+                observed = session.execute(text("""
+                    WITH selected AS MATERIALIZED (
+                        SELECT id,manifest_hash FROM market.fact_archive_manifests
+                        WHERE storage_day=:day LIMIT :limit
+                    )
+                    SELECT count(*), count(*) FILTER (
+                        WHERE verification.manifest_hash=selected.manifest_hash
+                          AND ((active.manifest_id IS NULL AND binding.manifest_id IS NULL)
+                            OR (active.manifest_id IS NOT NULL AND
+                                (active.preparation_id,active.catalog_commitment) =
+                                (binding.preparation_id,binding.catalog_commitment)))
+                    )
+                    FROM selected
+                    LEFT JOIN market.fact_archive_verifications verification
+                      ON verification.manifest_id=selected.id AND verification.verifier_version=:version
+                    LEFT JOIN market.fact_archive_active_generations active ON active.manifest_id=selected.id
+                    LEFT JOIN market.fact_archive_verification_generations binding
+                      ON binding.manifest_id=selected.id AND binding.verifier_version=:version
+                """), {"day": day, "limit": expected_page_count + 1,
+                         "version": FACT_ARCHIVE_VERIFIER_VERSION}).one()
+                if partition["state"] != "sealed" or tuple(observed) != (expected_page_count, expected_page_count):
+                    raise RuntimeError(f"canonical_archive_verify_page_scope_changed: storage_day={day}")
             objects = ArchiveVerificationBatch(self.object_store, limits=limits, check_budget=self.check_budget)
             with objects.distinct_references():
-                evidence = self._partition_evidence(session, partition, limits=limits, objects=objects)
+                evidence = self._partition_evidence(
+                    session, partition, limits=limits, objects=objects,
+                    count_statement_timeout_ms=count_statement_timeout_ms,
+                    remaining_count_seconds=remaining_run_seconds,
+                )
+            if expected_page_count is not None and evidence["page_count"] != expected_page_count:
+                raise RuntimeError(f"canonical_archive_verify_page_scope_changed: storage_day={day}")
             if partition["state"] == "verified":
                 if partition["manifest_set_hash"] != evidence["manifest_set_hash"]:
                     raise RuntimeError(f"canonical_archive_partition_verification_changed: storage_day={day}")

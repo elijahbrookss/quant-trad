@@ -18,6 +18,7 @@ from core.storage_mounts import configured_archive_root
 from core.execution_control import execution_checkpoint, consume_execution_json, consume_execution_resource, measured_execution
 from market_data.archive import FilesystemRawArchiveObjectStore, RawArchiveObjectStore
 from market_data.canonical_storage import verify_archived_envelope
+from market_data.cold_history import ColdHistoryReader
 from market_data.fact_archive import CanonicalArchiveReadPage, FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
 from .fact_archive_generation import material_alias_projection
 
@@ -145,6 +146,16 @@ class PostgresCanonicalFactStorageRepository:
         self.limits = limits
         self.read_cache_factory = read_cache_factory
 
+    def cold_history(self, session):
+        from .cold_history import PostgresColdHistory
+        from portal.backend.service.storage.history_policy import configured_history_read_cache
+
+        cache_factory = self.read_cache_factory or configured_history_read_cache
+        return PostgresColdHistory(ColdHistoryReader(
+            self.object_store_factory(), limits=self.limits, cache=cache_factory(),
+            ensure_contracts=lambda contracts: ensure_payload_contracts(session, contracts),
+        ))
+
     @contextmanager
     def stream_rows_by_ids(self, session, statement, params=None, *, batch_size=128):
         """Hydrate an ordered SQL identity stream without retaining all payloads.
@@ -266,6 +277,21 @@ class PostgresCanonicalFactStorageRepository:
             if not matches(row):
                 raise RuntimeError(f"canonical_material_alias_mismatch: fact_version_id={selected} material_hash={material_hash}")
             return True
+        from .cold_history import cold_layout_active
+
+        if cold_layout_active(session):
+            repository = self.cold_history(session)
+            candidates = repository.material_candidates(
+                session, series_ids=ids, material_hashes=[material_hash],
+                evidence_key=evidence_key, include_canonical=include_canonical,
+            )
+            fact_ids = sorted({fact_id for fact_id, _ in candidates})
+            for offset in range(0, len(fact_ids), 128):
+                for fact_id, row in repository.read_by_ids(session, fact_ids[offset:offset + 128]).items():
+                    if not matches(row):
+                        raise RuntimeError(f"cold_fact_material_locator_mismatch: fact_version_id={fact_id}")
+                    return True
+            return False
         # Old source admission accepted any object-valued legacy witness, not
         # only the standard per-family key indexed by archive admission. Keep
         # that meaning without a new ingestion policy or an unbounded list.
@@ -337,14 +363,18 @@ class PostgresCanonicalFactStorageRepository:
                 verify_archived_envelope(header, expected_rows[header["id"]])
 
     def _read_rows_by_ids(self, session, fact_ids, decoded_page):
+        from .cold_history import cold_layout_active
+
         identities = sorted(set(fact_ids))
         result = {}
+        cold = None
         for offset in range(0, len(identities), 1000):
             batch = identities[offset:offset + 1000]
             locations = session.execute(text(
                 "SELECT id,storage_day FROM market.fact_identities WHERE id = ANY(:fact_ids)"
             ), {"fact_ids": batch}).mappings().all()
-            if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+            registered_hot = {row["id"] for row in locations}
+            if len(registered_hot) != len(locations) or not registered_hot.issubset(batch):
                 raise RuntimeError("canonical_selected_identity_coverage_invalid")
             # Resolve dates before issuing the header query. An ARRAY subquery
             # became an InitPlan on PG15 and did not prune unrelated partitions.
@@ -352,11 +382,18 @@ class PostgresCanonicalFactStorageRepository:
                 SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
                 WHERE versions.id = ANY(:fact_ids)
                   AND versions.storage_day = ANY(:storage_days)
-            """), {"fact_ids": batch,
-                   "storage_days": sorted({row["storage_day"] for row in locations})}).mappings().all()
+            """), {"fact_ids": sorted(registered_hot),
+                   "storage_days": sorted({row["storage_day"] for row in locations})}).mappings().all() if locations else []
             found = {row["id"] for row in rows}
-            if found != set(batch) or len(rows) != len(found):
+            if not found.issubset(registered_hot) or len(rows) != len(found):
                 raise RuntimeError("canonical_selected_identity_coverage_invalid")
+            missing = set(batch) - found
+            if missing:
+                if cold is None:
+                    if not cold_layout_active(session):
+                        raise RuntimeError("canonical_selected_identity_coverage_invalid")
+                    cold = self.cold_history(session)
+                result.update(cold.read_by_ids(session, sorted(missing)))
             result.update((row["id"], row) for row in self.hydrate_rows(session, rows, _decoded_page=decoded_page))
         return result
 

@@ -11,8 +11,9 @@ from market_data.range_evidence import producer_range_evidence, is_complete_rang
 from market_data.gaps import recorded_gaps_cover_interval
 from market_data.fact_registry import get_fact_contract
 from portal.backend.service.storage.repos.book_range_evidence import (
-    project_book_range_evidence,
+    project_book_range_evidence, read_book_range_evidence,
 )
+from portal.backend.service.storage.repos import book_range_evidence
 from portal.backend.service.research.planning import _coverage_for_requirement
 from portal.backend.service.research.execution import _quality
 
@@ -108,6 +109,30 @@ def test_quiet_proof_fails_for_unproven_transport(failure):
 
 def test_missing_processing_or_archive_witness_remains_unexplained():
     assert project(Witnesses(quiet=False)) == []
+
+
+def test_cold_candidate_budget_is_checked_before_reading_any_fact_payload(monkeypatch):
+    monkeypatch.setattr(book_range_evidence, "cold_layout_active", lambda session: True)
+    monkeypatch.setattr(book_range_evidence, "MAX_RECORDS", 3)
+    monkeypatch.setattr(book_range_evidence, "MAX_BYTES", 100)
+
+    class Session:
+        def execute(self, query, params):
+            assert params["watermark"] == 77
+            if "market.fact_versions" in str(query):
+                return SimpleNamespace(scalar_one=lambda: 1)
+            assert "market.cold_fact_page_series" in str(query)
+            budget = {"pages": 1, "rows": 3, "bytes": 7}
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(one=lambda: budget))
+
+    repository = SimpleNamespace(
+        _read_canonical_rows_with_session=lambda *_args, **_params: pytest.fail("payload was read"),
+    )
+    with pytest.raises(ValueError, match="book_range_evidence_budget_exceeded"):
+        read_book_range_evidence(
+            Session(), repository=repository, series_id=20, start=BASE,
+            end=BASE + timedelta(seconds=3), watermark=77, known_at_lte=None, object_store=None,
+        )
 
 
 def test_partial_second_disconnect_is_not_quiet_even_with_adjacent_populated_buckets():

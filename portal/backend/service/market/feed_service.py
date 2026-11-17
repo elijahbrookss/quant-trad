@@ -156,6 +156,7 @@ class HistoricalCandleIngestor:
         end: Any,
         interval: str,
         source_revision: Optional[str] = None,
+        fill_missing_only: bool = False,
     ) -> HistoricalIngestionResult:
         instrument_id = str(instrument.get("id") or instrument.get("instrument_id") or "").strip()
         provider_name = str(instrument.get("datasource") or "").strip()
@@ -165,6 +166,8 @@ class HistoricalCandleIngestor:
             raise ValueError(
                 "market_data_acquisition_invalid: instrument id, datasource, and symbol are required"
             )
+        if type(fill_missing_only) is not bool or (fill_missing_only and provider_name.lower() != "coinbase"):
+            raise ValueError("market_data_acquisition_invalid: gap-only acquisition requires native Coinbase")
         start_at = _as_utc(start, field="start")
         end_at = _as_utc(end, field="end")
         if end_at <= start_at:
@@ -286,6 +289,9 @@ class HistoricalCandleIngestor:
                 if source_published_at is not None
                 else "interval_close_inferred"
             )
+            if fill_missing_only:
+                known_at = accepted_at
+                known_at_method = "platform_acceptance"
             facts.append(
                 CandleFact(
                     open_time=open_time,
@@ -320,8 +326,10 @@ class HistoricalCandleIngestor:
                 "interval": interval,
                 "start": start_at.isoformat(),
                 "end": end_at.isoformat(),
+                **({"fill_missing_only": True} if fill_missing_only else {}),
             },
             source_revision=source_revision or source_identity.adapter_version,
+            **({"fill_missing_only": True} if fill_missing_only else {}),
         )
         gaps = self._record_gaps(
             series_id=series_id,

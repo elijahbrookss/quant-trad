@@ -112,7 +112,7 @@ def test_step_budget_and_next_phase_are_driven_by_replanned_progress(tmp_path, m
     assert seen[-1] == "verify_page" and calls[-1]["after_storage_day"] == DAY - timedelta(days=1)
 
 
-@pytest.mark.parametrize("action", ["stage_page", "reclaim_partition"])
+@pytest.mark.parametrize("action", ["stage_page", "verify_partition", "reclaim_partition"])
 def test_selected_action_executes_exactly_one_fresh_matching_plan_item(tmp_path, monkeypatch, action):
     executor, calls = _executor([_plan([_item(action), _item(day=DAY + timedelta(days=1))])])
     seen = []
@@ -155,6 +155,40 @@ def test_selected_action_refuses_changed_or_ineligible_selection_before_mutation
             policy=CanonicalFactRetentionPolicy(execution_enabled=True),
             storage_root=tmp_path, storage_day=DAY, expected_action=expected, execute=True,
         )
+
+
+def test_selected_verification_uses_one_exact_page_scope_without_updating_policy(tmp_path, monkeypatch):
+    verify = {**_item("verify_partition"), "page_count": 1043}
+    executor, _ = _executor([_plan([verify])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    observed = []
+
+    class Archive(SimpleNamespace):
+        def verify_partition(self, day, **kwargs):
+            observed.append((day, kwargs["limits"], kwargs["expected_page_count"]))
+            return {"status": "partition_verified"}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", lambda **kwargs: Archive(**kwargs))
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_verification_objects=32_768)
+    scope = dict(policy=policy, storage_root=tmp_path, storage_day=DAY, expected_action="verify_partition")
+    assert executor.run_selected(**scope, verification_pages=1043)["expected_verification_pages"] == 1043
+    assert not observed
+    result = executor.run_selected(**scope, verification_pages=1043, execute=True)
+    assert result["status"] == "completed" and result["expected_verification_pages"] == 1043
+    assert observed == [(DAY, module.ArchiveVerificationLimits(
+        max_pages=1043, max_objects=32_768, max_bytes=policy.max_verification_bytes,
+    ), 1043)]
+    assert policy.max_verification_pages == 1000
+    with pytest.raises(RuntimeError, match="selected_page_scope_changed"):
+        executor.run_selected(**scope, verification_pages=1044, execute=True)
+    with pytest.raises(ValueError, match="selected_request_invalid"):
+        executor.run_selected(**(scope | {"expected_action": "reclaim_partition"}), verification_pages=1043, execute=True)
+    executor.repository.plan = lambda **_: _plan([{**verify, "page_count": 2}])
+    executor.run_selected(**scope, execute=True)
+    assert observed[-1] == (DAY, module.ArchiveVerificationLimits(
+        max_pages=1000, max_objects=32_768, max_bytes=policy.max_verification_bytes,
+    ), 2)
 
 
 def test_selected_action_never_uses_retry_schedule_or_runs_a_second_step(tmp_path, monkeypatch):
@@ -1311,6 +1345,7 @@ def test_final_handoff_policy_reaches_reclaimer_without_expanding_statement_boun
     assert seen[0]["limits"].max_handoff_seconds == seconds
     assert seen[0]["limits"].statement_timeout_ms == 1000
     assert seen[0]["limits"].pinned_ranges_statement_timeout_ms == 4321
+    assert seen[0]["limits"].count_statement_timeout_ms == 60_000
 
 
 @pytest.mark.parametrize("execution,pinned,remaining,expected", [

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime
+from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
 
 from sqlalchemy import text
 
+from core.execution_control import execution_checkpoint
 from market_data.collector_operations import (
     CollectorAction,
     CollectorDesiredState,
@@ -17,7 +19,14 @@ from market_data.collector_operations import (
 )
 
 from ....db import db
+from .cold_history import _manifest, cold_layout_active, cold_page_is_visible
 from .fact_storage import canonical_fact_storage_repository
+from .market_lifecycle import market_storage_lifecycle_repository
+
+
+_COLD_COLLECTOR_MAX_PAGES = 32
+_COLD_COLLECTOR_MAX_BYTES = 64 * 1024**2
+_COLD_COLLECTOR_MAX_ROWS = 250_000
 
 
 RECENT_FACTS_SQL = """
@@ -138,6 +147,163 @@ WHERE EXISTS (
     SELECT 1 FROM market.fact_versions WHERE series_id = wanted.series_id
 )
 """
+
+
+def _collector_pages(session, *, series_ids, accepted_at=None):
+    rows = session.execute(text(f"""
+        SELECT page.*, max(bounds.last_active_accepted_at) AS last_accepted_at
+        FROM market.cold_fact_page_series AS bounds
+        JOIN market.cold_fact_pages AS page ON page.id=bounds.page_id
+        WHERE bounds.series_id=ANY(:series_ids) AND bounds.last_active_accepted_at IS NOT NULL
+          AND {cold_page_is_visible("page")}
+          AND (CAST(:accepted_at AS timestamptz) IS NULL OR bounds.last_active_accepted_at>=:accepted_at)
+        GROUP BY page.id
+        ORDER BY last_accepted_at DESC, page.id
+        LIMIT :limit
+    """), {"series_ids": series_ids, "accepted_at": accepted_at,
+           "limit": _COLD_COLLECTOR_MAX_PAGES + 1}).mappings()
+    for row in rows:
+        execution_checkpoint()
+        yield row["last_accepted_at"], _manifest(row)
+
+
+class _CollectorReadBudget:
+    def __init__(self):
+        self.pages = self.bytes = self.rows = 0
+
+    def admit(self, manifest):
+        self.pages += 1
+        self.bytes += manifest.byte_count
+        self.rows += manifest.row_count
+        if (self.pages > _COLD_COLLECTOR_MAX_PAGES or self.bytes > _COLD_COLLECTOR_MAX_BYTES
+                or self.rows > _COLD_COLLECTOR_MAX_ROWS):
+            raise RuntimeError("collector_cold_fact_budget_exceeded: narrow the selected collector scope")
+
+
+def _hot_fact_ids(session, identities):
+    found = set()
+    for offset in range(0, len(identities), 1000):
+        found.update(session.execute(text("""
+            SELECT identity.id FROM market.fact_identities AS identity
+            WHERE identity.id=ANY(:ids) AND NOT EXISTS (
+                SELECT FROM market.cold_fact_retired_days AS retired
+                WHERE retired.storage_day=identity.storage_day
+            )
+        """), {"ids": identities[offset:offset + 1000]}).scalars())
+    return found
+
+
+def _merge_cold_telemetry(session, hot, series_ids):
+    bounds = session.execute(text(f"""
+        SELECT bounds.series_id, max(bounds.last_active_observation_at) AS last_observation_time,
+               max(bounds.last_active_accepted_at) AS last_accepted_at
+        FROM market.cold_fact_page_series AS bounds
+        JOIN market.cold_fact_pages AS page ON page.id=bounds.page_id
+        WHERE bounds.series_id=ANY(:series_ids) AND {cold_page_is_visible("page")}
+        GROUP BY bounds.series_id
+    """), {"series_ids": series_ids}).mappings()
+    telemetry = {row["series_id"]: dict(row) for row in hot}
+    for row in bounds:
+        state = telemetry.setdefault(row["series_id"], {
+            "series_id": row["series_id"], "last_observation_time": None,
+            "last_accepted_at": None, "accepted_last_minute": 0,
+            "accepted_last_five_minutes": 0,
+        })
+        for name in ("last_observation_time", "last_accepted_at"):
+            state[name] = max((value for value in (state[name], row[name]) if value is not None), default=None)
+    now = session.execute(text("SELECT transaction_timestamp()")).scalar_one()
+    since_minute = now - timedelta(minutes=1)
+    since_five = now - timedelta(minutes=5)
+    cold = canonical_fact_storage_repository.cold_history(session)
+    budget = _CollectorReadBudget()
+    for _, manifest in _collector_pages(session, series_ids=series_ids, accepted_at=since_five):
+        budget.admit(manifest)
+        page = cold.reader.read_page(manifest)
+        candidates = [row for row in page if row["series_id"] in telemetry
+                      and row["state"] == "active" and row["accepted_at"] >= since_five]
+        hot_ids = _hot_fact_ids(session, [row["id"] for row in candidates])
+        for row in candidates:
+            if row["id"] not in hot_ids:
+                state = telemetry[row["series_id"]]
+                state["accepted_last_five_minutes"] += 1
+                if row["accepted_at"] >= since_minute:
+                    state["accepted_last_minute"] += 1
+    return telemetry.values()
+
+
+_RECENT_PROVIDER_FIELDS = {
+    "provider": "source_provider", "venue": "source_venue",
+    "source_kind": "source_kind", "adapter_version": "source_adapter_version",
+}
+
+
+def _cold_recent_row(row, instrument_id):
+    return {name: row[name] for name in (
+        "id", "series_id", "observation_key", "revision", "market_commit_seq", "source_id",
+        "ingestion_run_id", "fact_type", "payload_schema_id", "observation_time",
+        "source_published_at", "received_at", "accepted_at", "known_at", "transformation_id",
+        "external_event_key", "external_event_group_key", "state", "provenance_schema_id",
+        "quality_schema_id", "payload", "provenance", "quality",
+    )} | {name: row[field] for name, field in _RECENT_PROVIDER_FIELDS.items()} | {"instrument_id": instrument_id}
+
+
+def _hot_keys(session, series_id, keys):
+    result = set()
+    keys = sorted(keys)
+    for offset in range(0, len(keys), 1000):
+        result.update(session.execute(text("""
+            SELECT DISTINCT identity.observation_key
+            FROM market.fact_identities AS identity
+            WHERE identity.series_id=:series_id AND identity.observation_key=ANY(:keys)
+              AND NOT EXISTS (
+                  SELECT FROM market.cold_fact_retired_days AS retired
+                  WHERE retired.storage_day=identity.storage_day
+              )
+        """), {"series_id": series_id, "keys": keys[offset:offset + 1000]}).scalars())
+    return result
+
+
+def _merge_cold_recent(session, hot_rows, series_ids, limit):
+    cold = canonical_fact_storage_repository.cold_history(session)
+    series = dict(session.execute(text("""
+        SELECT id, instrument_id FROM market.series WHERE id=ANY(:series_ids)
+    """), {"series_ids": series_ids}).all())
+    top = {row["id"]: row for row in hot_rows}
+    threshold = min((row["accepted_at"] for row in hot_rows), default=None) if len(top) >= limit else None
+    budget = _CollectorReadBudget()
+    for last_accepted, manifest in _collector_pages(session, series_ids=series_ids, accepted_at=threshold):
+        if threshold is not None and last_accepted < threshold:
+            break
+        budget.admit(manifest)
+        page = cold.reader.read_page(manifest)
+        keys = defaultdict(set)
+        candidates = []
+        for row in page:
+            if (row["series_id"] in series and row["state"] == "active"
+                    and (threshold is None or row["accepted_at"] >= threshold)):
+                candidates.append(row)
+                keys[row["series_id"]].add(row["observation_key"])
+        for series_id, page_keys in keys.items():
+            # Newer archive revisions only exist before a hot head or entirely
+            # on cold storage. Any authoritative hot head resolves the key.
+            keys[series_id] -= _hot_keys(session, series_id, page_keys)
+        for series_id, page_keys in keys.items():
+            if not page_keys:
+                continue
+            latest = cold.latest_for_keys(session, series_id=series_id, keys=sorted(page_keys),
+                                          page_admission=budget.admit)
+            if latest.keys() != page_keys:
+                raise RuntimeError("collector_cold_fact_locator_coverage_invalid")
+            for row in candidates:
+                if row["series_id"] != series_id or row["observation_key"] not in latest:
+                    continue
+                if row["id"] == latest[row["observation_key"]]["id"]:
+                    top[row["id"]] = _cold_recent_row(row, series[series_id])
+        best = sorted(top.values(), key=lambda row: (row["accepted_at"], row["market_commit_seq"]), reverse=True)[:limit]
+        top = {row["id"]: row for row in best}
+        if len(best) >= limit:
+            threshold = best[-1]["accepted_at"]
+    return sorted(top.values(), key=lambda row: (row["accepted_at"], row["market_commit_seq"]), reverse=True)[:limit]
 
 
 class PostgresCollectorOperationsRepository:
@@ -417,11 +583,13 @@ class PostgresCollectorOperationsRepository:
         normalized_ids = sorted({int(value) for value in series_ids})
         if not normalized_ids:
             return {}
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             rows = session.execute(
                 text(FACT_SERIES_TELEMETRY_SQL),
                 {"series_ids": normalized_ids},
             ).mappings().all()
+            if cold_layout_active(session):
+                rows = list(_merge_cold_telemetry(session, rows, normalized_ids))
         return {int(row["series_id"]): _public_row(row) for row in rows}
 
     def continuous_stream_telemetry(
@@ -477,7 +645,7 @@ class PostgresCollectorOperationsRepository:
         if not normalized_ids:
             return []
         bounded_limit = max(1, min(int(limit), 500))
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             rows = session.execute(
                 text(RECENT_FACTS_SQL),
                 {"series_ids": normalized_ids, "limit": bounded_limit},
@@ -485,6 +653,8 @@ class PostgresCollectorOperationsRepository:
             payloads = canonical_fact_storage_repository.read_rows_by_ids(session, [row["id"] for row in rows])
             rows = [{**row, **{name: payloads[row["id"]][name] for name in ("payload", "provenance", "quality")}}
                     for row in rows]
+            if cold_layout_active(session):
+                rows = _merge_cold_recent(session, rows, normalized_ids, bounded_limit)
         return [_public_row(row) for row in rows]
 
     def list_gap_evidence(

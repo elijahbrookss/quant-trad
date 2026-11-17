@@ -1,7 +1,7 @@
 """Default-disabled, one-partition physical reclamation after cold admission.
 
-The lifecycle executor supplies explicit policy/step bounds. This owner never
-deletes canonical headers, archive bytes, dataset bindings, or dependency pins.
+The lifecycle executor supplies explicit policy and step bounds. Under cold
+authority the handoff publishes cold history and retires both hot relations.
 """
 from __future__ import annotations
 
@@ -15,7 +15,15 @@ from sqlalchemy import text
 
 from core.storage_mounts import require_configured_archive_mount
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+from portal.backend.db.cold_history_models import assert_cold_history_immutability, guard_cold_runtime_placement
+from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from portal.backend.db.fact_storage_schema import fact_partition_name
+from ..cold_stage_pressure import ColdStagePressure
+from .cold_history import cold_layout_active
+from .cold_retirement import (
+    drop_verified_header, lock_header_namespace, require_oldest_header_day,
+    stage_retirement_pages, verify_cold_day_locators, verify_staged_locator_counts,
+)
 from .fact_dependencies import SELF_CONTAINED_FACT_TYPES
 from .fact_handoff import FactHandoffProof
 from .market_lifecycle import _LIFECYCLE_LOCK_NAME, MarketStorageLifecycleBusyError
@@ -103,6 +111,7 @@ class FactReclamationLimits:
     statement_timeout_ms: int = 1000
     pinned_ranges_statement_timeout_ms: int = 1000
     max_handoff_seconds: int = 10
+    count_statement_timeout_ms: int | None = None
 
     def __post_init__(self):
         for field in ("statement_timeout_ms", "pinned_ranges_statement_timeout_ms",
@@ -114,12 +123,16 @@ class FactReclamationLimits:
                 raise ValueError(f"canonical_reclaim_limit_invalid: field={field}")
         if self.max_handoff_seconds > 60:
             raise ValueError("canonical_reclaim_limit_invalid: field=max_handoff_seconds")
+        if (self.count_statement_timeout_ms is not None
+                and (type(self.count_statement_timeout_ms) is not int
+                     or not 1 <= self.count_statement_timeout_ms <= 60_000)):
+            raise ValueError("canonical_reclaim_limit_invalid: field=count_statement_timeout_ms")
 
 
 class PostgresCanonicalFactReclamationRepository:
     def __init__(self, *, archive_repository, enabled: bool = False,
                  limits: FactReclamationLimits = FactReclamationLimits(),
-                 remaining_run_seconds=None):
+                 remaining_run_seconds=None, cold_stage_admission=None):
         if type(enabled) is not bool:
             raise ValueError("canonical_reclaim_enabled_must_be_boolean")
         if remaining_run_seconds is not None and not callable(remaining_run_seconds):
@@ -128,6 +141,7 @@ class PostgresCanonicalFactReclamationRepository:
         self.enabled = enabled
         self.limits = limits
         self.remaining_run_seconds = remaining_run_seconds
+        self.cold_stage_admission = cold_stage_admission
 
     def _timeouts(self, session):
         session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
@@ -223,7 +237,8 @@ class PostgresCanonicalFactReclamationRepository:
         return count, timeout
 
     def reclaim_partition(self, day: date, *, eligible_before: date, execute: bool = False,
-                          verification_limits: ArchiveVerificationLimits = ArchiveVerificationLimits()):
+                          verification_limits: ArchiveVerificationLimits = ArchiveVerificationLimits(),
+                          expected_page_count: int | None = None, expected_manifest_set_hash: str | None = None):
         """Recheck cold evidence; optionally DROP exactly one daily hot relation.
 
         Both instance enablement and explicit execution are required. Dry-run
@@ -234,20 +249,54 @@ class PostgresCanonicalFactReclamationRepository:
         """
         if type(day) is not date or type(eligible_before) is not date or type(execute) is not bool:
             raise ValueError("canonical_reclaim_request_invalid")
+        if ((expected_page_count is None) != (expected_manifest_set_hash is None)
+                or (expected_page_count is not None and (
+                    type(expected_page_count) is not int or not 1 <= expected_page_count <= verification_limits.max_pages
+                    or not isinstance(expected_manifest_set_hash, str) or len(expected_manifest_set_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in expected_manifest_set_hash)
+                ))):
+            raise ValueError("canonical_reclaim_selected_scope_invalid")
         if execute and not self.enabled:
             raise RuntimeError("canonical_reclaim_disabled: explicitly enable only after validated rollout")
         try:
             return self._reclaim_partition(day, eligible_before=eligible_before, execute=execute,
-                                           verification_limits=verification_limits)
+                                           verification_limits=verification_limits,
+                                           expected_page_count=expected_page_count,
+                                           expected_manifest_set_hash=expected_manifest_set_hash)
+        except ColdStagePressure:
+            raise
         except Exception:
             logger.exception("canonical_hot_partition_reclaim_failed | storage_day=%s execute=%s", day, execute)
             raise
 
-    def _reclaim_partition(self, day, *, eligible_before, execute, verification_limits):
+    @staticmethod
+    def _check_selected_scope(session, partition, expected_page_count, expected_manifest_set_hash):
+        if expected_page_count is None:
+            return
+        day = partition["storage_day"]
+        if partition["state"] != "verified" or partition["manifest_set_hash"] != expected_manifest_set_hash:
+            raise RuntimeError(f"canonical_reclaim_selected_manifest_set_changed: storage_day={day}")
+        count = session.scalar(text("""
+            SELECT count(*) FROM (
+                SELECT 1 FROM market.fact_archive_manifests WHERE storage_day=:day LIMIT :limit
+            ) selected
+        """), {"day": day, "limit": expected_page_count + 1})
+        if count != expected_page_count:
+            raise RuntimeError(f"canonical_reclaim_selected_page_scope_changed: storage_day={day}")
+
+    def _reclaim_partition(self, day, *, eligible_before, execute, verification_limits,
+                           expected_page_count=None, expected_manifest_set_hash=None):
         self._assert_archive_admission()
         with self.archive.database.session() as session:
             self._timeouts(session)
             partition = self.archive._lock(session, day, statement_timeout_ms=self.limits.statement_timeout_ms)
+            self._check_selected_scope(session, partition, expected_page_count, expected_manifest_set_hash)
+            cold_layout = cold_layout_active(session)
+            if cold_layout and session.scalar(text("""
+                SELECT EXISTS (SELECT FROM market.cold_fact_retired_days
+                    WHERE storage_day=:day AND handoff_kind='initial')
+            """), {"day": day}):
+                raise RuntimeError(f"cold_fact_initial_retirement_requires_cutover_receipt: storage_day={day}")
             self._eligibility(session, partition, eligible_before=eligible_before)
             unfinished = session.execute(text(
                 "SELECT id FROM market.fact_archive_preparations "
@@ -259,12 +308,43 @@ class PostgresCanonicalFactReclamationRepository:
                 )
             already_reclaimed = partition["state"] == "reclaimed"
             relation_oid = self._relation(session, day, reclaimed=already_reclaimed)
+            retired = None
+            staged_pages = ()
+            header_oid = None
+            if cold_layout:
+                header_oid = session.scalar(text("SELECT to_regclass(:relation)::oid"), {
+                    "relation": "market." + fact_header_partition_name(day),
+                })
+                retired = session.execute(text("""
+                    SELECT manifest_set_hash,row_count,reclaimed_header_bytes,protected_dataset_ranges
+                    FROM market.cold_fact_retired_days WHERE storage_day=:day
+                """), {"day": day}).mappings().one_or_none()
+                if retired is not None and (
+                    header_oid is not None or not already_reclaimed
+                    or retired["manifest_set_hash"] != partition["manifest_set_hash"]
+                ):
+                    raise RuntimeError(f"cold_fact_retirement_receipt_invalid: storage_day={day}")
+                if not already_reclaimed:
+                    require_oldest_header_day(session, day)
+                    if header_oid is None:
+                        raise RuntimeError(f"cold_fact_retirement_header_missing: storage_day={day}")
+                    if execute:
+                        guard_cold_runtime_placement(session, locators=True, archive_evidence=True)
+                        staged = stage_retirement_pages(session, self.archive, day, admission=self.cold_stage_admission)
+                        if staged is not None:
+                            return staged
+                if (execute and not already_reclaimed) or retired is not None:
+                    staged_pages = verify_cold_day_locators(session, day, partition["expected_rows"],
+                                                            check_budget=self.archive._check_budget)
+                    verify_staged_locator_counts(session, staged_pages, check_budget=self.archive._check_budget)
             objects = ArchiveVerificationBatch(self.archive.object_store, limits=verification_limits,
                                                check_budget=self.archive.check_budget)
             handoff = FactHandoffProof(check_budget=self.archive._check_budget) if execute and not already_reclaimed else None
             with objects.distinct_references():
                 evidence = self.archive._partition_evidence(session, partition, limits=verification_limits,
-                    objects=objects, handoff=handoff)
+                    objects=objects, handoff=handoff, retired=retired,
+                    count_statement_timeout_ms=self.limits.count_statement_timeout_ms,
+                    remaining_count_seconds=self.remaining_run_seconds)
             if evidence["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             self._assert_archive_admission(objects)
@@ -279,12 +359,18 @@ class PostgresCanonicalFactReclamationRepository:
                 logger.info("canonical_reclaim_handoff_prepared | storage_day=%s source_rows=%s seconds=%s witness_bytes=%s",
                             day, handoff.source_row_count,
                             perf_counter() - prepared, handoff.retained_bytes)
-            evidence["protected_dataset_ranges"], evidence["pinned_ranges_statement_timeout_ms"] = (
-                self._pinned_ranges(session, day))
+            if retired is None:
+                evidence["protected_dataset_ranges"], evidence["pinned_ranges_statement_timeout_ms"] = (
+                    self._pinned_ranges(session, day))
+            else:
+                evidence["protected_dataset_ranges"] = retired["protected_dataset_ranges"]
             if already_reclaimed:
-                return {**evidence, "status": "already_reclaimed", "reclaimed_bytes": partition["reclaimed_bytes"]}
+                return {**evidence, "status": "already_reclaimed", "reclaimed_bytes": partition["reclaimed_bytes"],
+                        "reclaimed_header_bytes": retired["reclaimed_header_bytes"] if retired else 0}
             if not execute:
                 size = session.execute(text("SELECT pg_total_relation_size(:oid)"), {"oid": relation_oid}).scalar_one()
+                if header_oid is not None:
+                    size += session.scalar(text("SELECT pg_total_relation_size(:oid)"), {"oid": header_oid})
                 return {**evidence, "status": "dry_run", "enabled": self.enabled, "reclaimable_bytes": size}
 
         started = monotonic()
@@ -299,6 +385,15 @@ class PostgresCanonicalFactReclamationRepository:
             check_budget()
             return self.limits.max_handoff_seconds - (monotonic() - started)
 
+        def remaining_count_seconds():
+            handoff_remaining = remaining_handoff_seconds()
+            if self.remaining_run_seconds is None:
+                return handoff_remaining
+            run_remaining = self.remaining_run_seconds()
+            if type(run_remaining) not in {int, float} or not isfinite(run_remaining) or run_remaining <= 0:
+                raise RuntimeError("canonical_archive_handoff_run_budget_exceeded")
+            return min(handoff_remaining, run_remaining)
+
         with self.archive.database.session() as session:
             self._timeouts(session)
             acquired = session.execute(text(
@@ -309,6 +404,7 @@ class PostgresCanonicalFactReclamationRepository:
             # _lock's shared acquisition is reentrant on THIS connection's
             # already-owned exclusive fence, never a second-connection wait.
             partition = self.archive._lock(session, day, statement_timeout_ms=self.limits.statement_timeout_ms)
+            self._check_selected_scope(session, partition, expected_page_count, expected_manifest_set_hash)
             self._eligibility(session, partition, eligible_before=eligible_before)
             if partition["state"] == "reclaimed":
                 self._relation(session, day, reclaimed=True)
@@ -316,7 +412,9 @@ class PostgresCanonicalFactReclamationRepository:
             if self._relation(session, day) != relation_oid:
                 raise RuntimeError(f"canonical_reclaim_relation_changed: storage_day={day}")
             current = self.archive._partition_evidence(session, partition, limits=verification_limits,
-                check_budget=check_budget, handoff=handoff)
+                check_budget=check_budget, handoff=handoff,
+                count_statement_timeout_ms=self.limits.count_statement_timeout_ms,
+                remaining_count_seconds=remaining_count_seconds)
             if current["manifest_set_hash"] != evidence["manifest_set_hash"] or current["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             if current["source_placement_hash"] != evidence["source_placement_hash"]:
@@ -335,8 +433,30 @@ class PostgresCanonicalFactReclamationRepository:
                 raise RuntimeError(f"canonical_reclaim_relation_changed: storage_day={day}")
             size = session.execute(text("SELECT pg_total_relation_size(:oid)"), {"oid": relation_oid}).scalar_one()
             check_budget()
+            if cold_layout_active(session) != cold_layout:
+                raise RuntimeError("cold_fact_retirement_layout_changed")
+            header_size = 0
+            if cold_layout:
+                guard_cold_runtime_placement(session, locators=True, archive_evidence=True)
+                for table in ("cold_fact_pages", "cold_fact_locators", "cold_fact_retired_days"):
+                    session.execute(text(f"LOCK TABLE ONLY market.{table} IN SHARE MODE NOWAIT"))
+                assert_cold_history_immutability(session.connection())
+                final_pages = verify_cold_day_locators(session, day, current["row_count"], check_budget=check_budget)
+                if final_pages != staged_pages:
+                    raise RuntimeError(f"cold_fact_retirement_staged_pages_changed: storage_day={day}")
+                lock_header_namespace(session)
+                require_oldest_header_day(session, day)
             # Exact generated daily relation only; no CASCADE or row DELETE.
             session.execute(text(f'DROP TABLE market."{name}"'))
+            if cold_layout:
+                header_size = drop_verified_header(session, name=fact_header_partition_name(day),
+                                                   oid=header_oid, storage_day=day)
+                session.execute(text("""
+                    INSERT INTO market.cold_fact_retired_days
+                      (storage_day,manifest_set_hash,row_count,reclaimed_header_bytes,protected_dataset_ranges)
+                    VALUES (:storage_day,:manifest_set_hash,:row_count,:header_size,:protected_dataset_ranges)
+                """), {**current, "header_size": header_size})
+                size += header_size
             self._assert_archive_admission(objects)
             check_budget()
             updated = session.execute(text("""
@@ -349,4 +469,5 @@ class PostgresCanonicalFactReclamationRepository:
             check_budget()
         logger.info("canonical_hot_partition_reclaimed | storage_day=%s rows=%s reclaimed_bytes=%s protected_dataset_ranges=%s manifest_set_hash=%s",
                     day, current["row_count"], size, current["protected_dataset_ranges"], current["manifest_set_hash"])
-        return {**current, "status": "partition_reclaimed", "reclaimed_bytes": size}
+        return {**current, "status": "partition_reclaimed", "reclaimed_bytes": size,
+                "reclaimed_header_bytes": header_size}

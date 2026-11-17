@@ -14,6 +14,8 @@ from time import perf_counter
 from sqlalchemy import text
 
 from market_data.fact_archive import archive_evidence_hash
+from portal.backend.db.cold_history_models import guard_cold_runtime_placement
+from .cold_history import cold_layout_active
 
 
 PREPARATION_STATES = frozenset({"building", "ready", "active", "superseded", "abandoned"})
@@ -218,6 +220,8 @@ class ArchiveGenerationCoordinator:
         }).encode("ascii")).hexdigest()
         with self.database.session() as session:
             self.lock_day(session, day)
+            if cold_layout_active(session):
+                guard_cold_runtime_placement(session, archive_evidence=True)
             row = session.execute(text("""
                 SELECT * FROM market.fact_archive_preparations
                 WHERE storage_day=:day AND page_ordinal=:page_ordinal
@@ -375,6 +379,8 @@ class ArchiveGenerationCoordinator:
             raise ValueError("canonical_archive_catalog_transaction_group_invalid")
         with self.database.session() as session:
             self.lock_day(session, day)
+            if cold_layout_active(session):
+                guard_cold_runtime_placement(session, archive_evidence=True)
             row = session.execute(text(
                 "SELECT * FROM market.fact_archive_preparations WHERE id=:id FOR UPDATE"
             ), {"id": preparation["id"]}).mappings().one()
@@ -571,6 +577,8 @@ class ArchiveGenerationCoordinator:
                 raise RuntimeError("canonical_archive_preparation_not_activatable")
             if partition["state"] != "sealed":
                 raise RuntimeError("canonical_archive_partition_not_sealed")
+            if cold_layout_active(session):
+                guard_cold_runtime_placement(session, archive_evidence=True)
             descriptor = row["manifest_descriptor"]
             previous = session.execute(text("""
                 SELECT page_ordinal,last_commit_seq,last_id FROM market.fact_archive_manifests
@@ -709,7 +717,7 @@ class ArchiveGenerationCoordinator:
                     f"canonical_archive_supersession_not_monotone: catalog={catalog}"
                 )
 
-    def supersede_verified(self, *, day, preparation, verification_receipt: dict) -> dict:
+    def supersede_verified(self, *, day, preparation, verification_receipt: dict, verify_selected_page=None) -> dict:
         """Publish a complete monotone replacement and its receipt atomically.
 
         The old pointer remains authoritative until every membership, hold, and
@@ -717,6 +725,10 @@ class ArchiveGenerationCoordinator:
         """
         with self.database.session() as session:
             self.lock_day(session, day)
+            if verify_selected_page is not None:
+                verify_selected_page(session)
+            if cold_layout_active(session):
+                guard_cold_runtime_placement(session, archive_evidence=True)
             target = session.execute(text(
                 "SELECT * FROM market.fact_archive_preparations WHERE id=:id FOR UPDATE"
             ), {"id": preparation["id"]}).mappings().one()

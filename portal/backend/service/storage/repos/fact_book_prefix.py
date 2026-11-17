@@ -7,6 +7,7 @@ not a checkpoint/reconstruction proof or permission to reclaim hot data.
 """
 from __future__ import annotations
 
+import json
 import logging
 from time import perf_counter
 
@@ -68,6 +69,28 @@ def _validate_chunk(chunk, scope):
     return descriptor
 
 
+def book_prefix_tips(session, prefixes):
+    """Address the newest committed book receipt by its exact indexed scope."""
+    rows = session.execute(text("""
+        SELECT requested.request_key,tip.*
+        FROM jsonb_to_recordset(CAST(:prefixes AS jsonb)) AS requested(
+            request_key text,definition_id text,session_id text,connection_epoch bigint,
+            provider_product_id text)
+        CROSS JOIN LATERAL (
+            SELECT * FROM market.fact_book_prefix_chunks AS chunks
+            WHERE chunks.definition_id=requested.definition_id
+              AND chunks.session_id=requested.session_id
+              AND chunks.connection_epoch=requested.connection_epoch
+              AND chunks.provider_product_id=requested.provider_product_id
+              AND chunks.verifier_version=:version
+            ORDER BY chunks.last_receive_ordinal DESC LIMIT 1
+        ) AS tip
+    """), {"prefixes": json.dumps(prefixes), "version": BOOK_PREFIX_VERIFIER_VERSION}).mappings()
+    scopes = {prefix["request_key"]: _scope(prefix) for prefix in prefixes}
+    return {row["request_key"]: _validate_chunk(row, scopes[row["request_key"]])["last_receive_ordinal"]
+            for row in rows}
+
+
 def _dependencies(session, chunk, *, max_objects):
     """Rebind the receipt to its permanent holds and immutable raw descriptors."""
     found = session.execute(text("""
@@ -99,6 +122,10 @@ def prepare_next_book_prefix(session, *, rows, object_store, byte_verifier, limi
         limits=limits, max_mapping_rows=max_mapping_rows, max_objects=max_objects,
         check_budget=check_budget, bound_manifest_ids=bound_manifest_ids,
         identity_spool_directory=identity_spool_directory)
+
+
+def prepare_next_book_prefix_range(session, *, prefix, **kwargs):
+    return _prepare_next_prefix(session, prefixes=[prefix], verifier_version=BOOK_PREFIX_VERIFIER_VERSION, **kwargs)
 
 
 def prepare_next_trade_prefix(session, *, prefixes, **kwargs):

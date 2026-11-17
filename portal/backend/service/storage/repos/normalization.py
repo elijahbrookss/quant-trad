@@ -28,6 +28,7 @@ from market_data.normalization import (
 )
 
 from ._shared import db
+from .fact_dependencies import _cold_enabled
 from .market_data import market_data_repo
 from .fact_storage import canonical_fact_storage_repository
 from .market_lifecycle import market_storage_lifecycle_repository
@@ -279,7 +280,23 @@ class PostgresNormalizationRepository:
             """), {"id": stored_id}).scalar_one_or_none()
             if hot_reference is not None:
                 raise RuntimeError(f"market_normalization_legacy_identity_referenced: spec_id={stored_id}")
-            if cold_references is None:
+            active_cold = _cold_enabled(session)
+            if active_cold:
+                cold = canonical_fact_storage_repository.cold_history(session)
+                references = cold.normalization_spec_ids(session, stored_id)
+                try:
+                    identity = next(references, None)
+                finally:
+                    references.close()
+                if identity is not None:
+                    witness = cold.read_by_ids(session, [identity])[identity]
+                    evidence = witness["provenance"].get("_qt_normalization_evidence")
+                    if not isinstance(evidence, Mapping) or evidence.get("spec_id") != stored_id:
+                        raise RuntimeError(
+                            f"market_normalization_cold_reference_mismatch: spec_id={stored_id} fact_version_id={identity}"
+                        )
+                    raise RuntimeError(f"market_normalization_legacy_identity_referenced: spec_id={stored_id}")
+            if not active_cold and cold_references is None:
                 cold_references = set()
                 requested_ids = {item["id"] for item in rows}
                 with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
@@ -300,7 +317,7 @@ class PostgresNormalizationRepository:
                         # reference and need not be hashable for this check.
                         if isinstance(referenced_id, str) and referenced_id in requested_ids:
                             cold_references.add(referenced_id)
-            if stored_id in cold_references:
+            if cold_references is not None and stored_id in cold_references:
                 raise RuntimeError(f"market_normalization_legacy_identity_referenced: spec_id={stored_id}")
             if stored_id not in _WARNED_LEGACY_SPEC_IDS:
                 logger.warning(
@@ -368,6 +385,7 @@ class PostgresNormalizationRepository:
                 )
 
             canonical = []
+            cold = canonical_fact_storage_repository.cold_history(session) if _cold_enabled(session) else None
             for fact in normalized:
                 if fact.spec_hash != spec.spec_hash:
                     raise ValueError(
@@ -404,6 +422,10 @@ class PostgresNormalizationRepository:
                 ).scalar_one_or_none()
                 existing = (canonical_fact_storage_repository.read_rows_by_ids(session, [existing])[existing]
                             if existing is not None else None)
+                if existing is None and cold is not None:
+                    existing = cold.latest_for_keys(
+                        session, series_id=fact.series_id, keys=[canonical_fact.observation_key],
+                    ).get(canonical_fact.observation_key)
                 if (
                     existing is not None
                     and str(existing["row_hash"]) != canonical_fact.row_hash

@@ -4,6 +4,8 @@ import json
 import urllib.parse
 import urllib.request
 
+import pytest
+
 from cli.main import main
 
 
@@ -54,7 +56,8 @@ def test_lifecycle_run_cursor_and_degraded_exit_status(monkeypatch):
     assert observed[0]["canonical_after_storage_day"] == "2026-08-04" and observed[0]["execute"] is True
 
 
-def test_data_ingest_candles_uses_explicit_mutation_contract(monkeypatch) -> None:
+@pytest.mark.parametrize("fill_missing_only", [False, True])
+def test_data_ingest_candles_uses_explicit_mutation_contract(monkeypatch, fill_missing_only) -> None:
     observed = {}
 
     def fake_urlopen(request, timeout):
@@ -80,7 +83,7 @@ def test_data_ingest_candles_uses_explicit_mutation_contract(monkeypatch) -> Non
             "2026-01-01T01:00:00Z",
             "--timeframe",
             "1m",
-        ]
+        ] + (["--fill-missing-only"] if fill_missing_only else [])
     )
 
     assert exit_code == 0
@@ -92,6 +95,7 @@ def test_data_ingest_candles_uses_explicit_mutation_contract(monkeypatch) -> Non
         "end": "2026-01-01T01:00:00Z",
         "timeframe": "1m",
         "source_revision": None,
+        **({"fill_missing_only": True} if fill_missing_only else {}),
     }
 
 

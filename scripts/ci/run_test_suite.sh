@@ -70,6 +70,9 @@ run_pytest_docker() (
 
   if [[ "$SUITE" == "incremental-recovery" ]]; then
     compose+=(-f docker/test/incremental-application.compose.yml)
+    if [[ "${QT_SAME_PATH_RECOVERY:-0}" == 1 ]]; then
+      compose+=(-f docker/test/same-path-recovery.compose.yml)
+    fi
   fi
 
   if [[ -n "${QT_CI_PROOF_ROOT:-}" ]]; then
@@ -92,6 +95,9 @@ run_pytest_docker() (
       # diagnostics before removing its failed database; never inspect peers.
       if ! "${compose[@]}" logs --no-color --tail 120 timescaledb >&2; then
         echo "ci_runner_database_logs_unavailable: project=$test_project" >&2
+      fi
+      if [[ "$SUITE" == "incremental-recovery" && "${QT_SAME_PATH_RECOVERY:-0}" == 1 ]]; then
+        "${compose[@]}" logs --no-color --tail 40 restore-writer restored >&2 || :
       fi
       local database_id
       database_id="$("${compose[@]}" ps --all --quiet timescaledb)" || database_id=""
