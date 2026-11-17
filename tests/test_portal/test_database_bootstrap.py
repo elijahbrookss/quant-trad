@@ -210,6 +210,9 @@ class _Connection:
         self.inspector = inspector
         self.executed: list[Any] = []
 
+    def scalar(self, statement: Any, params: dict[str, Any] | None = None) -> Any | None:
+        return self.execute(statement, params).scalar_one_or_none()
+
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _Result:
         self.executed.append(statement)
         statement_text = str(statement)
