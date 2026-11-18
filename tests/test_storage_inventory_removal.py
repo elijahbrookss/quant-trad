@@ -14,8 +14,9 @@ OLD = 'a'*64
 OPERATOR = 'e'*64
 
 
-@pytest.fixture
-def daemon(monkeypatch):
+@pytest.fixture(params=["Error: No such object: ", "error: no such object: "],
+                ids=["capitalized-diagnostic", "observed-lowercase-diagnostic"])
+def daemon(monkeypatch, request):
     registry = {identity:dict(id=identity,image='sha256:'+'d'*64,project='qt-owned',
         service=name,oneoff='False',restart='no',running=False,restarting=False,
         paused=False,pid=0,status='removing' if name=='tsdb' else 'exited',exit_code=0,oom=False)
@@ -41,7 +42,7 @@ def daemon(monkeypatch):
         assert OPERATOR not in requested
         missing=set(requested)-registry.keys()
         rows=[deepcopy(registry[identity]) for identity in requested if identity in registry]
-        error='\n'.join('Error: No such object: '+identity for identity in sorted(missing))
+        error='\n'.join(request.param+identity for identity in sorted(missing))
         code=1 if missing else 0
         case=state['case']
         if state['inspect']==1 and case!='still_present':
@@ -130,6 +131,7 @@ def test_missing_database_without_journaled_removal_still_refuses(daemon):
     (('inspect','--format','{{json .Config}}',OLD),1,'Error: No such object: '+OLD),
     (('inspect','--format',host.INSPECT,OLD),2,'Error: No such object: '+OLD),
     (('inspect','--format',host.INSPECT,OLD[:12]),1,'Error: No such object: '+OLD[:12]),
+    (('inspect','--format',host.INSPECT,OLD),1,'error: no such container: '+OLD),
     (('inspect','--format',host.INSPECT,OLD),1,'Error: No such object: '+OLD+'\nPRIVATE daemon failure'),
     (('inspect','--format',host.INSPECT,OLD),1,'x'*16385),
 ])

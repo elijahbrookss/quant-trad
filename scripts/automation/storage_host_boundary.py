@@ -97,7 +97,7 @@ def docker(*args: str, timeout: int = 30, env=None, input=None) -> str:
                 and 1 <= len(requested) <= 64 and len(set(requested)) == len(requested)
                 and all(re.fullmatch(r"[0-9a-f]{64}", value) for value in requested)
                 and 0 < len(result.stderr) <= 16384):
-            missing = [re.fullmatch(r"Error: No such (?:object|container): ([0-9a-f]{64})", line)
+            missing = [re.fullmatch(r"(?:Error: No such (?:object|container)|error: no such object): ([0-9a-f]{64})", line)
                        for line in result.stderr.splitlines()]
             if missing and all(missing):
                 identities = [match.group(1) for match in missing]
