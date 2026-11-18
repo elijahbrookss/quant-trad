@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -193,11 +194,11 @@ def test_online_host_fixture_retains_private_database_factory_boundary(
 
 
 @pytest.mark.parametrize("identity_failure", ["", "git", "hash"])
-def test_ci_pilot_wiring_binds_checkout_before_disposable_tests(tmp_path, identity_failure):
+def test_ci_database_wiring_binds_checkout_before_disposable_tests(tmp_path, identity_failure):
     workflow = yaml.safe_load((_ROOT / ".github/workflows/test.yaml").read_text())
     steps = workflow["jobs"]["clean-database-bootstrap"]["steps"]
     step = next(step for step in steps if step["name"] == "Run PostgreSQL-backed contract tests")
-    assert step["env"]["QT_SCHEMA_TEMPLATE_PILOT"] == "1"
+    assert step["env"]["QT_SCHEMA_TEMPLATE_PILOT"] == "0"
     assert "QT_SCHEMA_TEMPLATE_PILOT" not in workflow.get("env", {})
     for job in workflow["jobs"].values():
         assert "QT_SCHEMA_TEMPLATE_PILOT" not in job.get("env", {})
@@ -205,7 +206,8 @@ def test_ci_pilot_wiring_binds_checkout_before_disposable_tests(tmp_path, identi
             if other is not step:
                 assert "QT_SCHEMA_TEMPLATE_PILOT" not in other.get("env", {})
     revision, tree_hash = "a" * 40, "b" * 64
-    observed = tmp_path / "pytest-observed"
+    observed = tmp_path / "docker-run-observed"
+    docker_calls = tmp_path / "docker-calls"
     git = tmp_path / "git"
     git.write_text("#!/usr/bin/env bash\n"
         '[[ "$*" == "rev-parse HEAD" && "$IDENTITY_FAILURE" != "git" ]] || exit 19\n'
@@ -215,24 +217,53 @@ def test_ci_pilot_wiring_binds_checkout_before_disposable_tests(tmp_path, identi
         'if [[ "$1" == "scripts/provenance/source_tree_hash.py" ]]; then\n'
         '  [[ "$2" == "--git-revision" && "$3" == "' + revision + '" && "$IDENTITY_FAILURE" != "hash" ]] || exit 23\n'
         + "  printf '%s\\n' " + tree_hash + "\n"
-        'elif [[ "$1 $2" == "-m pytest" ]]; then\n'
-        '  printf "%s\\n" "$SOURCE_REVISION" "$SOURCE_TREE_HASH" "$QT_SCHEMA_TEMPLATE_PILOT" "$QT_DB_TEST_ISOLATED" "$RUN_DB_TESTS" "$@" > "$OBSERVED"\n'
+        'elif [[ "$1" == "-c" ]]; then\n'
+        + "  exec " + shlex.quote(sys.executable) + ' "$@"\n'
         'else exit 29; fi\n')
+    docker = tmp_path / "docker"
+    docker.write_text("#!/usr/bin/env bash\n"
+        'printf "%s\\n" invoked >> "$DOCKER_CALLS"\n'
+        'if [[ " $* " == *" run "* ]]; then\n'
+        '  printf "%s\\n" "$SOURCE_REVISION" "$SOURCE_TREE_HASH" "$QT_SCHEMA_TEMPLATE_PILOT" "$QT_DB_TEST_ISOLATED" "$RUN_DB_TESTS" "$@" > "$OBSERVED"\n'
+        'fi\n')
     git.chmod(0o755)
     python.chmod(0o755)
+    docker.chmod(0o755)
     result = subprocess.run(["bash", "-ec", step["run"]], cwd=_ROOT,
         env={**os.environ, **step["env"], "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
-             "IDENTITY_FAILURE": identity_failure, "OBSERVED": str(observed)},
+             "IDENTITY_FAILURE": identity_failure, "OBSERVED": str(observed),
+             "DOCKER_CALLS": str(docker_calls), "QT_CI_PROOF_ROOT": "", "QT_CI_TEST_PHASES": "0",
+             "AMBIENT_SENTINEL_SECRET": "must-not-appear-in-docker-arguments"},
         capture_output=True, text=True, timeout=10)
     if identity_failure:
         assert result.returncode != 0
         assert not observed.exists()
+        assert not docker_calls.exists()
     else:
         assert result.returncode == 0, result.stderr
-        assert observed.read_text().splitlines() == [revision, tree_hash, "1", "1", "1",
-            "-m", "pytest", "-q", "-m", "db",
-            "--ignore=tests/test_portal/test_clean_database_bootstrap_db.py",
-            "--ignore=tests/test_market_data/test_header_namespace_db.py"]
+        lines = observed.read_text().splitlines()
+        assert lines[:5] == [revision, tree_hash, "0", "1", "1"]
+        arguments = lines[5:]
+        assert arguments[:2] == ["compose", "--project-name"]
+        assert arguments[2].startswith("qt-test-")
+        test_index = arguments.index("test")
+        assert arguments[3:test_index] == [
+            "-f", "docker/docker-compose.test.yml", "run", "--rm",
+            "-e", "QT_CI_IMMEDIATE_FAILURE=1", "-e", "QT_CI_TEST_PHASES=0",
+            "-e", "QT_SCHEMA_TEMPLATE_PILOT=0",
+            "-e", "SOURCE_REVISION=" + revision, "-e", "SOURCE_TREE_HASH=" + tree_hash,
+        ]
+        assert arguments[test_index + 1:test_index + 3] == ["bash", "-lc"]
+        assert arguments[-2] == "_"
+        assert arguments[-1].strip() == (
+            "QT_DB_TEST_ISOLATED=1 RUN_DB_TESTS=1 pytest -q -m db "
+            "--ignore=tests/test_portal/test_clean_database_bootstrap_db.py "
+            "--ignore=tests/test_market_data/test_header_namespace_db.py"
+        )
+        assert step["env"]["PG_DSN"] not in observed.read_text()
+        assert "must-not-appear-in-docker-arguments" not in (
+            observed.read_text() + result.stdout + result.stderr
+        )
 
 
 def test_held_cutover_seed_uses_owned_database_with_current_fixture_signature(monkeypatch):
