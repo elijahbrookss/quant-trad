@@ -165,4 +165,9 @@ def test_native_custody_move_preserves_forks_and_fk_scope(prepared_database):
     with pytest.raises(DBAPIError) as rejected:
         with engine.begin() as conn:
             conn.exec_driver_sql("DELETE FROM market.fixture_parent WHERE id='parent'")
-    assert rejected.value.orig.pgcode == "23503"
+    assert rejected.value.orig.pgcode in {"23001", "23503"}
+    assert rejected.value.orig.diag.constraint_name in {f"{name}_owner_fkey" for name in COLD_CUSTODY_TABLE_NAMES}
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT count(*) FROM market.fixture_parent WHERE id='parent'")) == 1
+        for name in COLD_CUSTODY_TABLE_NAMES:
+            assert conn.exec_driver_sql(f"SELECT * FROM market.{name}").all() == expected_rows[name]

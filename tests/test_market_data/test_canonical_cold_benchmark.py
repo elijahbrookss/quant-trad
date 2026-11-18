@@ -214,6 +214,8 @@ def test_runner_times_same_public_revision_read_across_hot_and_cold(local_catalo
     from market_data.archive import FilesystemRawArchiveObjectStore
     from market_data.cold_history import ColdHistoryReader
     from market_data.fact_archive import publish_canonical_fact_archive
+    from portal.backend.db import session as database_module
+    from portal.backend.service.storage.repos import market_data
     from portal.backend.service.storage.repos.cold_history import PostgresColdHistory
     from tests.test_market_data.test_canonical_fact_archive import _row
 
@@ -236,6 +238,9 @@ def test_runner_times_same_public_revision_read_across_hot_and_cold(local_catalo
     monkeypatch.setenv("PG_DSN", target.render_as_string(hide_password=False))
     monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
     monkeypatch.setattr(bench, "_code_revision", lambda module, expected: expected)
+    database = database_module.Database()
+    monkeypatch.setattr(database_module, "db", database)
+    monkeypatch.setattr(market_data, "db", database)
     try:
         with admin.connect() as conn:
             conn.exec_driver_sql(f"CREATE DATABASE {name} TEMPLATE template0")
