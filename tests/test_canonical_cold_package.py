@@ -2,7 +2,10 @@ from contextlib import nullcontext
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
-from time import time
+import os
+from pathlib import Path
+from types import SimpleNamespace
+from time import monotonic, time
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -23,6 +26,41 @@ def _write(path, content):
     path.write_bytes(content)
     path.chmod(0o600)
     return sha256(content).hexdigest()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX private recovery directories")
+@pytest.mark.parametrize(("version", "accepted"), [
+    (b"pgBackRest 2.59.1", True), (b"pgBackRest 2.59.3", True),
+    (b"pgBackRest 2.59.2", False), (b"pgBackRest 2.59.4", False),
+])
+def test_named_restore_checks_qualified_reader_before_data_writes(tmp_path, monkeypatch, version, accepted):
+    workspace, pgdata = tmp_path / "workspace", tmp_path / "pgdata"
+    workspace.mkdir(mode=0o700)
+    pgdata.mkdir(mode=0o700)
+    key = tmp_path / "database-key"
+    _write(key, b"1" * 64)
+    monkeypatch.setattr(named, "_binary", Path)
+
+    def native(command, **kwargs):
+        assert command == ["/fixture/pgbackrest", "version"]
+        kwargs["check"]()
+        return version
+
+    def manifest(*args):
+        raise RuntimeError("fixture_native_manifest_reached")
+
+    monkeypatch.setattr(named, "_run_native", native)
+    monkeypatch.setattr(named, "_selected_backup_manifest", manifest)
+    reason = "fixture_native_manifest_reached" if accepted else "canonical_named_recovery_pgbackrest_unqualified"
+    with pytest.raises(RuntimeError, match=reason):
+        named._native_restore(
+            root=tmp_path / "repository", workspace=workspace, pgdata=pgdata, tablespaces={},
+            pgbackrest="/fixture/pgbackrest", database_key=key, pair={}, unarmed="fixture_unarmed",
+            budget=SimpleNamespace(seconds=30, reserve_bytes=0, bytes=2**30),
+            deadline=monotonic() + 30, check=lambda: None,
+        )
+    assert not any(pgdata.iterdir())
+    assert not (workspace / "pgbackrest.conf").exists()
 
 
 def test_approved_collector_plan_persists_both_boundary_receipts(tmp_path, monkeypatch):

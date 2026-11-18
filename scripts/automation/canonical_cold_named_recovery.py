@@ -33,7 +33,9 @@ from scripts.automation.canonical_cold_receiver_ready import (
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, _identity, _private_root
 from scripts.automation.storage_host_boundary import load_receipt
 from scripts.automation.verify_canonical_recovery_archive import _sha256
-from scripts.automation.verify_encrypted_recovery_handoff import _bound_json, _selected_backup_manifest, verify_handoff
+from scripts.automation.verify_encrypted_recovery_handoff import (
+    _PGBACKREST_READ_VERSIONS, _bound_json, _selected_backup_manifest, verify_handoff,
+)
 from scripts.db.canonical_cold_database_fence import DatabaseFence
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
 from scripts.db.canonical_cold_recovery_archive_transport import (
@@ -499,7 +501,7 @@ def _native_restore(*, root, workspace, pgdata, tablespaces, pgbackrest, databas
 
     try:
         version = _run_native([str(binary), "version"], cwd=workspace, env=env, deadline=restore_deadline, check=check_restore)
-        if version.strip() != b"pgBackRest 2.59.1":
+        if version.strip() not in _PGBACKREST_READ_VERSIONS:
             raise RuntimeError("canonical_named_recovery_pgbackrest_unqualified")
         native = partial(_run_native, cwd=workspace, env=env, deadline=restore_deadline, check=check_restore)
         command_prefix = [str(binary), f"--config={settings}", "--stanza=qt"]

@@ -25,8 +25,15 @@ from scripts.automation.verify_canonical_recovery_archive import _sha256, _verif
 
 
 _VERSION = "qt.encrypted_recovery_repository_verification.v1"
+# Historical pairs retain their exact capture version; new captures use 2.59.3.
+_PGBACKREST_READ_VERSIONS = frozenset((b"pgBackRest 2.59.1", b"pgBackRest 2.59.3"))
 _WAL = re.compile(r"[0-9A-F]{24}")
 _VERIFY_BACKUP = re.compile(r"  backup: ([^,]+), status: valid, total files checked: ([0-9]+), total valid files: ([0-9]+)")
+
+
+def _qualified_pair_tools(tools, captured_tools):
+    return (tools == captured_tools and tools["pgbackrest"].encode("ascii") in _PGBACKREST_READ_VERSIONS
+            and tools["restic"].startswith("restic 0.19.1 "))
 
 
 def _bound_json(path, expected_hash):
@@ -252,8 +259,7 @@ def verify_handoff(*, repository, receipt_sha256, archive_restore, pgbackrest, r
         run = partial(_run_native, cwd=work, env=env, deadline=deadline, check=check)
         tools = {name: run([str(binary), "version"]).decode("ascii").strip()
                  for name, binary in (("pgbackrest", pgbackrest), ("restic", restic))}
-        if (tools != receipt["tools"] or tools["pgbackrest"] != "pgBackRest 2.59.1"
-                or not tools["restic"].startswith("restic 0.19.1 ")):
+        if not _qualified_pair_tools(tools, receipt["tools"]):
             raise ValueError("recovery_handoff_tools_changed")
         br = [str(pgbackrest), "--no-config", "--stanza=qt", "--repo1-cipher-type=aes-256-cbc",
               f"--repo1-path={database_repo}", "--log-level-file=off", "--log-level-console=off"]

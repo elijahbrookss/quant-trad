@@ -1,9 +1,70 @@
 import hashlib
 import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from scripts.automation.verify_canonical_recovery_archive import verify_archive, verify_logical_copy
+from scripts.automation import verify_encrypted_recovery_handoff as handoff
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX private recovery directories")
+@pytest.mark.parametrize(("captured", "installed", "restic", "accepted"), [
+    ("2.59.1", "2.59.1", "0.19.1", True),
+    ("2.59.3", "2.59.3", "0.19.1", True),
+    ("2.59.1", "2.59.3", "0.19.1", False),
+    ("2.59.3", "2.59.1", "0.19.1", False),
+    ("2.59.2", "2.59.2", "0.19.1", False),
+    ("2.59.4", "2.59.4", "0.19.1", False),
+    ("2.59.3", "2.59.3", "0.19.2", False),
+])
+def test_encrypted_handoff_retains_exact_qualified_capture_tools(
+    tmp_path, monkeypatch, captured, installed, restic, accepted,
+):
+    repository, restored = tmp_path / "repository", tmp_path / "restored"
+    for path in (repository, repository / "database", repository / "archives", restored):
+        path.mkdir(mode=0o700)
+    receipt = {
+        "schema_version": "qt.encrypted_recovery_pair.v1", "restore_endpoint": "immediate",
+        "database_identity": "123/456", "name": "copy_" + "a" * 32,
+        "database_label": "20261114-164000F", "archive_snapshot": "b" * 64,
+        "inventory_sha256": "c" * 64, "archive_objects": 0, "archive_bytes": 0,
+        "tools": {"pgbackrest": "pgBackRest " + captured,
+                  "restic": "restic " + restic + " compiled with fixture on linux/amd64"},
+    }
+    content = json.dumps(receipt).encode()
+    (repository / "complete.json").write_bytes(content)
+    monkeypatch.setattr(handoff, "_binary", Path)
+    monkeypatch.setattr(handoff, "_keys", lambda *_: ("1" * 64, "2" * 64))
+    monkeypatch.setattr(handoff.shutil, "disk_usage", lambda _: SimpleNamespace(free=2**30))
+
+    def native(command, **kwargs):
+        kwargs["check"]()
+        if command[1:] == ["version"]:
+            return (("pgBackRest " + installed) if command[0] == "/fixture/pgbackrest"
+                    else receipt["tools"]["restic"]).encode()
+        assert command[0] == "/fixture/pgbackrest" and command[-2:] == ["--output=json", "info"]
+        return b"fixture manifest is checked by the next reader"
+
+    def manifest(*args):
+        raise RuntimeError("fixture_native_manifest_reached")
+
+    monkeypatch.setattr(handoff, "_run_native", native)
+    monkeypatch.setattr(handoff, "_selected_backup", manifest)
+    error = RuntimeError if accepted else ValueError
+    reason = "fixture_native_manifest_reached" if accepted else "recovery_handoff_tools_changed"
+    with pytest.raises(error, match=reason):
+        handoff.verify_handoff(
+            repository=repository, receipt_sha256=hashlib.sha256(content).hexdigest(),
+            archive_restore=restored, pgbackrest="/fixture/pgbackrest", restic="/fixture/restic",
+            database_key=tmp_path / "database-key", archive_key=tmp_path / "archive-key",
+            timeout_seconds=30, max_archive_bytes=1024, max_archive_objects=1,
+            wal_segment_bytes=2**24, max_wal_segments=1,
+        )
+    assert (repository / "complete.json").read_bytes() == content
+    assert not any(restored.iterdir())
 
 
 def _restored_archive(tmp_path, *, object_key="subdir/segment"):

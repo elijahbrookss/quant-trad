@@ -28,7 +28,9 @@ from scripts.automation.canonical_cold_named_recovery import _TABLESPACE_NAME
 from scripts.automation.canonical_cold_recovery_preflight import ReceiverPath, _manifest_requirements, _observe
 from scripts.automation.stage_encrypted_recovery_handoff import _identity, _source_generation
 from scripts.automation.verify_canonical_recovery_archive import _sha256
-from scripts.automation.verify_encrypted_recovery_handoff import _directory, _selected_backup_manifest, _snapshot_owner
+from scripts.automation.verify_encrypted_recovery_handoff import (
+    _directory, _qualified_pair_tools, _selected_backup_manifest, _snapshot_owner,
+)
 
 def _require_isolated_mounts(repository, scratch, device_id, *, scratch_read_only=False):
     # Compare backing roots as well as container paths. A writable bind can
@@ -136,8 +138,7 @@ def _measure(args):
 
         tools = {name: run([str(binary), "version"]).decode("ascii").strip()
                  for name, binary in (("pgbackrest", pgbackrest), ("restic", restic))}
-        if (tools != pair["tools"] or tools["pgbackrest"] != "pgBackRest 2.59.1"
-                or not tools["restic"].startswith("restic 0.19.1 ")):
+        if not _qualified_pair_tools(tools, pair["tools"]):
             raise ValueError("same_hdd_rehearsal_tools_changed")
         br = [str(pgbackrest), "--no-config", "--stanza=qt", "--repo1-cipher-type=aes-256-cbc",
               f"--repo1-path={database_repo}", "--log-level-file=off", "--log-level-console=off"]
