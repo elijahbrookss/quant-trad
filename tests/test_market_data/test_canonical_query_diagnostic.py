@@ -54,6 +54,8 @@ def test_limits_preserve_fixed_live_ceiling():
 
 def test_closed_inventory_names_critical_read_paths_and_disposable_only_work():
     cases = query_diagnostic._cases(_scope(), query_diagnostic.QueryDiagnosticLimits())
+    for case in cases:
+        case.statement.compile().construct_params(case.params)
     by_id = {case.case_id: case for case in cases}
     assert {
         "retention.size_inventory", "retention.partition_tree", "retention.progress",

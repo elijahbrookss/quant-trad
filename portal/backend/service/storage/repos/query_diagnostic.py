@@ -420,7 +420,7 @@ def _cases(scope: Mapping[str, Any], limits: QueryDiagnosticLimits) -> list[Quer
                   "maximum_supported", "plan"),
         QueryCase("verification.next_page", "verification",
                   "fact_archival._ARCHIVE_UNVERIFIED_PAGE_QUERY", _ARCHIVE_UNVERIFIED_PAGE_QUERY,
-                  {"day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION}, 1,
+                  {"day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION, "limit": 1}, 1,
                   "representative", "analyze"),
         QueryCase("verification.source_envelopes", "verification",
                   "fact_archival._ARCHIVE_SOURCE_ENVELOPES_QUERY", _ARCHIVE_SOURCE_ENVELOPES_QUERY,
