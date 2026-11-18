@@ -237,7 +237,12 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
             try:
                 with probe.connect() as conn:
                     assert _identity(conn)[0] == identity
-                break
+                    if conn.scalar(text("SELECT NOT pg_is_in_recovery() "
+                                        "AND current_setting('transaction_read_only')='off'")):
+                        break
+                if monotonic() >= deadline:
+                    pytest.fail("restored database did not finish promotion within the existing deadline")
+                sleep(0.1)
             except OperationalError:
                 if monotonic() >= deadline:
                     raise
