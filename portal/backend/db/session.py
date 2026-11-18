@@ -1394,7 +1394,12 @@ class Database:
                 "scripts/db/manual_migration_book_operational_rollups_v1.sql "
                 "with writers stopped before starting this code."
             )
-        authoritative_cold = conn.scalar(text("""
+        # The explicit V1 cutover checks rollups before installing storage state.
+        storage_state = conn.execute(
+            text("SELECT to_regclass(:table_ref)"),
+            {"table_ref": "market.fact_storage_state"},
+        ).scalar_one_or_none()
+        authoritative_cold = storage_state is not None and conn.scalar(text("""
             SELECT EXISTS (SELECT FROM market.fact_storage_state
                 WHERE layout_version=:layout AND state='ready' AND completed_at IS NOT NULL)
         """), {"layout": COLD_HISTORY_LAYOUT_VERSION})
