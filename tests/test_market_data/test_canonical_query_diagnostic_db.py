@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from sqlalchemy import text
 
@@ -44,6 +46,9 @@ def test_live_diagnostic_runs_closed_read_only_inventory_without_mutation(
         )
     after = _counts(storage, day)
     assert after == before
+    for case in receipt["cases"]:
+        if case["execution"] in {"plan", "analyze"} and case["outcome"] != "passed":
+            print("QUERY_DIAGNOSTIC_FAILED_CASE " + json.dumps(case, sort_keys=True))
     assert receipt["status"] == "passed", receipt
     assert receipt["read_only"] is True and receipt["maintenance_authority"] is False
     by_id = {item["case_id"]: item for item in receipt["cases"]}
