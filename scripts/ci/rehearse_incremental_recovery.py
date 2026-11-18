@@ -186,15 +186,9 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
         assert not (older_files / "objects" / "new.bin").exists()
         original_directories = tuple((path.stat().st_dev, path.stat().st_ino)
                                      for path in (restored, restored_history))
-        if prior_pgbackrest is not None:
-            command = f'{pgbackrest} --config={config} --stanza=qt archive-push %p'
-            sql("ALTER SYSTEM SET archive_command='" + command.replace("'", "''") + "'")
-            sql("SELECT pg_reload_conf()")
-            deadline = time.monotonic() + 5
-            while sql("SHOW archive_command") != command:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("synthetic_archiver_upgrade_not_loaded")
-                time.sleep(0.01)
+        # Match QT's intended temporary client-only change: the existing native
+        # archiver stays on the older executable while new backups use the fix.
+        assert sql("SHOW archive_command").startswith(str(older_client) + " ")
         # Retain baseline recovery, add an archive and correct current rows.
         (objects / "new.bin").write_bytes(second)
         second_hash = hashlib.sha256(second).hexdigest()
@@ -213,6 +207,7 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
             "older_client": run([older_client, "version"]).stdout.strip(),
             "new_client": report["tools"]["pgbackrest"],
             "older_label": full["database"]["label"], "new_label": incremental["database"]["label"],
+            "source_archive_push_client": run([older_client, "version"]).stdout.strip(),
         }
         # Interrupt a deliberately throttled archive backup. Existing completed
         # snapshots must remain intact and no partial snapshot may be published.

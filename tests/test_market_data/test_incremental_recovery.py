@@ -7,13 +7,18 @@ import shutil
 import signal
 import sys
 import tracemalloc
+from contextlib import nullcontext
+from copy import deepcopy
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from time import monotonic, sleep
 
 import pytest
 
 from portal.backend.service.storage.incremental_recovery import (
-    EncryptedRecoveryCopies, _private_bytes, _root_label,
+    CutoverCapture, EncryptedRecoveryCopies, _private_bytes, _root_label,
 )
+from portal.backend.service.storage import incremental_recovery as recovery
 
 
 def test_archive_parent_uses_latest_published_point_instead_of_orphan():
@@ -219,3 +224,158 @@ def test_deadline_kills_owned_child_even_after_leader_exits(tmp_path):
             os.kill(child, signal.SIGKILL)
             pytest.fail("owned backup child survived deadline")
         sleep(0.01)
+
+
+@pytest.fixture
+def cutover_worker(tmp_path, monkeypatch):
+    worker = object.__new__(EncryptedRecoveryCopies)
+    worker.root, worker.device, worker.identity = tmp_path, tmp_path.stat().st_dev, "123/456"
+    worker.target = SimpleNamespace(filesystem_uuid="fixture-hdd")
+    worker.config = SimpleNamespace(max_chain_backups=1, pg_path=tmp_path/"source",
+                                    pg_socket_path=tmp_path/"socket")
+    worker.url = SimpleNamespace(port=5432, username="fixture", database="fixture")
+    worker.pgbackrest, worker.restic = Path("/trusted/pgbackrest"), Path("/trusted/restic")
+    worker.env, worker.peak_allocated_bytes = {"PATH": os.defpath}, 0
+    worker.check = lambda *args: None
+    worker.lock = nullcontext
+    worker._assert_fence = lambda session: None
+    layout = {"layout_version": "market.fact_storage_tiers.v2", "certificate_sha256": "d"*64}
+    monkeypatch.setattr(recovery, "_snapshot_layout", lambda session: layout)
+    previous = "copy_" + "1"*32
+    request = CutoverCapture("copy_" + "2"*32, previous, 100)
+    native = tmp_path/"database"/"backup"/"qt"
+    native.mkdir(parents=True)
+    old_label, new_label = "20261118-000000F", "20261118-000000F_20261118-010000I"
+    (native/old_label).mkdir()
+    receipt = {"schema_version": worker.schema_version, "name": previous,
+               "database_identity": worker.identity, "filesystem_uuid": "fixture-hdd",
+               "storage_layout": layout, "completed_at": datetime(2026, 11, 17, tzinfo=UTC).isoformat(),
+               "database_label": old_label, "database_type": "full", "archive_snapshot": "a"*64,
+               "inventory_sha256": "c"*64, "tools": {"pgbackrest": "pgBackRest 2.59.1"}}
+    directory = tmp_path/previous
+    directory.mkdir(mode=0o700)
+    recovery._json_write(directory/"owner.json", {key: receipt[key] for key in (
+        "schema_version", "name", "database_identity", "filesystem_uuid")})
+    recovery._json_write(directory/"complete.json", receipt)
+    original_receipt = (directory/"complete.json").read_bytes()
+    backups = [{"label": old_label, "type": "full", "annotation": {"qt-generation": previous}}]
+    host = "qt-"+hashlib.sha256(worker.identity.encode()).hexdigest()[:32]
+    snapshots = [{"id": "a"*64, "hostname": host, "tags": [previous]}]
+    worker._native_backups = lambda: deepcopy(backups)
+    worker._native_snapshots = lambda: deepcopy(snapshots)
+    calls, pruning, fail = [], [], []
+    worker._prune = lambda keep: pruning.append(keep)
+    def run(command):
+        calls.append(command)
+        if command[-1] == "version":
+            return b"pgBackRest 2.59.3" if command[0] == str(worker.pgbackrest) else b"restic 0.19.1 fixture"
+        if command[0] == str(worker.pgbackrest) and command[-1] == "backup":
+            generation = next(arg.split("=", 2)[2] for arg in command if arg.startswith("--annotation="))
+            assert worker.env.get("TMPDIR") == (str(tmp_path) if generation == request.generation else None)
+            if fail:
+                raise RuntimeError("injected_native_failure")
+            kind = next(arg.split("=", 1)[1] for arg in command if arg.startswith("--type="))
+            label = new_label if kind == "incr" else "20261118-010000F"
+            (native/label).mkdir()
+            backups.append({"label": label, "type": kind, "prior": old_label if kind == "incr" else None,
+                            "annotation": {"qt-generation": generation}})
+            return b""
+        if command[0] == str(worker.restic) and "backup" in command:
+            snapshots.append({"id": "b"*64, "hostname": host, "tags": [command[command.index("--tag")+1]]})
+            return json.dumps({"message_type": "summary", "snapshot_id": "b"*64}).encode()
+        if command[0] == str(worker.restic) and command[-1] == "unlock":
+            return b""
+        pytest.fail("unexpected native mutation: " + repr(command))
+    worker._run = run
+    def inventory(session, objects, partial):
+        (partial/"objects.jsonl").write_bytes(b"")
+        (partial/"files.list").write_bytes(b"")
+        return "c"*64, 0, 0
+    worker._inventory = inventory
+    objects = SimpleNamespace(root=tmp_path/"objects")
+    objects.root.mkdir()
+    session = SimpleNamespace(in_transaction=lambda: False)
+    return SimpleNamespace(worker=worker, request=request, session=session, objects=objects,
+                           calls=calls, pruning=pruning, fail=fail, backups=backups, snapshots=snapshots,
+                           previous=directory, original_receipt=original_receipt, native=native)
+
+
+def test_named_capture_publishes_once_without_rollover_or_pruning(cutover_worker):
+    f = cutover_worker
+    receipt = f.worker.create(f.session, objects=f.objects, keep_copies=1, cutover_capture=f.request)
+    assert receipt["name"] == f.request.generation and receipt["database_type"] == "incr"
+    assert not f.pruning and len(f.backups) == 2 and len(f.snapshots) == 2
+    assert (f.previous/"complete.json").read_bytes() == f.original_receipt
+    assert "TMPDIR" not in f.worker.env
+    sidecar = json.loads((f.worker.root/f.request.generation/"cutover-request.json").read_text())
+    assert sidecar["previous_receipt_sha256"] == hashlib.sha256(f.original_receipt).hexdigest()
+    assert "source_reserve_bytes" not in receipt and "cutover_capture" not in receipt
+    calls = deepcopy(f.calls)
+    assert f.worker.create(f.session, objects=f.objects, keep_copies=1, cutover_capture=f.request) == receipt
+    assert f.calls == calls and not f.pruning
+
+
+def test_normal_capture_retains_rollover_and_pruning(cutover_worker):
+    f = cutover_worker
+    receipt = f.worker.create(f.session, objects=f.objects, keep_copies=1)
+    assert receipt["database_type"] == "full" and f.pruning == [1, 1]
+    assert not (f.worker.root/receipt["name"]/"cutover-request.json").exists()
+    assert "TMPDIR" not in f.worker.env
+
+
+def test_named_capture_changed_request_or_receipt_refuses_replay(cutover_worker):
+    f = cutover_worker
+    f.worker.create(f.session, objects=f.objects, keep_copies=1, cutover_capture=f.request)
+    with pytest.raises(RuntimeError, match="cutover_request_changed"):
+        f.worker.create(f.session, objects=SimpleNamespace(root=f.objects.root/"changed"),
+                        keep_copies=1, cutover_capture=f.request)
+    with pytest.raises(RuntimeError, match="cutover_request_changed"):
+        f.worker.create(f.session, objects=f.objects, keep_copies=1, cutover_capture=CutoverCapture(
+            f.request.generation, f.request.expected_previous_generation, 101))
+    path = f.worker.root/f.request.generation/"complete.json"
+    receipt = json.loads(path.read_text())
+    receipt["archive_bytes"] = 1
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(RuntimeError, match="cutover_request_changed"):
+        f.worker.create(f.session, objects=f.objects, keep_copies=1, cutover_capture=f.request)
+    assert len(f.backups) == 2 and not f.pruning
+
+
+@pytest.mark.parametrize("failure", ["qt_partial", "native_partial", "missing_predecessor", "native_predecessor"])
+def test_named_capture_refuses_unowned_or_partial_state_before_native_mutation(cutover_worker, failure):
+    f = cutover_worker
+    if failure == "qt_partial":
+        (f.worker.root/("."+f.request.generation)).mkdir(mode=0o700)
+    elif failure == "native_partial":
+        (f.native/"20261118-000000F_20261118-000001I").mkdir()
+    elif failure == "missing_predecessor":
+        f.request = CutoverCapture(f.request.generation, "copy_"+"3"*32, 100)
+    else:
+        f.backups[0]["annotation"]["qt-generation"] = "copy_"+"3"*32
+    with pytest.raises(RuntimeError, match="incremental_cutover_"):
+        f.worker.create(f.session, objects=f.objects, keep_copies=1, cutover_capture=f.request)
+    assert not f.calls and not f.pruning
+    assert (f.previous/"complete.json").read_bytes() == f.original_receipt
+
+
+def test_named_failed_attempt_preserves_evidence_and_never_restarts(cutover_worker):
+    f = cutover_worker
+    f.fail.append(True)
+    with pytest.raises(RuntimeError, match="injected_native_failure"):
+        f.worker.create(f.session, objects=f.objects, keep_copies=1, cutover_capture=f.request)
+    partial = f.worker.root/("."+f.request.generation)
+    assert (partial/"owner.json").is_file()
+    calls = deepcopy(f.calls)
+    with pytest.raises(RuntimeError, match="partial_requires_inspection"):
+        f.worker.create(f.session, objects=f.objects, keep_copies=1, cutover_capture=f.request)
+    assert f.calls == calls and not f.pruning
+    assert (f.previous/"complete.json").read_bytes() == f.original_receipt
+
+
+@pytest.mark.parametrize("generation,previous,reserve", [
+    ("../copy_x", "copy_"+"1"*32, 100), ("copy_"+"1"*32, "copy_"+"1"*32, 100),
+    ("copy_"+"2"*32, "copy_"+"1"*32, 0), ("copy_"+"2"*32, "copy_"+"1"*32, True),
+])
+def test_cutover_request_requires_explicit_distinct_names_and_source_floor(generation, previous, reserve):
+    with pytest.raises(ValueError, match="cutover_request_invalid"):
+        CutoverCapture(generation, previous, reserve)

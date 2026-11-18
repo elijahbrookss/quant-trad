@@ -7,6 +7,7 @@ whose shared archive-expiry fence predates the physical backup.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -33,6 +34,24 @@ from .recovery_copies import (
 _LABEL = re.compile(r"[0-9]{8}-[0-9]{6}F(?:_[0-9]{8}-[0-9]{6}[DI])?")
 _VERSION = "qt.encrypted_recovery_pair.v1"
 _PREPARED = "qt.encrypted_recovery_repository.v1"
+_CUTOVER_REQUEST = "qt.cutover_capture_request.v1"
+
+
+@dataclass(frozen=True)
+class CutoverCapture:
+    """One operator-selected capture; never part of saved maintenance policy."""
+
+    generation: str
+    expected_previous_generation: str
+    source_reserve_bytes: int
+
+    def __post_init__(self):
+        if (any(not isinstance(name, str) or not _NAME.fullmatch(name)
+                for name in (self.generation, self.expected_previous_generation))
+                or self.generation == self.expected_previous_generation
+                or type(self.source_reserve_bytes) is not int
+                or not 1 <= self.source_reserve_bytes <= 2**63 - 1):
+            raise ValueError("incremental_cutover_request_invalid")
 
 
 def _private_bytes(path, *, limit):
@@ -346,13 +365,84 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
         points = self.completed()
         if not points:
             return None
-        receipt = points[-1][2]
+        return self._archive_snapshot(points[-1][2], snapshots)
+
+    def _archive_snapshot(self, receipt, snapshots):
         expected = {"id": receipt["archive_snapshot"],
                     "hostname": "qt-"+hashlib.sha256(self.identity.encode()).hexdigest()[:32],
                     "tags": [receipt["name"]]}
         if [s for s in snapshots if s["id"] == expected["id"]] != [expected]:
             raise RuntimeError("incremental_archive_parent_not_owned_or_available")
         return expected["id"]
+
+    @contextmanager
+    def _capture_temp(self, request):
+        if request is None:
+            yield
+            return
+        _private_directory(self.root, self.device)
+        previous = self.env.get("TMPDIR")
+        self.env["TMPDIR"] = str(self.root)
+        try:
+            yield
+        finally:
+            if previous is None:
+                self.env.pop("TMPDIR", None)
+            else:
+                self.env["TMPDIR"] = previous
+
+    def _cutover_state(self, request, backups, snapshots):
+        points = self.completed()
+        by_name = {receipt["name"]: (directory, receipt) for _, directory, receipt in points}
+        if request.expected_previous_generation not in by_name:
+            raise RuntimeError("incremental_cutover_predecessor_missing")
+        if any(self.root.glob(".copy_*")):
+            raise RuntimeError("incremental_cutover_partial_requires_inspection")
+        # Native incr backups cannot resume. Refuse unfinished native attempts
+        # before pgBackRest could remove them while starting another backup.
+        native = self.root / "database" / "backup" / "qt"
+        if (native.resolve(strict=True) != native or native.stat().st_dev != self.device
+                or any(path.is_symlink() or not path.is_dir()
+                       for path in native.iterdir() if _LABEL.fullmatch(path.name))
+                or {path.name for path in native.iterdir() if _LABEL.fullmatch(path.name)}
+                != {backup["label"] for backup in backups}):
+            raise RuntimeError("incremental_cutover_native_partial_requires_inspection")
+        previous_directory, previous = by_name[request.expected_previous_generation]
+        previous_bytes = _private_bytes(previous_directory / "complete.json", limit=16384)
+        if json.loads(previous_bytes) != previous:
+            raise RuntimeError("incremental_cutover_predecessor_changed")
+        binding = {
+            "schema_version": _CUTOVER_REQUEST, "generation": request.generation,
+            "expected_previous_generation": request.expected_previous_generation,
+            "source_reserve_bytes": request.source_reserve_bytes,
+            "database_identity": self.identity, "filesystem_uuid": self.target.filesystem_uuid,
+            "previous_receipt_sha256": hashlib.sha256(previous_bytes).hexdigest(),
+        }
+        prior = [backup for backup in backups if backup["label"] == previous["database_label"]]
+        if (len(prior) != 1
+                or prior[0].get("annotation", {}).get("qt-generation") != previous["name"]):
+            raise RuntimeError("incremental_cutover_native_predecessor_changed")
+        self._archive_snapshot(previous, snapshots)
+        if request.generation in by_name:
+            directory, receipt = by_name[request.generation]
+            receipt_bytes = _private_bytes(directory / "complete.json", limit=16384)
+            if (json.loads(receipt_bytes) != receipt
+                    or json.loads(_private_bytes(directory / "cutover-request.json", limit=4096))
+                    != binding | {"complete_receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest()}):
+                raise RuntimeError("incremental_cutover_request_changed")
+            selected = [backup for backup in backups if backup["label"] == receipt["database_label"]]
+            if (len(selected) != 1 or receipt["database_type"] != "incr"
+                    or selected[0].get("type") != "incr" or selected[0].get("prior") != previous["database_label"]
+                    or selected[0].get("annotation", {}).get("qt-generation") != request.generation
+                    or receipt["tools"]["pgbackrest"] != "pgBackRest 2.59.3"):
+                raise RuntimeError("incremental_cutover_completed_request_changed")
+            self._archive_snapshot(receipt, snapshots)
+            return previous, binding, receipt
+        if (not backups or points[-1][2]["name"] != request.expected_previous_generation
+                or backups[-1]["label"] != previous["database_label"]
+                or any(backup.get("annotation", {}).get("qt-generation") == request.generation for backup in backups)):
+            raise RuntimeError("incremental_cutover_predecessor_not_latest")
+        return previous, binding, None
 
     def _assert_fence(self, session):
         from .repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
@@ -476,28 +566,43 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
         for partial in sorted(self.root.glob(".copy_*")):
             self._remove(partial)
 
-    def create(self, session, *, objects, keep_copies, pg_dump=None):
+    def create(self, session, *, objects, keep_copies, pg_dump=None, cutover_capture=None):
         """Do not query session before native backup end; its fence is already held."""
         if type(keep_copies) is not int or not 1 <= keep_copies <= 30:
             raise ValueError("recovery_keep_copies_invalid")
         if session.in_transaction():
             raise RuntimeError("incremental_requires_unqueried_snapshot_session")
-        with self.lock():
-            self._prune(keep_copies)
+        if cutover_capture is not None and not isinstance(cutover_capture, CutoverCapture):
+            raise ValueError("incremental_cutover_request_invalid")
+        with self.lock(), self._capture_temp(cutover_capture):
+            if cutover_capture is None:
+                self._prune(keep_copies)
             backups = self._native_backups()
-            self._run(self._rs("unlock"))
-            parent = self._archive_parent(self._native_snapshots())
+            if cutover_capture is None:
+                self._run(self._rs("unlock"))
+            snapshots = self._native_snapshots()
+            if cutover_capture is not None:
+                previous, binding, replay = self._cutover_state(cutover_capture, backups, snapshots)
+                if replay is not None:
+                    if replay["archive_source_root"] != str(objects.root):
+                        raise RuntimeError("incremental_cutover_request_changed")
+                    return replay
+                parent = previous["archive_snapshot"]
+            else:
+                parent = self._archive_parent(snapshots)
             versions = {
                 "pgbackrest": self._run([str(self.pgbackrest), "version"]).decode().strip(),
                 "restic": self._run([str(self.restic), "version"]).decode().strip(),
             }
-            if (versions["pgbackrest"] != "pgBackRest 2.59.1"
+            if (versions["pgbackrest"] != "pgBackRest 2.59.3"
                     or not versions["restic"].startswith("restic 0.19.1 ")):
                 raise RuntimeError("incremental_unqualified_tool_version")
             chain = _root_label(backups[-1]["label"]) if backups else None
             chain_size = sum(_root_label(b["label"]) == chain for b in backups)
             kind = "full" if not backups or chain_size >= self.config.max_chain_backups else "incr"
-            name = "copy_"+uuid4().hex
+            if cutover_capture is not None:
+                kind = "incr"
+            name = cutover_capture.generation if cutover_capture is not None else "copy_"+uuid4().hex
             partial = self.root/("."+name)
             partial.mkdir(mode=0o700)
             _json_write(partial/"owner.json", {
@@ -508,10 +613,17 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
             _sync(self.root)
             start = monotonic()
             self._run(self._br("--type="+kind, "--annotation=qt-generation="+name, "backup"))
-            selected = [b for b in self._native_backups()
+            after = self._native_backups()
+            selected = [b for b in after
                         if b.get("annotation", {}).get("qt-generation") == name]
             if len(selected) != 1:
                 raise RuntimeError("incremental_native_backup_selection_invalid")
+            if cutover_capture is not None and (
+                    selected[0].get("type") != "incr" or selected[0].get("prior") != previous["database_label"]
+                    or len(after) != len(backups) + 1
+                    or {b["label"]: b for b in after if b["label"] != selected[0]["label"]}
+                    != {b["label"]: b for b in backups}):
+                raise RuntimeError("incremental_cutover_native_result_changed")
             database_seconds = monotonic()-start
             # This first snapshot query happens AFTER the physical endpoint.
             # Expiry remained fenced for the entire operation.
@@ -550,11 +662,17 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
             (partial/"objects.jsonl").unlink()
             (partial/"files.list").unlink()
             _json_write(partial/"complete.json", receipt)
+            if cutover_capture is not None:
+                _json_write(partial/"cutover-request.json", binding | {
+                    "complete_receipt_sha256": hashlib.sha256(
+                        _private_bytes(partial/"complete.json", limit=16384)).hexdigest(),
+                })
             _sync(partial)
             self.check()
             partial.rename(self.root/name)
             _sync(self.root)
-            self._prune(keep_copies)
+            if cutover_capture is None:
+                self._prune(keep_copies)
             return receipt
 
 
