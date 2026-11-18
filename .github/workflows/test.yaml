@@ -695,7 +695,7 @@ jobs:
           PG_DSN: postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_contracts
           RUN_DB_TESTS: '1'
           QT_DB_TEST_ISOLATED: '1'
-          QT_SCHEMA_TEMPLATE_PILOT: '1'
+          QT_SCHEMA_TEMPLATE_PILOT: '0'
           QT_LOGGING_LOKI_URL: ''
           QT_LOGGING_DEBUG: 'false'
         run: |

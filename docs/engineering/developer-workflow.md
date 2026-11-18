@@ -191,16 +191,16 @@ text or credentials. These settings apply only to the test stack.
 
 ### Exact-source CI equivalence for broad DB/recovery handoff
 
-The broad PostgreSQL contract step explicitly enables `QT_SCHEMA_TEMPLATE_PILOT=1`
-with `SOURCE_REVISION` from its actual checkout and `SOURCE_TREE_HASH` derived from
-that commit. Reuse is restricted to the 13 reviewed exact node IDs in
-`migration_test_support._PILOT_CASES`; every other case retains a fresh database.
-Separate clean-bootstrap, namespace and recovery steps remain fresh. This does
-not expand eligibility or turn the paired timing comparison into a whole-CI
-performance guarantee. Diagnose the same cases with fresh setup using
-`QT_SCHEMA_TEMPLATE_PILOT=0 ./scripts/ci/run_test_suite.sh db <exact-node-IDs>`,
-or omit node IDs for the ordinary broad fresh-mode suite. The runner retains
-source identity and isolation checks in both modes.
+The broad PostgreSQL contract step uses fresh databases with
+`QT_SCHEMA_TEMPLATE_PILOT=0`, `SOURCE_REVISION` from its actual checkout, and
+`SOURCE_TREE_HASH` derived from that commit. The optional template pilot rejected
+two fixtures during the November 17–18 UTC CI run because its saved catalog or
+day no longer matched. Keep this timing optimization outside cutover
+qualification; do not relax its checks to obtain a passing run. Clean-bootstrap,
+namespace and recovery steps also remain fresh. Diagnose exact cases using
+`./scripts/ci/run_test_suite.sh db <exact-node-IDs>`, or omit node IDs for the
+ordinary broad fresh-mode suite. The runner retains source identity and
+isolation checks.
 
 
 Run focused local checks while iterating. Once the final integrated commit has
