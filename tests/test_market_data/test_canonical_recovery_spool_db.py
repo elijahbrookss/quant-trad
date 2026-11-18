@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from time import monotonic
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -39,12 +40,13 @@ def _restore_dump(conn, restore_binary, dump, ordered):
     url = conn.engine.url
     env = {"PATH": os.defpath, "LC_ALL": "C", "HOME": "/tmp", "PGHOST": url.host,
            "PGPORT": str(url.port or 5432), "PGDATABASE": url.database, "PGUSER": url.username,
-           "PGPASSWORD": url.password or "", "PGCONNECT_TIMEOUT": "5"}
+           "PGPASSWORD": url.password or "", "PGCONNECT_TIMEOUT": "5",
+           "PGOPTIONS": "-c lock_timeout=5s -c statement_timeout=30s"}
     assert url.host in ("127.0.0.1", "timescaledb") and url.database.startswith("qt_migration_")
 
-    def restore(*args):
+    def restore(*args, timeout=30):
         result = subprocess.run([restore_binary, *args, dump], env=env, stdin=subprocess.DEVNULL,
-                                text=True, capture_output=True, timeout=30)
+                                text=True, capture_output=True, timeout=timeout)
         assert result.returncode == 0, result.stderr
         return result.stdout
 
@@ -58,7 +60,9 @@ def _restore_dump(conn, restore_binary, dump, ordered):
         options = ("--exit-on-error", "--no-owner", "--no-privileges", "--no-tablespaces", "--dbname", url.database)
         restore(*options, "--section=pre-data")
         restore(*options, "--section=data", "--use-list", ordered)
-        restore(*options, "--section=post-data")
+        started = monotonic()
+        restore(*options, "--section=post-data", timeout=120)
+        print(f"RECOVERY_SPOOL_POST_DATA elapsed_seconds={monotonic() - started:.3f}")
     finally:
         conn.execute(text("SELECT timescaledb_post_restore()"))
         conn.commit()
@@ -155,9 +159,10 @@ def _seal_trade(root, claim, *, trade_id):
 def test_logical_copy_restore_replays_retained_acknowledged_provider_spool(storage, tmp_path, monkeypatch):
     if make_url(storage.dsn).host not in ("127.0.0.1", "timescaledb"):
         pytest.skip("requires dedicated isolated PostgreSQL endpoint")
-    pg_dump, pg_restore = (shutil.which(name) for name in ("pg_dump", "pg_restore"))
-    if not pg_dump or not pg_restore:
-        pytest.skip("requires native PostgreSQL dump and restore clients")
+    # Use the installed native clients, not the distribution's PATH wrapper.
+    pg_dump, pg_restore = (Path("/usr/lib/postgresql/15/bin") / name
+                           for name in ("pg_dump", "pg_restore"))
+    assert pg_dump.is_file() and pg_restore.is_file(), "requires native PostgreSQL 15 dump and restore clients"
     target = tmp_path / "copy-filesystem"
     target.mkdir()
     udev = tmp_path / "udev"
