@@ -114,6 +114,8 @@ def cold_layout_active(session) -> bool:
     """Honor the catalog only after the explicit, approved authority change."""
     if not isinstance(session, (Session, Connection)):
         return False
+    if session.scalar(text("SELECT to_regclass('market.fact_storage_state')")) is None:
+        return False
     return bool(session.execute(text("""
         SELECT EXISTS (
             SELECT 1 FROM market.fact_storage_state

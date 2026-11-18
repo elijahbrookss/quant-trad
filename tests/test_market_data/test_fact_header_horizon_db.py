@@ -15,11 +15,50 @@ from portal.backend.db.fact_series_day_schema import (
     assert_fact_series_day_contract, install_fact_series_day_functions,
 )
 from portal.backend.service.storage.repos import market_data as repository
+from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
+from portal.backend.service.storage.repos.cold_history import cold_layout_active
 from portal.backend.service.storage.repos.fact_storage import CANONICAL_RANGE_ROW_FROM
 from tests.test_market_data.migration_test_support import fresh_migration_database
 
 pytestmark = pytest.mark.db
 FIRST = date(2024, 1, 1)
+
+
+@pytest.mark.parametrize("through_session", [False, True], ids=["connection", "session"])
+def test_cold_layout_requires_present_completed_authority_state(through_session):
+    with fresh_migration_database("header_authority", install_extensions=False) as dsn:
+        engine = create_engine(dsn, future=True)
+        try:
+            with engine.begin() as conn:
+                def active():
+                    if through_session:
+                        with Session(conn, join_transaction_mode="create_savepoint") as session:
+                            return cold_layout_active(session)
+                    return cold_layout_active(conn)
+
+                # A pre-storage database has no cold authority catalog yet.
+                assert not active()
+                conn.execute(text("""
+                    CREATE SCHEMA market;
+                    CREATE TABLE market.fact_storage_state (
+                        layout_version text PRIMARY KEY, state text NOT NULL, completed_at timestamptz
+                    );
+                """))
+                assert not active()
+                conn.execute(text("""
+                    INSERT INTO market.fact_storage_state VALUES ('market.fact_storage_tiers.v2','ready',now())
+                """))
+                assert not active()
+                conn.execute(text("""
+                    UPDATE market.fact_storage_state SET layout_version=:layout,state='preparing',completed_at=NULL
+                """), {"layout": COLD_HISTORY_LAYOUT_VERSION})
+                assert not active()
+                conn.execute(text("UPDATE market.fact_storage_state SET state='ready'"))
+                assert not active()
+                conn.execute(text("UPDATE market.fact_storage_state SET completed_at=now()"))
+                assert active()
+        finally:
+            engine.dispose()
 
 
 def _executed_partitions(node, prefix):
