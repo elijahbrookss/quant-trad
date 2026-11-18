@@ -5,7 +5,8 @@ USER root
 RUN apk add --no-cache build-base meson ninja pkgconf openssl-dev libxml2-dev \
     lz4-dev zstd-dev bzip2-dev yaml-dev postgresql15-dev curl
 COPY docker/build-backup-tools.sh /build-backup-tools.sh
-RUN sh /build-backup-tools.sh
+ARG QT_PGBACKREST_VERSION=2.59.1
+RUN QT_PGBACKREST_VERSION=$QT_PGBACKREST_VERSION sh /build-backup-tools.sh
 
 FROM timescale/timescaledb:2.14.2-pg15
 USER root
