@@ -44,7 +44,7 @@ def test_live_diagnostic_runs_closed_read_only_inventory_without_mutation(
         )
     after = _counts(storage, day)
     assert after == before
-    assert receipt["status"] == "passed"
+    assert receipt["status"] == "passed", receipt
     assert receipt["read_only"] is True and receipt["maintenance_authority"] is False
     by_id = {item["case_id"]: item for item in receipt["cases"]}
     assert by_id["reclamation.pinned_ranges"]["outcome"] == "passed"
