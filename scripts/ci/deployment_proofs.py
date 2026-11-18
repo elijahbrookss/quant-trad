@@ -15,6 +15,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 GROUPS = ('alerts', 'lifecycle', 'restore', 'core', *(f'online-{i}' for i in range(6)))
 SOURCE_IMAGES = ('backend', 'frontend', 'frontend-v2', 'terminal', 'storage-test')
+RESTORE_RESULT_COUNT = 4
 ALLOWED_SKIP = 'tests/test_market_data/test_storage_online_controller_db.py::test_controller_prepared_transaction_refuses_without_client'
 SKIP_REASON = 'requires disposable max_prepared_transactions > 0'
 
@@ -239,7 +240,7 @@ def run(root, group, evidence):
                 raise ValueError('missing or duplicate online result')
             validate_result(receipt['results'][0], nodes)
         if group == 'restore':
-            if len(receipt['results']) != 2:
+            if len(receipt['results']) != RESTORE_RESULT_COUNT:
                 raise ValueError('missing restore proof result')
             for result in receipt['results']:
                 if not result.get('nodes'):
@@ -265,7 +266,7 @@ def aggregate(manifest, receipts):
                 or receipt.get('images_before') != images or receipt.get('images_after') != images):
             raise ValueError('unqualified proof receipt: source/image/attempt/status mismatch')
         if receipt['group'] == 'restore':
-            if len(receipt.get('results', [])) != 2:
+            if len(receipt.get('results', [])) != RESTORE_RESULT_COUNT:
                 raise ValueError('missing restore result')
             for result in receipt['results']:
                 if not result.get('nodes'):

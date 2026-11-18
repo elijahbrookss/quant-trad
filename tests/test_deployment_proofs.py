@@ -1,7 +1,9 @@
 from copy import deepcopy
 import importlib.util
+import io
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -29,6 +31,12 @@ spec = importlib.util.spec_from_file_location('deployment_proofs', ROOT / 'scrip
 proof = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proof)
 IDENTITY = {'revision': 'a'*40, 'source_tree_hash': 'b'*64, 'run_id': 12, 'attempt': 2}
+RESTORE_SELECTIONS = (
+    'tests/test_market_data/test_incremental_application_db.py',
+    'tests/test_market_data/test_incremental_raw_placement_db.py',
+    'tests/test_market_data/test_canonical_postwrite_recovery_db.py::test_postwrite_pair_restores_exact_canonical_row_and_raw_archive',
+    'tests/test_market_data/test_canonical_postwrite_recovery_db.py::test_named_wal_anchor_restores_original_layout_at_fenced_endpoint',
+)
 
 
 def result(nodes):
@@ -50,7 +58,7 @@ def packet(monkeypatch):
     receipts = [{'identity': IDENTITY, 'group': group, 'complete': True, 'status': 0,
                  'archive_sha256': 'c'*64, 'images_before': images, 'images_after': images,
                  'results': [result(shards[int(group[-1])])] if group.startswith('online-') else
-                            [result(['restore-current']), result(['restore-raw'])] if group == 'restore' else []}
+                            [result([node]) for node in RESTORE_SELECTIONS] if group == 'restore' else []}
                 for group in proof.GROUPS]
     return manifest, receipts
 
@@ -82,7 +90,8 @@ def test_complete_exact_attempt_can_qualify_and_only_the_explicit_skip_is_allowe
 @pytest.mark.parametrize('fault', ['missing', 'duplicate', 'extra', 'failed', 'cancelled',
     'source', 'attempt', 'run', 'image-before', 'image-after', 'archive', 'no-result',
     'missing-node', 'duplicate-node', 'extra-node', 'missing-phase', 'duplicate-phase',
-    'failed-phase', 'unexpected-skip', 'empty-restore', 'missing-restore'])
+    'failed-phase', 'unexpected-skip', 'empty-restore', 'missing-restore',
+    'extra-restore', 'failed-restore', 'missing-restore-phase', 'duplicate-restore-phase'])
 def test_aggregate_refuses_incomplete_or_mismatched_proofs(monkeypatch, fault):
     manifest, receipts = packet(monkeypatch)
     receipts = deepcopy(receipts)
@@ -106,7 +115,58 @@ def test_aggregate_refuses_incomplete_or_mismatched_proofs(monkeypatch, fault):
     elif fault == 'unexpected-skip': online['results'][0]['reports'][0].update(outcome='skipped', reason='wrong')
     elif fault == 'empty-restore': next(r for r in receipts if r['group']=='restore')['results'][0] = result([])
     elif fault == 'missing-restore': next(r for r in receipts if r['group']=='restore')['results'].pop()
+    elif fault == 'extra-restore': next(r for r in receipts if r['group']=='restore')['results'].append(result(['extra']))
+    elif fault == 'failed-restore': next(r for r in receipts if r['group']=='restore')['results'][0]['exitstatus'] = 1
+    elif fault == 'missing-restore-phase': next(r for r in receipts if r['group']=='restore')['results'][0]['reports'].pop()
+    elif fault == 'duplicate-restore-phase':
+        restore = next(r for r in receipts if r['group']=='restore')['results'][0]
+        restore['reports'].append(deepcopy(restore['reports'][0]))
     with pytest.raises(ValueError): proof.aggregate(manifest, receipts)
+
+
+def test_restore_result_count_matches_the_four_existing_proof_invocations():
+    commands = [shlex.split(line) for line in (ROOT / 'scripts/ci/proof_restore.sh').read_text().splitlines()
+                if line.startswith('./scripts/ci/run_test_suite.sh ')]
+    assert len(commands) == proof.RESTORE_RESULT_COUNT == 4
+    assert [command[2] for command in commands] == list(RESTORE_SELECTIONS)
+    assert all(command[:2] == ['./scripts/ci/run_test_suite.sh', 'incremental-recovery']
+               and command[-2:] == ['-p', 'scripts.ci.proof_pytest'] for command in commands)
+
+
+@pytest.mark.parametrize('count', [0, 2, 3, 4, 5])
+def test_restore_run_requires_every_result_and_preserves_its_receipt(monkeypatch, tmp_path, count):
+    manifest, receipts = packet(monkeypatch)
+    expected = next(receipt for receipt in receipts if receipt['group'] == 'restore')
+    emitted = expected['results'][:count]
+    if count == 5:
+        emitted.append(result(['unexpected']))
+    proof.write(tmp_path / 'proof-manifest.json', manifest)
+    monkeypatch.setattr(proof, 'image_snapshot', lambda _manifest: expected['images_before'])
+
+    def process(command, **kwargs):
+        assert command == ['bash', 'scripts/ci/proof_restore.sh']
+        assert kwargs['env']['QT_CI_PROOF_ROOT'] == str(tmp_path)
+        assert kwargs['env']['QT_CI_TEST_PHASES'] == '1'
+
+        class Process:
+            stdout = io.StringIO(''.join('QT_PROOF_RESULT ' + json.dumps(row) + '\n' for row in emitted))
+
+            def wait(self):
+                return 0
+
+        return Process()
+
+    monkeypatch.setattr(proof.subprocess, 'Popen', process)
+    evidence = tmp_path / 'restore-evidence'
+    if count == 4:
+        proof.run(tmp_path, 'restore', evidence)
+    else:
+        with pytest.raises(ValueError, match='missing restore proof result'):
+            proof.run(tmp_path, 'restore', evidence)
+    receipt = proof.read(evidence / 'receipt.json')
+    assert receipt['complete'] is (count == 4)
+    assert receipt['results'] == emitted and receipt['identity'] == manifest['identity']
+    assert proof.sha(evidence / 'proof.log') == receipt['log_sha256']
 
 
 @pytest.mark.parametrize('field,value', [('identity', {}), ('schema', 'unknown'), ('archive_sha256', ''),
