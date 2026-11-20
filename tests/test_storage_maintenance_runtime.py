@@ -151,7 +151,6 @@ def test_configured_runners_share_database_limits_and_cancellation(tmp_path, mon
     def capture(database, **kwargs):
         seen.append((database, kwargs))
         return {"state": "disabled"}
-    monkeypatch.setattr(runtime, "run_history_maintenance", capture)
     monkeypatch.setattr(runtime, "run_due_local_recovery", capture)
     database = object()
     root = tmp_path/"archive"
@@ -160,14 +159,13 @@ def test_configured_runners_share_database_limits_and_cancellation(tmp_path, mon
     cancelled = lambda: True
     assert runners["service"].use_saved_history_policy
     assert runners["service"].canonical_repository.database is database
-    for key in ("history_runner", "recovery_runner"):
-        assert runners[key](cancelled=cancelled) == {"state": "disabled"}
+    assert set(runners) == {"service", "recovery_runner"}
+    assert runners["recovery_runner"](cancelled=cancelled) == {"state": "disabled"}
     assert all(item[0] is database and item[1]["cancelled"] is cancelled for item in seen)
-    assert seen[0][1]["resource_limits"] == config["history"]
-    assert seen[1][1]["storage_root"] == root
-    assert seen[1][1]["max_bytes"] == config["recovery"]["max_bytes"]
-    assert seen[1][1]["max_objects"] == 10_000_000
-    assert str(seen[1][1]["pg_dump"]) == "/usr/lib/postgresql/15/bin/pg_dump"
+    assert seen[0][1]["storage_root"] == root
+    assert seen[0][1]["max_bytes"] == config["recovery"]["max_bytes"]
+    assert seen[0][1]["max_objects"] == 10_000_000
+    assert str(seen[0][1]["pg_dump"]) == "/usr/lib/postgresql/15/bin/pg_dump"
 
 
 @pytest.mark.parametrize("change", [
@@ -207,8 +205,7 @@ def test_collector_entrypoint_supplies_runners_to_existing_supervisor(tmp_path, 
     from portal.backend.workers import market_data_collector as entry
     path = tmp_path/"limits.json"
     calls = []
-    runners = {"history_runner": lambda **kw: {"state": "disabled"},
-               "recovery_runner": lambda **kw: {"state": "disabled"}}
+    runners = {"recovery_runner": lambda **kw: {"state": "disabled"}}
     def compose(database, **kwargs):
         assert database is entry.db
         assert kwargs == {"storage_root": entry.DEFAULT_STORAGE_ROOT, "limits_path": str(path)}
@@ -216,7 +213,7 @@ def test_collector_entrypoint_supplies_runners_to_existing_supervisor(tmp_path, 
         return runners
     class Supervisor:
         def __init__(self, **kwargs):
-            assert kwargs["history_runner"] is runners["history_runner"]
+            assert "history_runner" not in kwargs
             assert kwargs["recovery_runner"] is runners["recovery_runner"]
             assert kwargs["storage_root"] == entry.DEFAULT_STORAGE_ROOT
         def start(self): calls.append("started")

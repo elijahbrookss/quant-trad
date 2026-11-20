@@ -389,19 +389,6 @@ def test_full_operator_reentry_preserves_original_preparation_deadline(monkeypat
         operation.run_operation_plan(path,execute=True)
 
 
-def test_cli_migrate_uses_local_owner_without_api_client(monkeypatch,operation_file,capsys):
-    from cli import main
-    path,_=operation_file
-    parser=main.build_parser()
-    monkeypatch.setattr(main,"_client",lambda _:pytest.fail("HTTP client opened"))
-    calls=[]
-    def run(path,**kw):calls.append((path,kw));return {"phase":"inspected"}
-    monkeypatch.setattr(operation,"run_operation_plan",run)
-    for tail in ([],["--execute"]):
-        args=parser.parse_args(["storage","migrate","--operation-file",str(path),*tail])
-        assert args.func(args)==0
-    assert calls==[(str(path),{"execute":False}),(str(path),{"execute":True})]
-    assert 'inspected' in capsys.readouterr().out
 
 
 def test_operation_accepts_measured_spool_scan_without_changing_copy_budget():

@@ -1,5 +1,11 @@
 # Portable Single-Node Deployment
 
+Post-cutover releases retain the canonical cold hold and release-ancestry checks.
+They do not dispatch through the retired online-migration receipt/controller
+hooks or route raw-placement commands to maintenance. Historical migration
+recovery procedures require the retained immutable operator capsule.
+
+
 Quant-Trad's V1 deployment preset runs the complete application, market-data,
 research, and observability stack on one Linux host. The host may be an on-prem
 server or an Ubuntu VPS; the runtime contract is the same. Docker Compose owns

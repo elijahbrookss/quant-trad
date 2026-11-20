@@ -167,14 +167,8 @@ def test_forward_requires_both_runtime_preflights_before_private_intent(prepared
     assert not (a.root/forward.STATE).exists() and not a.probes
 
 
-def test_forward_cli_uses_canonical_operator_and_keeps_amendments_separate(prepared, monkeypatch):
-    from cli import main
-    a = prepared; calls=[]
-    monkeypatch.setattr(forward,"publish_package",lambda path,**kwargs:calls.append((path,kwargs)) or {"phase":"inspected"})
-    args=main.build_parser().parse_args(["storage","migrate","--operation-file",str(a.path),
-        "--forward-package-file",str(a.package_path)])
-    assert args.func(args)==0
-    assert calls==[(str(a.path),dict(package_file=str(a.package_path),execute=False))]
+def test_forward_amendments_must_be_separate(prepared):
+    a = prepared
     with pytest.raises(ValueError,match="must_be_separate"):
         operation.run_operation_plan(a.path, forward_package_file=a.package_path, cancel_attempt_file=a.package_path)
 

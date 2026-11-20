@@ -210,16 +210,6 @@ def test_repair_release_refuses_migration_actions_before_reading_inputs(other):
         operation.run_operation_plan("/does-not-exist", repair_release_file="/does-not-exist", **{other:True})
 
 
-def test_repair_cli_is_explicit_and_does_not_open_http_or_dispatch_deployment(monkeypatch):
-    from cli import main
-    monkeypatch.setattr(main, "_client", lambda _:pytest.fail("HTTP client opened"))
-    calls = []
-    monkeypatch.setattr(operation, "run_operation_plan", lambda path, **kwargs:calls.append((path,kwargs)) or {})
-    for execute in (False, True):
-        args = main.build_parser().parse_args(["storage", "migrate", "--operation-file", "/operation.json",
-            "--repair-release-file", "/repair.json", *(["--execute"] if execute else [])])
-        assert args.func(args) == 0
-    assert calls == [("/operation.json", dict(execute=value, repair_release_file="/repair.json")) for value in (False, True)]
 
 
 @pytest.mark.parametrize("failure",[None,"mutable","missing","rebuild"])
@@ -726,11 +716,12 @@ def test_publication_owner_freshly_checks_runtime_and_rechecks_configuration_on_
     assert events==(["runtime"] if not ready else ["runtime","configuration"] if changed else ["runtime","configuration","files"])
 
 
-def test_deployer_checks_configuration_before_start_and_records_after_full_fleet():
+def test_deployer_verifies_fleet_without_retired_online_hooks():
     script=Path("scripts/automation/server_deploy.sh").read_text()
     body=script.split("deploy_release() {",1)[1].split("# All server mutations",1)[0]
-    assert body.index("check_deployment_render") < body.index("compose up --detach")
-    assert body.index("verify_release_image storage-maintenance") < body.index("record_release") < body.index("record_deployment")
+    assert "check_deployment_render" not in body and "record_deployment" not in body
+    assert "storage_online" not in body
+    assert body.index("verify_release_image storage-maintenance") < body.index("record_release")
     assert "require_no_storage_handoff \"${1:-}\"" in script
 
 

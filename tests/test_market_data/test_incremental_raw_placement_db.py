@@ -1,7 +1,7 @@
-"""Packaged raw placement and encrypted restore on disposable native storage.
+"""Historical raw placement and encrypted restore on disposable native storage.
 
-The heartbeat is an explicit test fixture, not a live collector claim. The CLI,
-PostgreSQL/filesystem verifier, native move, backup tools and readers are real.
+The heartbeat is an explicit test fixture, not a live collector claim. The
+retained private adapter, native verifier, move, backup tools and readers are real.
 This does not measure production throughput or authorize host maintenance.
 """
 from datetime import timedelta
@@ -98,7 +98,7 @@ def prepare_retained_raw(storage, tmp_path, monkeypatch):
 
 
 def execute_packaged_move(storage, source_root, tmp_path):
-    """Actual packaged CLI; fixture liveness does not simulate a running loop."""
+    """Retained private adapter; fixture liveness does not simulate a running loop."""
     engine = storage.database._engine
     worker_id = "storage-maintenance:"+socket.gethostname()+":raw-recovery-fixture"
     with engine.begin() as conn:
@@ -123,7 +123,12 @@ def execute_packaged_move(storage, source_root, tmp_path):
     # Production maintenance carries the image identity, not research settings.
     env.pop("SOURCE_REVISION", None)
     env.pop("SOURCE_TREE_HASH", None)
-    command = [sys.executable,"-m","cli.main","--no-audit-log","storage","place-retained-raw","--request-file","-"]
+    # Historical operator adapter stays in the private fixture; normal releases
+    # no longer expose its migration command through qt.
+    command = [sys.executable, "-c", "import json,sys; "
+        "from cli.storage_placement import run_local_placement; "
+        "print(json.dumps(run_local_placement('-', execute='--execute' in sys.argv, "
+        "cancel='--cancel' in sys.argv)))"]
     def invoke(*action):
         result = subprocess.run([*command, *action], input=json.dumps(request), env=env,
             text=True, capture_output=True, timeout=210)

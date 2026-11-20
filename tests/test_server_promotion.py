@@ -53,27 +53,6 @@ def test_lock_refuses_overlapping_operations(tmp_path):
     assert "another server operation" in result.stderr
 
 
-@pytest.mark.parametrize("fault", [None, "layout", "revision", "image"])
-def test_raw_placement_routes_only_to_the_recorded_maintenance_release(tmp_path, fault):
-    result = shell(tmp_path, r'''
-require_runtime() { :; }
-compute_release_material() { QT_RELEASE_REVISION=fixture; }
-recorded_storage_layout() { if test "$FAULT" = layout; then printf ''; else printf ssd-hdd-v1; fi; }
-state_value() { if test "$FAULT" = revision; then printf old; else printf fixture; fi; }
-verify_release_image() { test "$1" = storage-maintenance; test "$FAULT" != image; }
-compose() { printf 'DISPATCH:%s\n' "$@"; }
-run_qt_command storage place-retained-raw --request-file - --execute
-''', env={"FAULT": fault or "none"})
-    if fault:
-        assert result.returncode != 0
-        assert "DISPATCH:" not in result.stdout
-    else:
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.splitlines() == ["DISPATCH:"+arg for arg in (
-            "exec", "-T", "storage-maintenance", "/app/scripts/qt", "storage", "place-retained-raw",
-            "--request-file", "-", "--execute")]
-
-
 def test_ordinary_qt_commands_keep_the_backend_owner(tmp_path):
     result = shell(tmp_path, r'''
 require_runtime() { :; }
@@ -168,74 +147,6 @@ def test_release_reports_hold_even_without_successful_release(tmp_path):
     assert result.returncode == 0
     assert "Storage handoff hold: active" in result.stdout
     assert "No successful release" in result.stdout
-
-
-@pytest.mark.parametrize("marker_name", ["storage-online-preparation.json", "storage-online-request.json", "storage-online-worker.json", "storage-online-final.json"])
-@pytest.mark.parametrize("state_kind", ["partial", "canceled", "expired", "directory", "dangling_link"])
-@pytest.mark.parametrize("entry", ["deploy_release fixture", "recover_promotion", "promote_release fixture"])
-def test_online_intent_blocks_old_runtime_without_live_controller(tmp_path, marker_name, state_kind, entry):
-    state = tmp_path / "state"
-    state.mkdir()
-    marker = state / marker_name
-    if state_kind == "directory":
-        marker.mkdir()
-    elif state_kind == "dangling_link":
-        marker.symlink_to(state / "missing")
-    else:
-        marker.write_text({
-            "partial": "{",
-            "canceled": '{"status":"canceled","container_id":null}',
-            "expired": '{"deadline":1,"container_id":null}',
-        }[state_kind])
-    # No live controller or lock owner: durable intent must independently exclude
-    # old-image deployment/recovery, even before the worker receipt was written.
-    result = shell(tmp_path, "require_runtime() { echo INCORRECT_RUNTIME; }; select_release() { echo INCORRECT_CHECKOUT; }; " + entry)
-    assert result.returncode != 0
-    assert "storage online intent is unresolved" in result.stderr
-    assert "INCORRECT" not in result.stdout
-    assert os.path.lexists(marker)
-
-
-@pytest.mark.parametrize("marker_name", ["storage-online-preparation.json", "storage-online-request.json", "storage-online-worker.json", "storage-online-final.json"])
-@pytest.mark.parametrize("action", ["init-env", "deploy", "rollback", "promote", "recover", "apply-alerts", "preview-alerts", "restore-alerts", "stop", "qt", "credentials-coinbase"])
-def test_mutating_dispatch_refuses_online_intent_before_external_commands(tmp_path, marker_name, action):
-    state = tmp_path / "state"
-    state.mkdir()
-    marker = state / marker_name
-    marker.write_text("{")
-    commands = tmp_path / "commands"
-    commands.mkdir()
-    for name in ("docker", "git"):
-        command = commands / name
-        command.write_text("#!/bin/sh\necho INCORRECT_EXTERNAL_COMMAND\nexit 99\n")
-        command.chmod(0o755)
-    result = subprocess.run(["bash", str(SCRIPT), action], capture_output=True, text=True, timeout=10,
-                            env={**os.environ, "QT_SINGLE_NODE_STATE_ROOT": str(state),
-                                 "PATH": str(commands) + os.pathsep + os.environ["PATH"],
-                                 "QT_SINGLE_NODE_ENV_FILE": str(tmp_path / "nonexistent-synthetic.env")})
-    assert result.returncode != 0
-    assert "storage online intent is unresolved" in result.stderr
-    assert "INCORRECT" not in result.stdout + result.stderr
-    assert marker.read_text() == "{"
-
-
-@pytest.mark.parametrize("marker_name", ["storage-online-preparation.json", "storage-online-request.json", "storage-online-worker.json", "storage-online-final.json"])
-def test_read_only_release_reports_online_intent_without_parsing_private_receipt(tmp_path, marker_name):
-    state = tmp_path / "state"
-    state.mkdir()
-    marker = state / marker_name
-    marker.write_text('{"private":"DO_NOT_PRINT"')
-    (state / "storage-handoff.json").write_text('{"private":"DO_NOT_PRINT"')
-    result = subprocess.run(["bash", str(SCRIPT), "release"], capture_output=True, text=True, timeout=10,
-                            env={**os.environ, "QT_SINGLE_NODE_STATE_ROOT": str(state)})
-    assert result.returncode == 0, result.stderr
-    assert "Storage online receipts retained" in result.stdout
-    assert "Receipt presence alone does not confirm migration or fleet health" in result.stdout
-    assert "Initial preparation receipt retained" in result.stdout
-    assert "Storage handoff hold: active" not in result.stdout
-    assert "No successful release" in result.stdout
-    assert "DO_NOT_PRINT" not in result.stdout + result.stderr
-    assert marker.exists()
 
 
 def fixed_state(tmp_path):
@@ -421,7 +332,6 @@ recover_promotion
     assert "FROZEN_RECOVERY" in result.stdout
 
 
-
 def test_unknown_post_rollout_compatibility_blocks_automatic_old_image_recovery(tmp_path):
     state=tmp_path/"state";state.mkdir()
     (state/"promotion.env").write_text(f"previous_revision={'a'*40}\ncandidate_revision={'b'*40}\nactivation_started=true\ncompatibility_lost=true\n")
@@ -430,7 +340,6 @@ def test_unknown_post_rollout_compatibility_blocks_automatic_old_image_recovery(
     assert "compatibility is unknown" in result.stderr
     assert "INCORRECT_CHECKOUT" not in result.stdout
     assert (state/"promotion.env").exists()
-
 
 
 @pytest.mark.parametrize("fault", ["probe_failed", "probe_timed_out", "drift", "baseline_changed", None])
@@ -499,7 +408,6 @@ if wait "$child"; then exit 91; fi
     assert result.returncode==0,result.stderr
     assert "INCORRECT_SUCCESS" not in result.stdout
     assert 'compatibility_lost=true' in (state/"promotion.env").read_text()
-
 
 
 def test_schema_capture_bounds_docker_exec_without_calling_unbounded_docker(tmp_path):

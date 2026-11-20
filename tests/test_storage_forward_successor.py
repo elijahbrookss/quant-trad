@@ -307,16 +307,9 @@ def test_lookup_host_unfinished_expiry_keeps_intent_and_refuses_move(lookup_oper
     assert "place_lookups" not in a.lookup_actions
 
 
-def test_lookup_cli_and_phase_exclusion(lookup_operation, monkeypatch):
-    from cli import main
-    from scripts.automation import storage_online_keys as owner
+def test_lookup_phase_exclusion(lookup_operation):
     from scripts.automation import storage_online_operation as operation
     a = lookup_operation
-    calls = []
-    monkeypatch.setattr(owner, "place_lookups", lambda path,**kw:calls.append((path,kw)) or {"phase":"inspected"})
-    args = main.build_parser().parse_args(["storage", "migrate", "--operation-file", str(a.previous_path),
-        "--place-forward-lookups-file", str(a.lookup_file)])
-    assert args.func(args) == 0 and calls == [(str(a.previous_path),dict(package_file=str(a.lookup_file), execute=False))]
     for option in ("forward_package_file", "prepare_forward_keys_file", "cancel_attempt_file", "replacement_package_file", "extend_attempt_seconds", "capacity_file"):
         with pytest.raises(ValueError, match="must_be_separate"):
             operation.run_operation_plan(a.previous_path, place_forward_lookups_file=a.lookup_file, **{option:1})

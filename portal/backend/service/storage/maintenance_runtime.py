@@ -8,7 +8,6 @@ from functools import partial
 from pathlib import Path
 
 from .header_resource_claims import _limits
-from .history_maintenance import run_history_maintenance
 from .recovery_maintenance import run_due_local_recovery, validate_recovery_maintenance_limits
 
 _PG15 = Path("/usr/lib/postgresql/15/bin")
@@ -56,7 +55,7 @@ def read_storage_maintenance_limits(limits_path):
 
 
 def storage_maintenance_runners(database, *, storage_root, limits_path=None, require_incremental=False):
-    """Return the existing two runners only when operating limits are explicit."""
+    """Bind canonical retention and recovery to explicit operating limits."""
     if limits_path is None:
         if require_incremental:
             raise ValueError("storage_maintenance_incremental_configuration_required")
@@ -64,8 +63,8 @@ def storage_maintenance_runners(database, *, storage_root, limits_path=None, req
     history, recovery, incremental = read_storage_maintenance_limits(limits_path)
     if require_incremental and incremental is None:
         raise ValueError("storage_maintenance_incremental_configuration_required")
-    # The existing lifecycle service owns payload archival; bind it to the
-    # same saved policy as header movement without adding a second scheduler.
+    # The existing lifecycle service owns canonical retention under the saved
+    # policy; resource limits still bound its HDD staging and SSD WAL.
     from ..market.canonical_retention import CanonicalFactRetentionExecutor
     from ..market.market_storage_lifecycle import MarketStorageLifecycleService
     from .cold_stage_pressure import admit_cold_stage_pressure
@@ -81,8 +80,6 @@ def storage_maintenance_runners(database, *, storage_root, limits_path=None, req
                     temporary_bytes=history["temporary_bytes"], wal_bytes=history["wal_bytes"]),
             ),
             use_saved_history_policy=True),
-        "history_runner": partial(run_history_maintenance, database,
-            pg_controldata=_PG15/"pg_controldata", resource_limits=history),
         "recovery_runner": partial(run_due_local_recovery, database,
             storage_root=storage_root, pg_dump=_PG15/"pg_dump",
             pg_controldata=_PG15/"pg_controldata", incremental=incremental, **recovery),

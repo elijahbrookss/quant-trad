@@ -53,21 +53,17 @@ def test_fixed_overlay_preserves_spool_and_database_paths_without_fallback_mount
     assert "QT_STORAGE_MAINTENANCE_LIMITS_PATH" not in services["market-data-collector"]["environment"]
 
 
-def test_packaged_preserving_operator_is_part_of_runtime_attestation(tmp_path):
+def test_runtime_excludes_retired_migration_operators_and_their_attestation_inputs(tmp_path):
     dockerfile = (ROOT / "portal/backend/Dockerfile").read_text().split("FROM runtime AS storage-test")[0]
     copied = set(re.findall(r"scripts/(?:db|automation)/[a-z_0-9]+\.py", dockerfile))
-    assert copied == set(source_tree_hash.OPERATOR_FILES)
+    assert copied == set()
     assert "COPY scripts/db/ /" not in dockerfile
-    for name in source_tree_hash.OPERATOR_FILES:
+    original = source_tree_hash.working_tree_hash(tmp_path)
+    for name in ("scripts/db/fact_header_v2_copy.py", "scripts/automation/storage_online_worker.py"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("original operator")
-    original = source_tree_hash.working_tree_hash(tmp_path)
-    for name in source_tree_hash.OPERATOR_FILES:
-        path = tmp_path / name
         path.write_text("changed operator")
-        assert source_tree_hash.working_tree_hash(tmp_path) != original
-        path.write_text("original operator")
+        assert source_tree_hash.working_tree_hash(tmp_path) == original
 
 
 def test_fixed_overlay_requires_existing_named_resources():

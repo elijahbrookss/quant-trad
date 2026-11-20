@@ -39,42 +39,7 @@ COPY cli/ /app/cli
 COPY portal/ /app/portal
 COPY scripts/qt /app/scripts/qt
 COPY scripts/provenance/ /app/scripts/provenance/
-# Explicit operator entry points only; no startup migration or manual SQL bundle.
-COPY scripts/db/archive_file_v2_proof.py \
-     scripts/db/archive_root_v2_online.py \
-     scripts/db/fact_header_v2_cancel.py \
-     scripts/db/fact_header_v2_deadline.py \
-     scripts/db/fact_header_v2_online.py \
-     scripts/db/fact_header_v2_online_proof.py \
-     scripts/db/fact_header_v2_handoff.py \
-     scripts/db/fact_header_v2_capture.py \
-     scripts/db/fact_header_v2_copy.py \
-     scripts/db/fact_header_v2_admission.py \
-     scripts/db/fact_header_v2_contract.py \
-     scripts/db/fact_header_forward_keys.py \
-     scripts/db/fact_header_forward_adoption.py \
-     scripts/db/fact_header_forward_placement.py \
-     scripts/db/fact_header_v2_placement.py \
-     scripts/db/fact_header_v2_references.py \
-     scripts/db/raw_mapping_v2_copy.py \
-     scripts/db/raw_mapping_v2_placement.py \
-     scripts/db/archive_root_v2_copy.py \
-     scripts/db/archive_reference_v2_placement.py /app/scripts/db/
-
-# Fixed online worker and preserving recovery dependencies. The held worker
-# drops to the database UID before opening a connection.
-COPY scripts/automation/storage_online_controller.py \
-     scripts/automation/canonical_retention_action.py \
-     scripts/automation/storage_online_terminal.py \
-     scripts/automation/storage_online_keys.py \
-     scripts/automation/storage_online_launch.py \
-     scripts/automation/storage_host_boundary.py \
-     scripts/automation/storage_online_drain.py \
-     scripts/automation/storage_online_worker.py \
-     scripts/automation/storage_online_forward_worker.py \
-     scripts/automation/storage_recovery_prepare.py \
-     scripts/automation/storage_host_prepare.py \
-     scripts/automation/storage_device_audit.py /app/scripts/automation/
+# Migration operators remain in the immutable cutover capsule, not this runtime.
 
 # Image-local scratch supports application and database maintenance identities.
 # This never changes ownership or permissions of mounted host data.
