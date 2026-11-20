@@ -79,7 +79,7 @@ def _later_intake(scope, root, monkeypatch):
     structures, claim, trade_series = _define_trade_stream(scope.storage, monkeypatch)
     segment, event = _seal_trade(root, claim, trade_id="rollback-after-full-cutover")
     _native_recover(structures, root)
-    assert segment.ack_path.exists() and not segment.sealed_path.exists()
+    assert not segment.ack_path.exists() and not segment.sealed_path.exists()
     trades = _admitted_rows(scope.storage.database, trade_series)
     assert len(trades[0]) == len(trades[1]) == 1 and trades[1][0].raw_record_id == event.raw_record_id
     window = {"series_id": trade_series, "start": event.received_at - timedelta(seconds=1),

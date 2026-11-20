@@ -96,7 +96,7 @@ def _exercise_postwrite_pair(storage, tmp_path, monkeypatch, *, raw_scope=None, 
     monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(root))
     segment, record = _seal_trade(root, claim, trade_id="post-activation-recovery")
     _native_recover(structures, root)
-    assert segment.ack_path.is_file() and not segment.sealed_path.exists()
+    assert not segment.ack_path.exists() and not segment.sealed_path.exists()
     expected = _admitted_rows(storage.database, series)
     assert len(expected[0]) == len(expected[1]) == 1
     start = record.received_at - timedelta(seconds=10)

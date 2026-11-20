@@ -192,10 +192,20 @@ def test_logical_copy_restore_replays_retained_acknowledged_provider_spool(stora
     relative_wal = segment.sealed_path.relative_to(source_root)
     saved_wal = tmp_path / "saved-provider-wal"
     shutil.copy2(segment.sealed_path, saved_wal)
-    _native_recover(structures, source_root)
+    saved_ack = tmp_path / "saved-provider-ack"
+    discard = DurableRawSpoolSegment.discard_acknowledged_spool
+
+    def retain_ack_then_discard(current):
+        if current.spool_segment_id == segment.spool_segment_id:
+            shutil.copy2(current.ack_path, saved_ack)
+        discard(current)
+
+    with monkeypatch.context() as capture:
+        capture.setattr(DurableRawSpoolSegment, "discard_acknowledged_spool", retain_ack_then_discard)
+        _native_recover(structures, source_root)
     original_facts, original_archive = _admitted_rows(storage.database, series)
     assert len(original_facts) == len(original_archive) == 1 and not segment.sealed_path.exists()
-    assert segment.ack_path.is_file()
+    assert saved_ack.is_file() and not segment.ack_path.exists()
 
     with fresh_migration_database("spool_rollback") as restored_dsn:
         engine = create_engine(restored_dsn)
@@ -215,7 +225,7 @@ def test_logical_copy_restore_replays_retained_acknowledged_provider_spool(stora
             copied_wal.parent.mkdir(parents=True)
             shutil.copy2(saved_wal, copied_wal)
             # Even an acknowledgement from the later database is only a projection.
-            shutil.copy2(segment.ack_path, copied_wal.parent)
+            shutil.copy2(saved_ack, copied_wal.parent / segment.ack_path.name)
             _native_recover(structures, destination)
             assert not copied_wal.exists()
             new_facts, new_archive = _admitted_rows(restored, series)

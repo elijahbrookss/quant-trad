@@ -412,6 +412,7 @@ class DurableRawSpoolSegment:
         self._current_bytes = 0
         self._record_count = 0
         self._last_receive_ordinal = 0
+        self._acknowledged_spool_discarded = False
         self.recovery_evidence: SpoolRecoveryEvidence | None = None
         if self.sealed_path.exists() and create:
             raise RuntimeError(
@@ -615,9 +616,17 @@ class DurableRawSpoolSegment:
         _fsync_directory(self.ack_path.parent)
 
     def discard_acknowledged_spool(self) -> None:
-        """Remove local WAL bytes only after the DB-commit acknowledgement exists."""
+        """Remove acknowledged local WAL, then its disposable acknowledgement."""
 
         if not self.ack_path.exists():
+            if (
+                self._acknowledged_spool_discarded
+                and not self.open_path.exists()
+                and not self.sealed_path.exists()
+            ):
+                # Retry the directory sync if ACK unlink succeeded before an error.
+                _fsync_directory(self.ack_path.parent)
+                return
             raise RuntimeError(
                 "market_spool_cleanup_forbidden: database acknowledgement is missing"
             )
@@ -639,6 +648,13 @@ class DurableRawSpoolSegment:
             self._current_bytes = 0
             if self.backlog_tracker is not None:
                 self.backlog_tracker._finish_mutation(-discarded_bytes)
+        else:
+            # A previous attempt may have unlinked the WAL before its sync failed.
+            _fsync_directory(self.sealed_path.parent)
+        self._current_bytes = 0
+        self._acknowledged_spool_discarded = True
+        self.ack_path.unlink()
+        _fsync_directory(self.ack_path.parent)
 
     def discard_empty_open(self) -> None:
         """Remove a header-only segment without weakening acknowledged cleanup."""

@@ -191,6 +191,8 @@ def test_object_acknowledgement_requires_verified_immutable_bytes(
     )
     segment.discard_acknowledged_spool()
     assert not segment.sealed_path.exists()
+    assert not segment.ack_path.exists()
+    segment.discard_acknowledged_spool()
 
     same = store.put_verified(
         object_key=acknowledgement.object_key,
@@ -198,6 +200,84 @@ def test_object_acknowledgement_requires_verified_immutable_bytes(
         expected_sha256=acknowledgement.sha256,
     )
     assert same.reused_existing is True
+
+
+@pytest.mark.parametrize(
+    "failure_phase", [None, "sealed-unlink", "sealed-sync", "ack-unlink", "ack-sync"]
+)
+def test_acknowledged_spool_cleanup_is_ordered_and_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_phase: str | None
+) -> None:
+    segment = _segment(tmp_path / "spool")
+    segment.append(_record(segment, 1))
+    segment.seal()
+    segment.mark_database_acknowledged(
+        manifest_id="manifest-a", object_key="raw/example.parquet", object_sha256="a" * 64
+    )
+    real_unlink = Path.unlink
+    real_sync = archive_module._fsync_directory
+    events = []
+    injected = False
+
+    def record_phase(phase):
+        nonlocal injected
+        events.append(phase)
+        if phase == failure_phase and not injected:
+            injected = True
+            raise OSError(f"injected {phase} failure")
+
+    def unlink(path, *args, **kwargs):
+        if path == segment.sealed_path:
+            record_phase("sealed-unlink")
+        elif path == segment.ack_path:
+            record_phase("ack-unlink")
+        return real_unlink(path, *args, **kwargs)
+
+    def sync(directory):
+        assert directory == segment.ack_path.parent
+        record_phase("sealed-sync" if segment.ack_path.exists() else "ack-sync")
+        return real_sync(directory)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(archive_module, "_fsync_directory", sync)
+    if failure_phase is not None:
+        with pytest.raises(OSError, match=f"injected {failure_phase} failure"):
+            segment.discard_acknowledged_spool()
+        assert segment.sealed_path.exists() == (failure_phase == "sealed-unlink")
+        assert segment.ack_path.exists() == (failure_phase != "ack-sync")
+
+    segment.discard_acknowledged_spool()
+    assert not segment.sealed_path.exists()
+    assert not segment.ack_path.exists()
+    assert segment.current_bytes == 0
+    if failure_phase is None:
+        assert events == ["sealed-unlink", "sealed-sync", "ack-unlink", "ack-sync"]
+    segment.discard_acknowledged_spool()
+    segment.sealed_path.write_bytes(b"unacknowledged replacement")
+    with pytest.raises(RuntimeError, match="database acknowledgement is missing"):
+        segment.discard_acknowledged_spool()
+    assert segment.sealed_path.read_bytes() == b"unacknowledged replacement"
+
+
+def test_acknowledged_cleanup_refuses_open_and_never_acknowledged_segments(
+    tmp_path: Path,
+) -> None:
+    segment = _segment(tmp_path / "spool")
+    segment.append(_record(segment, 1))
+    segment.mark_database_acknowledged(
+        manifest_id="manifest-a", object_key="raw/example.parquet", object_sha256="a" * 64
+    )
+    with pytest.raises(RuntimeError, match="open segment cannot be discarded"):
+        segment.discard_acknowledged_spool()
+    assert segment.open_path.exists() and segment.ack_path.exists()
+    segment.close()
+
+    missing = DurableRawSpoolSegment(
+        root=tmp_path / "spool", definition_id="coinbase-btc-trades",
+        session_id="session-a", connection_epoch=0, segment_ordinal=1, create=False,
+    )
+    with pytest.raises(RuntimeError, match="database acknowledgement is missing"):
+        missing.discard_acknowledged_spool()
 
 
 def test_failed_object_upload_leaves_sealed_spool_recoverable(tmp_path: Path) -> None:
@@ -356,6 +436,7 @@ def test_incremental_spool_backlog_tracks_append_seal_and_acknowledged_discard(
 
     assert tracker.current_bytes == 0
     assert not segment.sealed_path.exists()
+    assert not segment.ack_path.exists()
 
 
 def test_incremental_capacity_check_never_walks_the_spool_tree_per_frame(

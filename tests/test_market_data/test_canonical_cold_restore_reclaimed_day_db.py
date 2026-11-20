@@ -72,7 +72,7 @@ def test_restore_one_recurring_reclaimed_day_reuses_verified_payload_for_origina
     structures, claim, trade_series = _define_trade_stream(storage, monkeypatch)
     segment, raw = _seal_trade(tmp_path, claim, trade_id="after-recurring-cold-retirement")
     _native_recover(structures, tmp_path)
-    assert segment.ack_path.exists() and not segment.sealed_path.exists()
+    assert not segment.ack_path.exists() and not segment.sealed_path.exists()
     trade_records = _admitted_rows(storage.database, trade_series)
     assert len(trade_records[0]) == len(trade_records[1]) == 1
     assert trade_records[1][0].raw_record_id == raw.raw_record_id
