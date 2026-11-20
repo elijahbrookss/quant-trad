@@ -130,6 +130,11 @@ database is missing or has drifted objects. Historical SQL under `scripts/db/`
 therefore remains upgrade and migration-lineage evidence for older databases,
 not clean-install input.
 
+Column validation includes every current cold-catalog relation. A missing cold
+table is a schema failure, including on an older v2 database used for rehearsal;
+there is no startup exemption for that layout. This check neither activates
+cold authority nor changes the separate physical HDD placement checks.
+
 Required operational indexes are part of the current schema contract. If they
 are still absent after bootstrap attempts to create model-declared indexes,
 startup fails. Historical SQL files under `scripts/db/` are repair/reference

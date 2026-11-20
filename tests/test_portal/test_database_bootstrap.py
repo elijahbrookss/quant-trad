@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 import pytest
 from sqlalchemy import CheckConstraint
+from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.schema import CreateIndex, CreateSchema, CreateTable
 
 from portal.backend.db import session as db_session
@@ -753,6 +754,29 @@ def test_bootstrap_existing_valid_tables_repairs_missing_model_indexes(monkeypat
     created_indexes = {statement.element.name for statement in connection.executed if isinstance(statement, CreateIndex)}
     assert created_tables == []
     assert REQUIRED_BOT_RUN_EVENT_INDEXES <= created_indexes
+
+
+@pytest.mark.parametrize("table_name", db_session.COLD_TABLE_NAMES)
+def test_column_validation_rejects_missing_cold_catalog_relation(monkeypatch, table_name) -> None:
+    inspector = _Inspector(
+        schemas={"public", "market", "observability_events", "observability_metrics"},
+        tables=[
+            _table_key(table) for table in Base.metadata.sorted_tables
+            if _table_key(table) != ("market", table_name)
+        ],
+    )
+    get_columns = inspector.get_columns
+
+    def reflect_columns(name, schema=None):
+        if (schema, name) == ("market", table_name):
+            raise NoSuchTableError(f"market.{table_name}")
+        return get_columns(name, schema=schema)
+
+    monkeypatch.setattr(inspector, "get_columns", reflect_columns)
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    with pytest.raises(NoSuchTableError, match=rf"market\.{table_name}"):
+        database._assert_columns(connection)
 
 
 def test_bootstrap_fails_loud_on_existing_column_drift_before_index_repair(monkeypatch) -> None:
