@@ -3381,20 +3381,6 @@ def _add_global_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _cmd_storage(args: argparse.Namespace) -> int:
-    if args.storage_command == "place-retained-raw":
-        from cli.storage_placement import run_local_placement
-
-        _print_json(run_local_placement(args.request_file, execute=args.execute, cancel=args.cancel))
-        return 0
-    if args.storage_command == "migrate":
-        from scripts.automation.storage_online_operation import run_operation_plan
-
-        options = {name: getattr(args, name) for name in ("extend_attempt_seconds", "capacity_file", "replacement_package_file", "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file", "place_forward_lookups_file", "reschedule_forward_file", "recover_repositories_file", "repair_release_file")
-                   if getattr(args, name, None) is not None}
-        if getattr(args, "prepare_forward_only", False):
-            options["prepare_forward_only"] = True
-        _print_json(run_operation_plan(args.operation_file, execute=args.execute, **options))
-        return 0
     client = _client(args)
     if args.storage_command == "status":
         result = client.request_json("GET", "/api/storage")
@@ -5078,28 +5064,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     storage = subparsers.add_parser("storage", help="Inspect drives and review server-owned storage policy.")
     storage_sub = storage.add_subparsers(dest="storage_command", required=True)
-    raw_placement = storage_sub.add_parser("place-retained-raw",
-        help="Explicit post-cutover raw placement inside the admitted maintenance container; inspect by default.")
-    raw_placement.add_argument("--request-file", required=True, help="Bounded reviewed JSON file, or '-' for stdin.")
-    raw_action = raw_placement.add_mutually_exclusive_group()
-    raw_action.add_argument("--execute", action="store_true", help="Move the admitted unchanged raw relation; host admission and recovery remain required.")
-    raw_action.add_argument("--cancel", action="store_true", help="Close an unmoved intent after proving rollback; never reverse a completed move.")
-    raw_placement.set_defaults(func=_cmd_storage)
-    migration = storage_sub.add_parser("migrate", help="Inspect or execute a prepared local host migration plan; final release checks remain separate.")
-    migration.add_argument("--operation-file", required=True, help="Private fixed SSD/HDD operation JSON on this Linux host.")
-    migration.add_argument("--execute", action="store_true", help="Perform the admitted preserving migration; default is read-only inspection.")
-    migration.add_argument("--extend-attempt-seconds", type=int, help="Explicit total capture budget amendment, at most 96 hours; requires a retired background worker and fresh capacity evidence.")
-    migration.add_argument("--capacity-file", help="Private measured capacity forecast bound to the original plan and amended absolute horizon.")
-    migration.add_argument("--replacement-package-file", help="Explicit qualified package replacement for a retired worker before its first header page; preserves capture, clocks, source fleet and budgets.")
-    migration.add_argument("--cancel-attempt-file", help="Inspect or execute preserving terminal cancellation with an attested package; retains the original attempt and all copied data, including after expiry.")
-    migration.add_argument("--forward-package-file", help="Inspect or publish a separate forward package after verified cancellation; preserves the original plan and grants no worker start or source stop.")
-    migration.add_argument("--prepare-forward-keys-file", help="Inspect or prepare only the two forward keys using a qualified candidate package; no publication, adoption or source stop.")
-    migration.add_argument("--place-forward-lookups-file", help="Inspect or place the three retained lookup indexes on SSD before successor publication; no adoption or source stop.")
-    migration.add_argument("--reschedule-forward-file", help="Inspect or publish one stopped-worker schedule/package change while preserving current forward proof and its original deadline; no launch or source stop.")
-    migration.add_argument("--recover-repositories-file", help="Inspect or explicitly continue a confirmed committed switch after the known missing recovery-config failure; preserves the failed attempt and never replays the database migration.")
-    migration.add_argument("--repair-release-file", help="Admit an exact software repair after completed cutover and stopped maintenance; preserves storage bindings and incomplete recovery status. Does not deploy or replay migration.")
-    migration.add_argument("--prepare-forward-only", action="store_true", help="With --execute and a published forward plan, complete online preparation and retire the worker before source stop; preserves adoption and its original deadline.")
-    migration.set_defaults(func=_cmd_storage)
     storage_status = storage_sub.add_parser("status")
     storage_status.set_defaults(func=_cmd_storage)
     storage_enroll = storage_sub.add_parser("enroll", help="Enroll a host-prepared target by ID.")

@@ -329,17 +329,6 @@ def test_reschedule_is_separate_from_other_operations(tmp_path,option):
             **{option:30 if option=="extend_attempt_seconds" else "other.json"})
 
 
-def test_reschedule_cli_uses_local_operator_without_http(monkeypatch,tmp_path):
-    from cli import main
-    monkeypatch.setattr(main,"_client",lambda _:pytest.fail("HTTP client opened"))
-    calls=[]
-    monkeypatch.setattr(operation,"run_operation_plan",lambda path,**kw:calls.append((path,kw)) or {})
-    path,package=tmp_path/"operation.json",tmp_path/"reschedule.json"
-    for execute in (False,True):
-        args=main.build_parser().parse_args(["storage","migrate","--operation-file",str(path),
-            "--reschedule-forward-file",str(package),*(["--execute"] if execute else [])])
-        assert args.func(args)==0
-    assert calls==[(str(path),dict(execute=value,reschedule_forward_file=str(package))) for value in (False,True)]
 
 
 @pytest.mark.parametrize("rescheduling", ["package"], indirect=True)

@@ -869,11 +869,6 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
         assert reader.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
         assert reader.read_facts(series_id=storage.series_id, start=start, end=end)[0].fact.payload["raw_rate"] == "0.2"
         assert reader.read_facts(series_id=retained_series, start=start, end=end)[0].fact == storage.fact
-        from portal.backend.service.storage.history_maintenance import _prepare as prepare_header_move
-
-        assert prepare_header_move(restarted, pg_controldata=None, limits={}, cancelled=None) == {
-            "state": "disabled", "reason": "canonical_cold_authority",
-        }
         retention = PostgresCanonicalFactRetentionRepository(database=restarted).plan(
             policy=CanonicalFactRetentionPolicy(), storage_root=new_store.root,
         )

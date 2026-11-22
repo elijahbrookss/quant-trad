@@ -694,17 +694,9 @@ show_release() {
   if test -e "$state_root/canonical-cold-hold.json" || test -L "$state_root/canonical-cold-hold.json"; then
     echo "Canonical cold cutover hold is active. Reconcile its database and runtime outcome before deployment."
   fi
-  if storage_online_pending; then
-    echo "Storage online receipts retained; deployment admission checks the terminal handoff."
-    echo "Receipt presence alone does not confirm migration or fleet health."
-  fi
   if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
-    if storage_online_pending; then
-      echo "Initial preparation receipt retained; exact terminal admission determines deployment access."
-    else
-      echo "Storage handoff hold: active; ordinary deployment/recovery is blocked."
-      echo "Use the preserving storage procedure to reconcile database and runtime state."
-    fi
+    echo "Storage handoff hold: active; ordinary deployment/recovery is blocked."
+    echo "Use the preserving storage procedure to reconcile database and runtime state."
   fi
   if ! test -f "$state_file"; then
     echo "No successful release has been recorded at $state_file"
@@ -912,18 +904,7 @@ run_qt_command() {
   require_runtime
   compute_release_material
   test "$#" -gt 0 || die "qt action requires at least one qt argument"
-  local service=backend
-  if test "${1:-}" = storage && test "${2:-}" = place-retained-raw; then
-    test "$(recorded_storage_layout)" = ssd-hdd-v1 \
-      || die "raw placement requires the deployed SSD/HDD layout"
-    test "$(state_value current_revision)" = "$QT_RELEASE_REVISION" \
-      || die "raw placement requires the recorded deployed checkout"
-    verify_release_image storage-maintenance
-    service=storage-maintenance
-  fi
-  # The qt dispatch already holds the existing host deployment lock. Keep stdin
-  # for the bounded request; never mount source into an older runtime image.
-  compose exec -T "$service" /app/scripts/qt "$@"
+  compose exec -T backend /app/scripts/qt "$@"
 }
 
 deploy_release() {
@@ -956,17 +937,6 @@ deploy_release() {
   fi
   # Building can take minutes. Recheck before replacing any running services.
   validate_storage_root
-  if storage_online_pending; then
-    compose config --format json | PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
-import json, sys
-from scripts.automation.storage_online_release import check_deployment_render
-raw=sys.stdin.read(524289)
-if len(raw.encode()) > 524288:
-    raise RuntimeError("storage_online_release_render_too_large")
-check_deployment_render(sys.argv[1], environment_path=sys.argv[2], repository=sys.argv[3],
-    revision=sys.argv[4], source_hash=sys.argv[5], model=json.loads(raw))
-' "$state_root" "$env_file" "$repo_root" "$QT_RELEASE_REVISION" "$QT_SOURCE_TREE_HASH"
-  fi
   if test "$routine_active" = true; then
     # Recheck resolved settings, private file/bind bytes and the current runtime
     # immediately before the first replacement; never fold edits into recovery.
@@ -1002,13 +972,6 @@ check_deployment_render(sys.argv[1], environment_path=sys.argv[2], repository=sy
   fi
   compose ps
   record_release
-  if storage_online_pending; then
-    PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 - "$state_root" "$env_file" "$QT_RELEASE_REVISION" "$QT_SOURCE_TREE_HASH" <<'PY'
-import sys
-from scripts.automation.storage_online_release import record_deployment
-record_deployment(sys.argv[1], environment_path=sys.argv[2], revision=sys.argv[3], source_hash=sys.argv[4])
-PY
-  fi
   show_release
 }
 
@@ -1021,19 +984,6 @@ acquire_deployment_lock() {
   mkdir -p "$state_root"
   exec 9>"$state_root/deployment.lock"
   flock --exclusive --nonblock 9 || die "another server operation holds the deployment lock"
-}
-
-# A lost controller releases the process lock, not the durable migration intent.
-# The request precedes the worker receipt; neither expiry nor SQL cancellation
-# proves that an old runtime/recipe can safely serve retained or relocated data.
-storage_online_pending() {
-  local marker
-  for marker in storage-online-preparation.json storage-online-request.json storage-online-worker.json storage-online-final.json; do
-    if test -e "$state_root/$marker" || test -L "$state_root/$marker"; then
-      return 0
-    fi
-  done
-  return 1
 }
 
 require_cold_release_ancestry() {
@@ -1056,16 +1006,6 @@ print(compatible_release_floor(Path(sys.argv[1])))
 require_no_storage_handoff() {
   if test -e "$state_root/canonical-cold-hold.json" || test -L "$state_root/canonical-cold-hold.json"; then
     die "canonical cold cutover hold is active; reconcile the exact database and runtime outcome"
-  fi
-  if storage_online_pending; then
-    PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 - "$state_root" "$env_file" "$repo_root" "${action:-}" "${1:-}" <<'PY' || die "storage online intent is unresolved; preserve receipts and reconcile the database, mounts and runtime before resuming server operations"
-import sys
-from scripts.automation.storage_online_release import admit_deployment
-admit_deployment(sys.argv[1], environment_path=sys.argv[2], repository=sys.argv[3], action=sys.argv[4], revision=sys.argv[5])
-PY
-    # The terminal grant also verifies the exact retained initial hold. A separate
-    # or changed legacy hold cannot pass that admission; no marker is removed.
-    return 0
   fi
   if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
     die "storage handoff hold is active; reconcile the preserving storage procedure before resuming server operations"

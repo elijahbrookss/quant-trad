@@ -141,13 +141,8 @@ def test_terminal_intent_blocks_normal_migration_and_amendments(terminal_attempt
     with pytest.raises(RuntimeError,match="terminal_owner"):a.run()
 
 
-def test_cli_terminal_option_is_separate_and_read_only_by_default(terminal_attempt,monkeypatch):
-    from cli import main
-    a=terminal_attempt;calls=[]
-    monkeypatch.setattr(terminal,"cancel_operation",lambda path,**kw:calls.append((path,kw)) or {"phase":"inspected"})
-    args=main.build_parser().parse_args(["storage","migrate","--operation-file",str(a.path),"--cancel-attempt-file",str(a.package_path)])
-    assert args.func(args)==0
-    assert calls==[(str(a.path),dict(package_file=str(a.package_path),execute=False))]
+def test_terminal_amendments_must_be_separate(terminal_attempt):
+    a = terminal_attempt
     with pytest.raises(ValueError,match="must_be_separate"):
         operation.run_operation_plan(a.path,cancel_attempt_file=a.package_path,replacement_package_file=a.package_path)
 

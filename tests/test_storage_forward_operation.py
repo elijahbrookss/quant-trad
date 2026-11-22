@@ -320,17 +320,6 @@ def test_preparation_only_rejects_legacy_driver_before_launch(prepared_driver, f
     assert not d.events
 
 
-def test_preparation_only_cli_uses_local_operation_without_http(monkeypatch, tmp_path):
-    from cli import main
-    monkeypatch.setattr(main, "_client", lambda _:pytest.fail("HTTP client opened"))
-    calls = []
-    monkeypatch.setattr(operation, "run_operation_plan", lambda path, **kw:calls.append((path,kw)) or {})
-    path = tmp_path/"forward.json"
-    for execute in (False, True):
-        args = main.build_parser().parse_args(["storage", "migrate", "--operation-file", str(path),
-            "--prepare-forward-only", *(["--execute"] if execute else [])])
-        assert args.func(args) == 0
-    assert calls == [(str(path), dict(execute=e, prepare_forward_only=True)) for e in (False, True)]
 
 
 

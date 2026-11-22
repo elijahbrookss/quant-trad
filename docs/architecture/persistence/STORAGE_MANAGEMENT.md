@@ -126,7 +126,6 @@ code_paths:
   - portal/backend/service/storage/header_resource_claims.py
   - portal/backend/service/storage/recovery_copies.py
   - portal/backend/service/storage/recovery_maintenance.py
-  - portal/backend/service/storage/history_maintenance.py
   - portal/backend/service/storage/maintenance_status.py
   - portal/backend/service/storage/maintenance_runtime.py
   - portal/backend/service/storage/retention_observability.py
@@ -167,6 +166,14 @@ code_paths:
   - docker/grafana/storage-metrics/capacity-database-growth.json
 ---
 # Storage Management
+
+After the canonical cold cutover, normal releases exclude the online migration
+operators and the `qt storage migrate` / `place-retained-raw` commands. The old
+automatic header-relocation runner is retired; recurring canonical retention
+and encrypted recovery remain active. The movement health field reports
+`disabled` with reason `canonical_cold_authority`. Migration procedures below
+are historical operator-capsule reference, not current deployment entry points.
+
 
 The Storage settings page enrolls host-prepared drives and reviews configuration.
 After an explicit operator cutover has installed an applied policy, Apply can

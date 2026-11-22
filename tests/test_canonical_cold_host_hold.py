@@ -250,10 +250,11 @@ def test_lost_stop_ack_requires_observation_and_cannot_be_replayed(authorized_ho
             pytest.fail("replayed a potentially stopped client")
 
 
-def test_deploy_wrapper_checks_cold_hold_before_old_terminal_grant():
+def test_deploy_wrapper_keeps_cold_hold_before_other_storage_holds():
     path = Path(__file__).resolve().parents[1] / "scripts" / "automation" / "server_deploy.sh"
     function = path.read_text().split("require_no_storage_handoff() {", 1)[1].split("\n}", 1)[0]
-    assert function.index('test -L "$state_root/canonical-cold-hold.json"') < function.index("storage_online_pending")
+    assert function.index('test -L "$state_root/canonical-cold-hold.json"') < function.index('test -L "$state_root/storage-handoff.json"')
+    assert "storage_online" not in function
 
 
 @pytest.mark.parametrize(("outcome", "floor"), [("original", ""), ("committed", "b" * 40)])

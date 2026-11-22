@@ -23,8 +23,7 @@ def phase_status(workers, *, phase, policy, revision, now):
     """Project one phase; never combine freshness and success from different workers."""
     if policy is None:
         return _result("unconfigured")
-    enabled = policy.movement_enabled if phase == "history_movement" else policy.backup_enabled
-    if not enabled:
+    if not policy.backup_enabled:
         return _result("disabled")
     if len(workers) > 100:
         return _result("unknown", "maintenance_worker_inventory_limit")
@@ -69,8 +68,7 @@ def phase_status(workers, *, phase, policy, revision, now):
     if state in {"failed", "blocked", "busy", "cancelled"}:
         return _result(state, outcome.get("reason") or outcome.get("error"),
                        checked_at=checked.isoformat(), **evidence)
-    allowed = {"idle", "completed"} if phase == "history_movement" else {"not_due", "completed"}
-    if state not in allowed:
+    if state not in {"not_due", "completed"}:
         return _result("unknown", "maintenance_policy_not_confirmed", **evidence)
     if outcome.get("policy_revision") != revision or outcome.get("policy_hash") != policy.fingerprint:
         return _result("unknown", "maintenance_policy_changed", **evidence)
@@ -92,6 +90,6 @@ def phase_status(workers, *, phase, policy, revision, now):
 def maintenance_status(workers, *, policy, revision, now):
     configured = StoragePolicy.from_dict(policy) if policy is not None else None
     return {
-        key: phase_status(workers, phase=phase, policy=configured, revision=revision, now=now)
-        for key, phase in (("movement", "history_movement"), ("backup", "local_recovery"))
+        "movement": _result("disabled", "canonical_cold_authority"),
+        "backup": phase_status(workers, phase="local_recovery", policy=configured, revision=revision, now=now),
     }
