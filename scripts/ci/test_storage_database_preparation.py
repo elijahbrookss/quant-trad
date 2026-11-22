@@ -215,10 +215,13 @@ def online_source_rehearsal(state, project, env, working, query, cid, cluster):
     assert saved["phase"] == "resuming"
     assert (state/host_boundary.HOLD).exists()
     # No owning process remains: ordinary old-recipe recovery still refuses.
+    retained = {path: path.read_bytes()
+                for path in (state/host_boundary.HOLD, state/online.STATE)}
     for action in ("deploy","recover","rollback"):
         blocked = run(["bash","scripts/automation/server_deploy.sh",action],
             env={**env,"QT_SINGLE_NODE_STATE_ROOT":str(state)},ok=False)
-        assert blocked.returncode and "storage online intent" in blocked.stderr
+        assert blocked.returncode and "storage handoff hold" in blocked.stderr, blocked.stderr
+        assert all(path.read_bytes() == raw for path, raw in retained.items())
     with __import__("unittest.mock",fromlist=["patch"]).patch.dict(os.environ, {"QT_STORAGE_UDEV_ROOT":env["QT_STORAGE_UDEV_ROOT"]}):
         result = online.prepare_online_source(state,project=project,source_revision="a"*40,history_uuid="fixture-history")
         assert result["started_at"] == saved["started_at"] and result["deadline"] == saved["deadline"]
