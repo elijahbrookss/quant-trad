@@ -610,15 +610,51 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         saved=host_boundary.load_receipt(state/pause._RUNTIME_STATE)
         before=host_boundary.identities(host_boundary.inventory(project,operator_id=saved['operator_id'],activating=True))
         assert (state/host_boundary.HOLD).exists() and 'storage_layout=' not in (state/'release.env').read_text()
-        outcome=pause.run_held_runtime_handoff(state,activation_timeout_seconds=600,**options)
-        assert outcome['ready'] and not (state/host_boundary.HOLD).exists()
+        # The retired v2 operator requires its old history-header runner. The
+        # final runtime deliberately omits that runner, so a healthy replacement
+        # must remain held rather than be certified by the obsolete operator.
+        model=pause._runtime_bound_model(state,saved,options['request'])
+        rows=pause._runtime_rows(saved)
+        assert pause._runtime_healthy(rows,model,saved)
+        assert pause._runtime_observation(rows['market-data-collector']['id'],options['request'],saved['database_result']) == {
+            'ready':False,'reason':'maintenance_starting'}
         after=host_boundary.identities(host_boundary.inventory(project,operator_id=saved['operator_id'],activating=True))
-        assert after==before,'recovery must retain the same actual candidate containers'
-        assert 'storage_layout=ssd-hdd-v1\n' in (state/'release.env').read_text()
-        assert 'previous_revision=\n' in (state/'release.env').read_text()
-        assert pause.run_held_runtime_handoff(state,activation_timeout_seconds=600,**options)==outcome
+        assert after==before,'refused legacy activation must retain the same actual candidate containers'
+        assert host_boundary.load_receipt(state/pause._RUNTIME_STATE)==saved
+        assert host_boundary.load_receipt(state/host_boundary.HOLD)==saved['receipt']
+        assert (state/'release.env').read_text()==saved['prior_release']
+        recovery_probe=r'''
+import time
+from pathlib import Path
+from portal.backend.db.session import db
+from portal.backend.workers.market_data_collector_health import live_worker_for_host
+from portal.backend.service.storage.recovery_copies import _identity,_snapshot_layout
+from scripts.automation.verify_canonical_recovery_archive import verify_logical_copy
+deadline=time.monotonic()+120
+while True:
+    worker=live_worker_for_host()
+    assert worker['alive'] is True
+    lifecycle=worker['context']['storage_lifecycle']
+    assert lifecycle['maintenance']['local_recovery']['configured'] is True
+    assert (lifecycle['maintenance'].get('history_movement') or {}).get('configured') is not True
+    recovery=(lifecycle.get('last_run') or {}).get('local_recovery') or {}
+    if recovery.get('state') in ('completed','not_due'):
+        break
+    assert time.monotonic()<deadline,recovery
+    time.sleep(.2)
+with db.session() as session:
+    identity,namespace=_identity(session)
+    assert recovery['storage_layout']==_snapshot_layout(session)
+root=Path('/qt-history/recovery')/namespace/recovery['generation']
+report=verify_logical_copy(root)
+assert report['database_identity']==identity
+assert report['database_dump_bytes']>0 and report['verified_archive_objects']>0
+print('current_runtime_recovery_and_legacy_refusal_verified')
+'''
+        assert 'current_runtime_recovery_and_legacy_refusal_verified' in host_boundary.docker(
+            'exec',rows['market-data-collector']['id'],'python','-c',recovery_probe,timeout=150)
         print(application(_VERIFY,saved['binding']['database_id']).stdout[-400:],flush=True)
-        print('PASS: real API, initializer, collector and both portals healthy; current-layout recovery copy verified; interrupted activation resumed same candidate; hold retired only after verified release; database and frozen/recent reads preserved',flush=True)
+        print('PASS: real API, initializer, collector and both portals healthy; current-layout recovery copy verified; retired v2 activation remains refused with unchanged candidate containers, release and durable hold; database and frozen/recent reads preserved',flush=True)
     except Exception:
         for service in ('backend','initialize','market-data-collector','frontend','frontend-v2'):
             ids=run(['docker','ps','-aq','--filter','label=com.docker.compose.project='+project,
