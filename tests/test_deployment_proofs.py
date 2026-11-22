@@ -32,7 +32,8 @@ proof = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proof)
 IDENTITY = {'revision': 'a'*40, 'source_tree_hash': 'b'*64, 'run_id': 12, 'attempt': 2}
 RESTORE_SELECTIONS = (
-    'tests/test_market_data/test_incremental_application_db.py',
+    'tests/test_market_data/test_incremental_application_db.py::test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay',
+    'tests/test_market_data/test_incremental_application_db.py::test_named_cutover_capture_restores_qt_cold_current_frozen_and_book_replay',
     'tests/test_market_data/test_incremental_raw_placement_db.py',
     'tests/test_market_data/test_canonical_postwrite_recovery_db.py::test_postwrite_pair_restores_exact_canonical_row_and_raw_archive',
     'tests/test_market_data/test_canonical_postwrite_recovery_db.py::test_named_wal_anchor_restores_original_layout_at_fenced_endpoint',
@@ -124,21 +125,21 @@ def test_aggregate_refuses_incomplete_or_mismatched_proofs(monkeypatch, fault):
     with pytest.raises(ValueError): proof.aggregate(manifest, receipts)
 
 
-def test_restore_result_count_matches_the_four_existing_proof_invocations():
+def test_restore_result_count_matches_the_five_isolated_proof_invocations():
     commands = [shlex.split(line) for line in (ROOT / 'scripts/ci/proof_restore.sh').read_text().splitlines()
                 if line.startswith('./scripts/ci/run_test_suite.sh ')]
-    assert len(commands) == proof.RESTORE_RESULT_COUNT == 4
+    assert len(commands) == proof.RESTORE_RESULT_COUNT == 5
     assert [command[2] for command in commands] == list(RESTORE_SELECTIONS)
     assert all(command[:2] == ['./scripts/ci/run_test_suite.sh', 'incremental-recovery']
                and command[-2:] == ['-p', 'scripts.ci.proof_pytest'] for command in commands)
 
 
-@pytest.mark.parametrize('count', [0, 2, 3, 4, 5])
+@pytest.mark.parametrize('count', [0, 2, 3, 4, 5, 6])
 def test_restore_run_requires_every_result_and_preserves_its_receipt(monkeypatch, tmp_path, count):
     manifest, receipts = packet(monkeypatch)
     expected = next(receipt for receipt in receipts if receipt['group'] == 'restore')
     emitted = expected['results'][:count]
-    if count == 5:
+    if count == 6:
         emitted.append(result(['unexpected']))
     proof.write(tmp_path / 'proof-manifest.json', manifest)
     monkeypatch.setattr(proof, 'image_snapshot', lambda _manifest: expected['images_before'])
@@ -158,13 +159,13 @@ def test_restore_run_requires_every_result_and_preserves_its_receipt(monkeypatch
 
     monkeypatch.setattr(proof.subprocess, 'Popen', process)
     evidence = tmp_path / 'restore-evidence'
-    if count == 4:
+    if count == proof.RESTORE_RESULT_COUNT:
         proof.run(tmp_path, 'restore', evidence)
     else:
         with pytest.raises(ValueError, match='missing restore proof result'):
             proof.run(tmp_path, 'restore', evidence)
     receipt = proof.read(evidence / 'receipt.json')
-    assert receipt['complete'] is (count == 4)
+    assert receipt['complete'] is (count == proof.RESTORE_RESULT_COUNT)
     assert receipt['results'] == emitted and receipt['identity'] == manifest['identity']
     assert proof.sha(evidence / 'proof.log') == receipt['log_sha256']
 
