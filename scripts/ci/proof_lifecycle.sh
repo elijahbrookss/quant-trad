@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf 'ci_proof_step Prove production worker encrypted pairing and dependency retirement\n'
+printf 'ci_proof_step Prove production canonical maintenance imports and encrypted pairing\n'
+revision="$(git rev-parse HEAD)"
 docker run --rm --network none --read-only --user 70:70 --cpus 1 --memory 512m --pids-limit 64 \
   --cap-drop ALL --security-opt no-new-privileges --env QT_DISABLE_DOTENV=1 \
-  --entrypoint python qt-terminal-runtime-proof -c \
-  "from scripts.automation.storage_online_terminal import worker_main; from scripts.db.fact_header_v2_deadline import CONTROLLER_LOCK; print('production terminal imports available')"
+  --entrypoint python "quanttrad-backend:$revision" -c \
+  "from portal.backend.workers.storage_maintenance import main; from portal.backend.service.storage.maintenance_runtime import storage_maintenance_runners; print('production canonical maintenance imports available')"
 docker run --rm --network none --user postgres --cpus 2 --memory 512m --pids-limit 64 \
   --cap-drop ALL --security-opt no-new-privileges \
   --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \

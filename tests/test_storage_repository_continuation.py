@@ -218,22 +218,17 @@ def test_continuation_cannot_be_combined_with_other_operations(other):
             **{other: True if other == 'prepare_forward_only' else 'unused'})
 
 
-def test_cli_routes_explicit_continuation_without_opening_api(monkeypatch, capsys):
-    from cli import main
-    monkeypatch.setattr(main, '_client', lambda *a: pytest.fail('HTTP client opened'))
+def test_legacy_operator_routes_explicit_continuation(monkeypatch):
     calls = []
     def continuation(path, **kwargs):
         calls.append((path, kwargs))
         return dict(phase='inspected')
     monkeypatch.setattr(recovery, 'continue_repositories', continuation)
-    parser = main.build_parser()
-    for tail in ([], ['--execute']):
-        args = parser.parse_args(['storage', 'migrate', '--operation-file', 'plan',
-            '--recover-repositories-file', 'request', *tail])
-        assert args.func(args) == 0
+    for execute in (False, True):
+        assert operation.run_operation_plan('plan',
+            recover_repositories_file='request', execute=execute) == dict(phase='inspected')
     assert calls == [('plan', dict(request_file='request', execute=False)),
                      ('plan', dict(request_file='request', execute=True))]
-    assert 'inspected' in capsys.readouterr().out
 
 
 def test_online_preflight_requires_incremental_settings_before_source_stop(monkeypatch):
