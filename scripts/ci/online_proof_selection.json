@@ -15,5 +15,6 @@
   "tests/test_market_data/test_fact_header_forward_handoff_db.py",
   "tests/test_market_data/test_archive_forward_copy_db.py::test_forward_archives_preserve_canceled_work_and_fence_final_switch[retain_raw]",
   "tests/test_market_data/test_raw_mapping_history_placement_db.py",
-  "tests/test_market_data/test_archive_reference_placement_db.py::test_generation_migration_inherits_named_reference_tablespace"
+  "tests/test_market_data/test_archive_reference_placement_db.py::test_generation_migration_inherits_named_reference_tablespace",
+  "tests/test_market_data/test_canonical_cold_migration_db.py::test_private_catalog_load_checks_one_native_device_and_combines_page_allocations"
 ]

@@ -365,6 +365,8 @@ def test_supervised_load_admission_checks_native_paths_and_restores_transaction_
                 pytest.fail("admitted work without filesystem headroom")
 
 
+@pytest.mark.skipif(os.geteuid() == 0,
+                   reason="native resource observation runs with the database owner in the mandatory UID70 storage proof")
 def test_private_catalog_load_checks_one_native_device_and_combines_page_allocations(
     prepared_database, tmp_path, monkeypatch,
 ):

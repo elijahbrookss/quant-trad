@@ -195,7 +195,7 @@ case "$SUITE" in
       if [[ "$SUITE" == "storage-demo" ]]; then
         db_pytest_args="tests/test_market_data/test_storage_end_to_end_db.py -s -o cache_dir=/tmp/qt-storage-demo-pytest-cache"
       elif [[ "$SUITE" == "incremental-recovery" ]]; then
-        db_pytest_args="tests/test_market_data/test_incremental_application_db.py -s -o cache_dir=/tmp/qt-incremental-pytest-cache"
+        db_pytest_args="tests/test_market_data/test_incremental_application_db.py::test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay -s -o cache_dir=/tmp/qt-incremental-pytest-cache"
       fi
     fi
     run_suite "QT_DB_TEST_ISOLATED=1 RUN_DB_TESTS=1 pytest -q -m db ${db_pytest_args}"

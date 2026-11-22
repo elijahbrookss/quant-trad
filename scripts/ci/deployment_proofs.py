@@ -15,7 +15,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 GROUPS = ('alerts', 'lifecycle', 'restore', 'core', *(f'online-{i}' for i in range(6)))
 SOURCE_IMAGES = ('backend', 'frontend', 'frontend-v2', 'terminal', 'storage-test')
-RESTORE_RESULT_COUNT = 4
+RESTORE_RESULT_COUNT = 5
 ALLOWED_SKIP = 'tests/test_market_data/test_storage_online_controller_db.py::test_controller_prepared_transaction_refuses_without_client'
 SKIP_REASON = 'requires disposable max_prepared_transactions > 0'
 

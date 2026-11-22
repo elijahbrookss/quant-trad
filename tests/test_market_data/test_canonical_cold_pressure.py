@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-import os
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -7,6 +6,7 @@ from sqlalchemy import create_engine, text
 from market_data.fact_archive import archive_evidence_hash
 from scripts.db.canonical_cold_pressure import _read_database, build_receipt
 from tests.test_market_data.test_canonical_cold_capacity import _sample
+from tests.test_market_data.test_canonical_cold_migration_db import local_catalog_server
 
 
 UUIDS = {resource: resource for resource in ("docker-engine-storage", "market-archive-storage")}
@@ -56,14 +56,13 @@ def test_refuses_stale_or_misdirected_observations(observed, samples, changes, a
 
 
 @pytest.mark.db
-def test_native_monitor_reads_a_pinned_postgresql_fixture_only():
-    dsn = os.environ.get("PG_DSN")
-    if os.environ.get("QT_DB_TEST_ISOLATED") != "1" or not dsn:
-        pytest.skip("requires an isolated PostgreSQL 15 fixture")
-    engine = create_engine(dsn)
+def test_native_monitor_reads_a_pinned_postgresql_fixture_only(local_catalog_server):
+    url, server_root, _account = local_catalog_server
+    # The existing fixture creates a private, Unix-socket-only PostgreSQL 15
+    # server. Never substitute the ambient PG_DSN, including the Compose peer.
+    assert url.query["host"] == str(server_root / "socket")
+    engine = create_engine(url)
     try:
-        if engine.url.host not in ("localhost", "127.0.0.1", "::1"):
-            pytest.fail("requires a loopback PostgreSQL fixture")
         with engine.begin() as conn:
             conn.exec_driver_sql("SET TRANSACTION READ ONLY")
             expected = dict(conn.execute(text("""

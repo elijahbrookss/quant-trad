@@ -2,7 +2,11 @@
 set -euo pipefail
 
 printf 'ci_proof_step Prove encrypted restore through actual QT current and frozen readers\n'
-./scripts/ci/run_test_suite.sh incremental-recovery tests/test_market_data/test_incremental_application_db.py -s -o cache_dir=/tmp/qt-incremental-pytest-cache -p scripts.ci.proof_pytest
+# Each restore owns one empty destination and a newly generated key directory.
+./scripts/ci/run_test_suite.sh incremental-recovery tests/test_market_data/test_incremental_application_db.py::test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay -s -o cache_dir=/tmp/qt-incremental-pytest-cache -p scripts.ci.proof_pytest
+
+printf 'ci_proof_step Prove named cutover capture through actual QT current and frozen readers\n'
+./scripts/ci/run_test_suite.sh incremental-recovery tests/test_market_data/test_incremental_application_db.py::test_named_cutover_capture_restores_qt_cold_current_frozen_and_book_replay -s -o cache_dir=/tmp/qt-incremental-named-pytest-cache -p scripts.ci.proof_pytest
 
 
 printf 'ci_proof_step Prove packaged retained raw placement through encrypted restore\n'

@@ -127,7 +127,8 @@ jobs:
           source_root="$RUNNER_TEMP/recovery-runtime-source"
           mkdir "$source_root"
           git archive "$revision" | tar -x -C "$source_root"
-          tree_hash="$(python scripts/provenance/source_tree_hash.py --root "$source_root")"
+          # Each immutable runtime validates its own Dockerfile COPY inventory.
+          tree_hash="$(python "$source_root/scripts/provenance/source_tree_hash.py" --root "$source_root")"
           docker build --file "$source_root/portal/backend/Dockerfile" --target storage-test \
             --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
             --tag qt-committed-recovery-runtime "$source_root"
@@ -310,11 +311,12 @@ jobs:
         run: |
           revision="$(git rev-parse HEAD)"
           tree_hash="$(python3 scripts/provenance/source_tree_hash.py --git-revision "$revision")"
-          for target in production storage-test; do
-            tag=qt-terminal-runtime-proof
-            if [[ "$target" == storage-test ]]; then tag=qt-incremental-runtime-proof; fi
-            docker build --file portal/backend/Dockerfile --target "$target" \
-              --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" --tag "$tag" .
+          # Old operator fixtures stay outside the production backend image.
+          # Distinct fixture roles retain the package handoff's image-ID check.
+          for role in terminal incremental; do
+            docker build --file portal/backend/Dockerfile --target storage-test \
+              --label "qt.disposable-proof-role=$role" \
+              --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" --tag "qt-$role-runtime-proof" .
           done
           docker pull timescale/timescaledb:2.14.2-pg15
           python3 scripts/ci/deployment_proofs.py pack --root "$RUNNER_TEMP/deployment-proof-images"

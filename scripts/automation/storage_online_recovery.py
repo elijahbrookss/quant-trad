@@ -29,6 +29,11 @@ RECIPE = "storage-online-recovery-database.compose.json"
 _ACTIONS = ("stop", "remove", "create", "start")
 _CONTINUATION = ContextVar("storage_committed_recovery_continuation", default=None)
 CONTINUATION_STATE = "storage-online-repository-continuation.json"
+# The retained 2.59.1 archiver remains qualified with the patched capture client;
+# new replacement images use 2.59.3. See rehearse_incremental_recovery.py's
+# cross-version chain and verify_encrypted_recovery_handoff.py's legacy reader.
+_RETAINED_ARCHIVER_VERSIONS = ("pgBackRest 2.59.1", "pgBackRest 2.59.3")
+_REPLACEMENT_ARCHIVER_VERSION = "pgBackRest 2.59.3"
 
 
 def inspect_database_archiver(database_id):
@@ -43,9 +48,9 @@ def inspect_database_archiver(database_id):
     except RuntimeError as exc:
         raise RuntimeError("storage_database_archiver_unavailable: qualify the PostgreSQL "
                            "image with pgBackRest before pausing collection") from exc
-    if version != "pgBackRest 2.59.1":
+    if version not in _RETAINED_ARCHIVER_VERSIONS:
         raise RuntimeError("storage_database_archiver_version_mismatch: PostgreSQL must "
-                           "use the same pinned pgBackRest 2.59.1 recovery tooling")
+                           "use qualified retained 2.59.1 or patched 2.59.3 pgBackRest tooling")
     return {"pgbackrest_version": version}
 
 
@@ -406,7 +411,7 @@ def inspect_archiver_replacement(database, image):
         "-ec", "/usr/local/bin/pgbackrest version; "+_DATABASE_BINARIES)
     if (not original.startswith("postgres (PostgreSQL) ")
             or len(original.splitlines()) < 4
-            or candidate != "pgBackRest 2.59.1\n"+original):
+            or candidate != _REPLACEMENT_ARCHIVER_VERSION+"\n"+original):
         raise RuntimeError("storage_archiver_replacement_database_binaries_changed")
     return dict(original=database["image"], candidate=image,
         configuration_sha256=host.digest(configs[0]),
