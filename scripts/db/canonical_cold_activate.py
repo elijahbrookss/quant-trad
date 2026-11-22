@@ -1,0 +1,606 @@
+"""Transactional cold authority handoff in the maintenance database session.
+
+The operation consumes an operator-bound exact cutover record. A release
+launcher separately owns collector shutdown and restart, paired recovery,
+application and provider fences, and the post-write rollback policy.
+"""
+from __future__ import annotations
+
+import json
+from datetime import date, datetime
+import re
+
+from sqlalchemy import text
+
+from core.storage_mounts import require_configured_archive_mount
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
+from market_data.archive_verification import ArchiveVerificationBatch
+from market_data.fact_archive import archive_evidence_hash
+from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES, COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES
+from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bindings
+from portal.backend.db.fact_identity_schema import _partition_bound
+from portal.backend.db.fact_storage_schema import (
+    FACT_STORAGE_LAYOUT_VERSION, assert_fact_storage_contract, fact_partition_name,
+)
+from portal.backend.service.storage.repos.cold_retirement import (
+    _assert_partition, drop_verified_header, lock_header_namespace,
+)
+from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
+from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
+from scripts.db.canonical_cold_audit import _ensure_target, _plan
+from scripts.db.canonical_cold_custody_placement import (
+    assert_custody_placement, custody_placement_hash, inspect_custody_move_source, move_custody_tablespace,
+)
+from scripts.db.canonical_cold_database_fence import DatabaseFence
+from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, _SWAP_RECEIPT, _oid, swap_identity_suffix
+from scripts.db.canonical_cold_load import TargetDatabase
+from scripts.db.canonical_cold_migration import PREPARED_CATALOG_TABLES, PostgresMigrationSource
+from scripts.db.canonical_cold_raw_index import TABLE as RAW_MAPPING_TABLE
+from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement, move_raw_mapping_index
+from scripts.db.canonical_cold_receipts import manifest_inventory_hash, validate_audit_receipts
+
+ACTIVATION_VERSION = "qt.canonical_cold_activate.v5"
+_PHYSICAL_GATES = {
+    "independent_recovery", "provider_boundary", "replay_equivalence",
+    "candidate_transaction_witness",
+    "legacy_reference_review", "physical_capacity", "rollback_rehearsal",
+    "representative_performance", "candidate_release", "custody_catalog_placement",
+}
+_EXECUTION_SCOPE = {
+    "source_database", "target_database", "audit_set_hash", "loaded_inventory_hash", "payload_children",
+    "custody_target_id", "custody_tablespace_oid", "custody_relation_oids", "raw_mapping_index", "identity_registry",
+}
+
+
+def _valid_digest(value):
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _valid_raw_index_scope(scope):
+    return (isinstance(scope, dict) and scope.keys() == {
+                "target_id", "tablespace_oid", "table_oid", "index_oid", "max_copy_bytes", "timeout_seconds",
+            }
+            and isinstance(scope["target_id"], str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", scope["target_id"])
+            and all(type(scope[key]) is int and 0 < scope[key] <= 2**32 - 1
+                    for key in ("table_oid", "index_oid", "tablespace_oid"))
+            and scope["tablespace_oid"] not in (1663, 1664)
+            and scope["table_oid"] != scope["index_oid"]
+            and type(scope["max_copy_bytes"]) is int and 0 < scope["max_copy_bytes"] <= 2**63 - 1
+            and type(scope["timeout_seconds"]) is int and 1 <= scope["timeout_seconds"] <= MAX_MIGRATION_SECONDS)
+
+
+def _valid_identity_registry(scope):
+    return (isinstance(scope, dict) and scope.keys() == {"old_oid", "new_oid"}
+            and all(type(oid) is int and 0 < oid <= 2**32 - 1 for oid in scope.values())
+            and scope["old_oid"] != scope["new_oid"])
+
+
+def assert_original_identity_registry(conn, *, scope):
+    if (not _valid_identity_registry(scope) or _oid(conn, SOURCE) != scope["old_oid"]
+            or _oid(conn, STAGED) != scope["new_oid"] or _oid(conn, PREVIOUS) is not None):
+        raise RuntimeError("canonical_cold_activation_original_identity_registry_changed")
+
+
+def raw_index_placement_scope(execution):
+    approved = execution.get("raw_mapping_index")
+    if not _valid_raw_index_scope(approved):
+        raise ValueError("canonical_cold_activation_raw_index_scope_invalid")
+    identity = execution["target_database"]
+    return {
+        "expected_database": f"{identity['system_identifier']}/{identity['database_oid']}",
+        "target_id": approved["target_id"], "expected_tablespace_oid": approved["tablespace_oid"],
+        "expected_table_oid": approved["table_oid"], "expected_index_oid": approved["index_oid"],
+    }
+
+
+def _valid_custody_move(scope):
+    return (isinstance(scope, dict) and scope.keys() == {"source_placement_hash", "max_copy_bytes", "timeout_seconds"}
+            and _valid_digest(scope["source_placement_hash"])
+            and type(scope["max_copy_bytes"]) is int and 0 < scope["max_copy_bytes"] <= 2**63 - 1
+            and type(scope["timeout_seconds"]) is int and 1 <= scope["timeout_seconds"] <= MAX_MIGRATION_SECONDS)
+
+
+def custody_placement_scope(execution):
+    identity = execution["target_database"]
+    return {
+        "expected_database": f"{identity['system_identifier']}/{identity['database_oid']}",
+        "target_id": execution["custody_target_id"],
+        "expected_tablespace_oid": execution["custody_tablespace_oid"],
+        "expected_relation_oids": execution["custody_relation_oids"],
+    }
+
+
+def assert_original_custody_placement(conn, execution):
+    scope = custody_placement_scope(execution)
+    if "custody_move" not in execution:
+        assert_custody_placement(conn, **scope)
+        return None
+    move = execution["custody_move"]
+    return inspect_custody_move_source(conn, **scope, source_placement_hash=move["source_placement_hash"])
+
+
+def validate_execution_record(execution, *, expected_execution_hash):
+    """Pin the exact approved record separately from component audit receipts."""
+    if not _valid_digest(expected_execution_hash) or archive_evidence_hash(execution) != expected_execution_hash:
+        raise ValueError("canonical_cold_activation_execution_hash_mismatch")
+    if not isinstance(execution, dict) or execution.get("schema") != ACTIVATION_VERSION:
+        raise ValueError("canonical_cold_activation_incomplete_execution_record")
+    if not _valid_raw_index_scope(execution.get("raw_mapping_index")):
+        raise ValueError("canonical_cold_activation_raw_index_scope_invalid")
+    if not _valid_identity_registry(execution.get("identity_registry")):
+        raise ValueError("canonical_cold_activation_identity_registry_scope_invalid")
+    if (
+        execution.keys() - {"custody_move"} != _EXECUTION_SCOPE | {"schema", "approved_package_hash", "evidence", "source_commit_seq"}
+        or not isinstance(execution.get("evidence"), dict)
+        or not _valid_digest(execution.get("approved_package_hash"))
+        or set(execution["evidence"]) != _PHYSICAL_GATES
+        or not all(_valid_digest(digest) for digest in execution["evidence"].values())
+        or not _valid_digest(execution.get("audit_set_hash"))
+        or not _valid_digest(execution.get("loaded_inventory_hash"))
+        or type(execution.get("source_commit_seq")) is not int
+        or execution["source_commit_seq"] <= 0
+        or not isinstance(execution.get("payload_children"), dict)
+        or not isinstance(execution.get("target_database"), dict)
+        or not isinstance(execution.get("source_database"), dict)
+        or type(execution.get("custody_target_id")) is not str
+        or not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", execution["custody_target_id"])
+        or type(execution.get("custody_tablespace_oid")) is not int
+        or not 0 < execution["custody_tablespace_oid"] <= 4_294_967_295
+        or not isinstance(execution.get("custody_relation_oids"), dict)
+        or execution["custody_relation_oids"].keys() != set(COLD_CUSTODY_TABLE_NAMES)
+        or not all(type(oid) is int and 0 < oid <= 4_294_967_295
+                   for oid in execution["custody_relation_oids"].values())
+    ):
+        raise ValueError("canonical_cold_activation_incomplete_execution_record")
+    if "custody_move" in execution and (
+        not _valid_custody_move(execution["custody_move"])
+        or (execution["custody_target_id"], execution["custody_tablespace_oid"])
+        != (execution["raw_mapping_index"]["target_id"], execution["raw_mapping_index"]["tablespace_oid"])
+    ):
+        raise ValueError("canonical_cold_activation_custody_move_scope_invalid")
+
+
+def _inventory_hash(conn, *, objects=None):
+    rows = conn.execute(text("""
+        SELECT id,manifest_hash,row_count,object_key,object_sha256,byte_count,staged_storage_day
+        FROM market.cold_fact_pages ORDER BY id COLLATE "C"
+    """).execution_options(yield_per=256))
+
+    def verified_rows():
+        for identity, digest, count, key, sha, size, staged in rows:
+            if staged is not None:
+                raise RuntimeError(f"canonical_cold_activation_unexpected_staged_page: id={identity}")
+            if objects is not None:
+                objects.verify(key, sha, expected_bytes=size)
+            yield identity, digest, count
+
+    try:
+        return manifest_inventory_hash(verified_rows())
+    finally:
+        rows.close()
+
+
+def measure_mounted_inventory(conn, *, audit, store):
+    """Read the bound file count and logical size before hashing or stopping writers."""
+    require_configured_archive_mount(store.root, require_writable=True)
+    pages, size = conn.execute(text("""
+        SELECT count(*),coalesce(sum(byte_count),0) FROM market.cold_fact_pages
+    """)).one()
+    if pages != audit["verified_pages"] or _inventory_hash(conn) != audit["loaded_inventory_hash"]:
+        raise RuntimeError("canonical_cold_activation_loaded_inventory_hash_mismatch")
+    return {"objects": int(pages), "bytes": int(size), "inventory_hash": audit["loaded_inventory_hash"]}
+
+
+def verify_mounted_candidate(conn, *, audit, store, limits, check_budget=None):
+    """Verify mounted bytes before the critical transaction; keep inode witnesses."""
+    scope = measure_mounted_inventory(conn, audit=audit, store=store)
+    if scope["objects"] > limits.max_objects or scope["bytes"] > limits.max_bytes:
+        raise RuntimeError("canonical_cold_activation_inventory_exceeds_verified_budget")
+    objects = ArchiveVerificationBatch(store, limits=limits, check_budget=check_budget)
+    if _inventory_hash(conn, objects=objects) != audit["loaded_inventory_hash"]:
+        raise RuntimeError("canonical_cold_activation_loaded_inventory_hash_mismatch")
+    objects.assert_unchanged()
+    return objects
+
+
+def verify_source_authority_inventory(conn, cutoff, audit, *, check_budget):
+    """Recompute the full published archive authority of the retiring prefix."""
+    max_pages = audit["verified_pages"]
+    if type(max_pages) is not int or max_pages < 1:
+        raise ValueError("canonical_cold_activation_source_authority_inventory_budget_invalid")
+    check_budget()
+    rows = conn.execute(text("""
+        SELECT * FROM market.fact_archive_manifests
+        WHERE storage_day<:cutoff ORDER BY id COLLATE "C" LIMIT :limit
+    """).execution_options(yield_per=128), {"cutoff": cutoff, "limit": max_pages + 1}).mappings()
+    pages = rows_seen = prepared = 0
+
+    def witnesses():
+        nonlocal pages, rows_seen, prepared
+        for page in rows:
+            check_budget()
+            pages += 1
+            if pages > max_pages:
+                raise RuntimeError("canonical_cold_activation_source_authority_inventory_exceeds_audited_pages")
+            rows_seen += page["row_count"]
+            authority = PostgresMigrationSource.source_authority(conn, page, check_budget=check_budget)
+            prepared += authority["kind"] == "prepared_generation"
+            yield page["id"], page["storage_day"].isoformat(), archive_evidence_hash(authority)
+
+    try:
+        actual = manifest_inventory_hash(witnesses())
+    finally:
+        rows.close()
+    check_budget()
+    if actual != audit["source_authority_inventory_hash"]:
+        raise RuntimeError("canonical_cold_activation_source_authority_inventory_changed")
+    return {"source_authority_inventory_hash": actual, "published_pages": pages,
+            "published_rows": rows_seen, "prepared_pages": prepared}
+
+
+def _assert_source_authority_inventory(conn, cutoff, audit, *, check_budget):
+    """Refuse changed exact published generations before any source DDL."""
+    # A concurrent archive writer may stage a page elsewhere but cannot
+    # mutate the published scope once the lifecycle/SQL writers are fenced.
+    tables = {"fact_archive_active_generations", "fact_archive_manifests",
+              "fact_archive_preparations", "fact_archive_verification_generations",
+              "fact_archive_verifications", "fact_archive_catalog_batches", *PREPARED_CATALOG_TABLES.values()}
+    for table in sorted(tables):
+        check_budget()
+        conn.execute(text(f'LOCK TABLE market."{table}" IN SHARE MODE NOWAIT'))
+    return verify_source_authority_inventory(conn, cutoff, audit, check_budget=check_budget)
+
+
+def _retention_sources(conn, cutoff, audit):
+    sources = conn.execute(text("""
+        SELECT storage_day,state,sealed_at,expected_rows FROM market.fact_retention_partitions
+        WHERE storage_day<:cutoff ORDER BY storage_day
+    """), {"cutoff": cutoff}).mappings()
+    found = {}
+    for row in sources:
+        day = row["storage_day"].isoformat()
+        seen = audit["days"].get(day)
+        if seen is None:
+            raise RuntimeError(f"canonical_cold_activation_unaudited_retention_day: day={day}")
+        sealed = datetime.fromisoformat(seen["source_sealed_at"]) if seen["source_sealed_at"] else None
+        actual = row["state"], row["sealed_at"], (row["expected_rows"] or 0)
+        if actual != (seen["source_retention_state"], sealed, seen["expected_rows"]) or row["state"] == "open":
+            raise RuntimeError(f"canonical_cold_activation_retention_changed: day={day}")
+        found[day] = row["state"]
+    if set(found) != {key for key, item in audit["days"].items() if item["source_retention_state"] is not None}:
+        raise RuntimeError("canonical_cold_activation_retention_inventory_changed")
+    return found
+
+
+def _payload_children(conn, cutoff, planned, retention):
+    rows = conn.execute(text("""
+        SELECT c.relname,c.oid::bigint,pg_get_expr(c.relpartbound,0)
+        FROM pg_inherits AS i JOIN pg_class AS c ON c.oid=i.inhrelid
+        WHERE i.inhparent='market.fact_hot_payloads'::regclass ORDER BY c.relname
+    """))
+    expected = {
+        fact_partition_name(date.fromisoformat(day)): date.fromisoformat(day)
+        for day, state in retention.items() if state != "reclaimed"
+    }
+    historical = {}
+    for name, oid, bound in rows:
+        if not name.startswith("fact_hot_payloads_"):
+            raise RuntimeError(f"canonical_cold_activation_unexpected_payload_child: relation={name}")
+        day = datetime.strptime(name[-8:], "%Y%m%d").date()
+        if name != fact_partition_name(day):
+            raise RuntimeError(f"canonical_cold_activation_unexpected_payload_child: relation={name}")
+        if day >= cutoff:
+            continue
+        if expected.get(name) != day or planned.get(name) != oid:
+            raise RuntimeError(f"canonical_cold_activation_payload_binding_changed: relation={name}")
+        if bound != _partition_bound(day):
+            raise RuntimeError(f"canonical_cold_activation_payload_bound_changed: relation={name}")
+        historical[name] = (day, oid, bound)
+    if historical.keys() != expected.keys() or historical.keys() != planned.keys():
+        raise RuntimeError("canonical_cold_activation_payload_inventory_changed")
+    return historical
+
+
+def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts, verified_objects,
+                          database_fence, statement_timeout_ms=900_000):
+    """Perform one all-or-nothing authority change on the already fenced target."""
+    validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
+    return _activate_cold_storage(conn, execution=execution, expected_execution_hash=expected_execution_hash,
+        receipts=receipts, verified_objects=verified_objects, database_fence=database_fence,
+        certificate_metadata={"approved_package_hash": execution["approved_package_hash"], "evidence": execution["evidence"]},
+        statement_timeout_ms=statement_timeout_ms)
+
+
+def _activate_cold_storage(conn, *, execution, expected_execution_hash, receipts, verified_objects,
+                           database_fence, certificate_metadata, statement_timeout_ms):
+    """Shared SQL transaction after the caller's exact scope has been admitted."""
+    audit = validate_audit_receipts(receipts, target_identity=execution["target_database"],
+                                   source_identity=execution["source_database"])
+    if (audit["audit_set_hash"] != execution["audit_set_hash"]
+            or audit["loaded_inventory_hash"] != execution["loaded_inventory_hash"] or not audit["verified_rows"]):
+        raise RuntimeError("canonical_cold_activation_audit_set_mismatch")
+    if (
+        not conn.in_transaction()
+        or conn.get_execution_options().get("isolation_level") == "AUTOCOMMIT"
+        or conn.get_isolation_level() != "READ COMMITTED"
+    ):
+        raise RuntimeError("canonical_cold_activation_requires_transaction")
+    if not isinstance(database_fence, DatabaseFence):
+        raise ValueError("canonical_cold_activation_requires_live_database_fence")
+    if type(statement_timeout_ms) is not int or not 1 <= statement_timeout_ms <= MAX_MIGRATION_SECONDS * 1000:
+        raise ValueError("canonical_cold_activation_invalid_statement_timeout")
+    conn.execute(text("SELECT set_config('statement_timeout',:timeout,true)"), {"timeout": str(statement_timeout_ms)})
+    conn.execute(text("SET LOCAL lock_timeout='500ms'"))
+    database_fence.assert_quiet(conn)
+    if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))")):
+        raise RuntimeError("canonical_cold_activation_storage_management_busy")
+    if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
+                       {"name": _LIFECYCLE_LOCK_NAME}):
+        raise RuntimeError("canonical_cold_activation_writer_fence_busy")
+    conn.execute(text("LOCK TABLE market.fact_storage_state IN ACCESS EXCLUSIVE MODE NOWAIT"))
+    source_cert = conn.execute(text(
+        "SELECT layout_version,state FROM market.fact_storage_state ORDER BY layout_version LIMIT 2"
+    )).all()
+    if source_cert != [(FACT_STORAGE_LAYOUT_VERSION, "ready")]:
+        raise RuntimeError("canonical_cold_activation_source_certificate_changed")
+    assert_original_identity_registry(conn, scope=execution["identity_registry"])
+    lock_header_namespace(conn)
+    conn.execute(text("LOCK TABLE ONLY market.fact_hot_payloads IN ACCESS EXCLUSIVE MODE NOWAIT"))
+    conn.execute(text("LOCK TABLE market.fact_retention_partitions IN SHARE ROW EXCLUSIVE MODE NOWAIT"))
+    for table in sorted(COLD_TABLE_NAMES):
+        conn.execute(text(f'LOCK TABLE market."{table}" IN SHARE ROW EXCLUSIVE MODE NOWAIT'))
+    if conn.scalar(text("SELECT EXISTS (SELECT FROM market.cold_fact_retired_days)")):
+        raise RuntimeError("canonical_cold_activation_retirement_receipts_already_exist")
+    conn.execute(text("LOCK TABLE public.portal_storage_plans IN SHARE ROW EXCLUSIVE MODE NOWAIT"))
+    if conn.scalar(text("""
+        SELECT EXISTS (
+            SELECT FROM public.portal_storage_plans
+            WHERE state IN ('queued','running','blocked') AND progress->>'operation'='qt.automatic_header_history.v1'
+        )
+    """)):
+        raise RuntimeError("canonical_cold_activation_pending_legacy_header_move")
+
+    identity = execution["target_database"]
+    target = TargetDatabase(identity["system_identifier"], identity["database"], identity["database_oid"])
+    source = PostgresMigrationSource(conn.engine, expected_system_identifier=target.system_identifier)
+    if _ensure_target(conn, source, target) != identity:
+        raise RuntimeError("canonical_cold_activation_target_identity_changed")
+    cutoff = date.fromisoformat(audit["prefix"]["cold_before_day"])
+    if _plan(conn, cutoff=cutoff, max_days=4096) != audit["prefix"]:
+        raise RuntimeError("canonical_cold_activation_prefix_changed")
+    if PostgresMarketDataRepository._current_commit_seq_with_session(conn) != execution["source_commit_seq"]:
+        raise RuntimeError("canonical_cold_activation_commit_boundary_changed")
+    if _inventory_hash(conn) != audit["loaded_inventory_hash"]:
+        raise RuntimeError("canonical_cold_activation_loaded_inventory_hash_mismatch")
+    _assert_source_authority_inventory(conn, cutoff, audit, check_budget=database_fence.check_clock)
+    _assert_verified_archive(conn, verified_objects)
+    approved_custody_move = execution.get("custody_move")
+    if approved_custody_move is None:
+        for table in COLD_CUSTODY_TABLE_NAMES:
+            conn.exec_driver_sql(f"LOCK TABLE ONLY market.{table} IN SHARE MODE NOWAIT")
+    conn.exec_driver_sql("LOCK TABLE public.portal_storage_targets, public.portal_storage_header_tablespaces "
+                         "IN SHARE MODE NOWAIT")
+    assert_original_custody_placement(conn, execution)
+    retention = _retention_sources(conn, cutoff, audit)
+    payloads = _payload_children(conn, cutoff, execution["payload_children"], retention)
+    if conn.scalar(text("""
+        SELECT EXISTS (SELECT FROM market.fact_archive_preparations
+          WHERE storage_day<:cutoff AND state IN ('building','ready'))
+    """), {"cutoff": cutoff}):
+        raise RuntimeError("canonical_cold_activation_unfinished_archive_preparations")
+
+    # Acquire the owning table locks before either copy can allocate files
+    # or generate WAL. The activation's existing lock and statement timeouts
+    # bound brief contention with native maintenance under the closed fence.
+    database_fence.assert_quiet(conn)
+    copy_tables = [RAW_MAPPING_TABLE]
+    if approved_custody_move is not None:
+        copy_tables.extend(f"market.{table}" for table in COLD_CUSTODY_TABLE_NAMES)
+    copy_relations = ", ".join(f"ONLY {table}" for table in sorted(copy_tables))
+    conn.exec_driver_sql(f"LOCK TABLE {copy_relations} IN ACCESS EXCLUSIVE MODE")
+
+    custody_move = None
+    if approved_custody_move is not None:
+        moved = move_custody_tablespace(
+            conn, **custody_placement_scope(execution), **approved_custody_move,
+        )
+        custody_move = moved | {"receipt_hash": archive_evidence_hash(moved)}
+    approved_move = execution["raw_mapping_index"]
+    raw_index = move_raw_mapping_index(
+        conn, fence=database_fence, **raw_index_placement_scope(execution), max_copy_bytes=approved_move["max_copy_bytes"],
+        timeout_seconds=approved_move["timeout_seconds"],
+    )
+    prepare_cold_dependency_bindings(conn)
+
+    header_bytes = {}
+    payload_bytes = {}
+    for name, (day, oid, bound) in payloads.items():
+        _assert_partition(conn, name, oid, bound, "fact_hot_payloads")
+        payload_bytes[day.isoformat()] = int(conn.scalar(text("SELECT pg_total_relation_size(:oid)"), {"oid": oid}))
+        conn.execute(text(f'DROP TABLE market."{name}"'))
+    legacy_end = audit["prefix"]["legacy_end_day"]
+    for row in reversed(audit["prefix"]["days"]):
+        name = row["child"]
+        if name is None or name in header_bytes:
+            continue
+        header_bytes[name] = drop_verified_header(
+            conn, name=name, oid=row["child_oid"], storage_day=date.fromisoformat(row["day"]),
+            legacy_end_day=date.fromisoformat(legacy_end) if name == "fact_versions_legacy" else None,
+        )
+    retired_header_bytes = sum(header_bytes.values())
+    conn.execute(text("""
+        INSERT INTO market.cold_fact_retired_days
+          (storage_day,manifest_set_hash,row_count,reclaimed_header_bytes,protected_dataset_ranges,handoff_kind)
+        VALUES (:day,:audit_hash,:rows,:header_bytes,0,'initial')
+    """), [{"day": date.fromisoformat(row["day"]), "audit_hash": audit["audit_set_hash"],
+            "rows": audit["days"][row["day"]]["verified_rows"],
+            "header_bytes": header_bytes.pop(row["child"], 0)}
+            for row in audit["prefix"]["days"]])
+    identity_result = swap_identity_suffix(
+        conn, expected_database=f"{target.system_identifier}/{target.oid}", cutoff=cutoff,
+        expected_retired_legacy_oid=next((row["child_oid"] for row in audit["prefix"]["days"]
+                                          if row["child"] == "fact_versions_legacy"), None),
+        statement_timeout_ms=statement_timeout_ms,
+    )
+    if any(identity_result[key] != oid for key, oid in execution["identity_registry"].items()):
+        raise RuntimeError("canonical_cold_activation_promoted_identity_registry_changed")
+    result = {
+        **certificate_metadata,
+        "execution_hash": expected_execution_hash, "audit_set_hash": audit["audit_set_hash"],
+        "loaded_inventory_hash": audit["loaded_inventory_hash"],
+        "database": identity, "source_commit_seq": execution["source_commit_seq"],
+        "cold_before_day": cutoff.isoformat(),
+        "verified_rows": audit["verified_rows"], "verified_pages": audit["verified_pages"],
+        "retired_header_bytes": retired_header_bytes,
+        "retired_payload_bytes": sum(payload_bytes.values()), "identity": identity_result,
+        "custody": {"target_id": execution["custody_target_id"], "tablespace_oid": execution["custody_tablespace_oid"],
+                    "relation_oids": execution["custody_relation_oids"]},
+        "raw_mapping_index": raw_index,
+    }
+    if custody_move is not None:
+        result["custody_move"] = custody_move
+    written = conn.execute(text("""
+        UPDATE market.fact_storage_state SET layout_version=:layout,completed_at=clock_timestamp(),
+            evidence=CAST(:evidence AS jsonb)
+        WHERE layout_version=:prior AND state='ready'
+    """), {"layout": COLD_HISTORY_LAYOUT_VERSION, "prior": FACT_STORAGE_LAYOUT_VERSION,
+            "evidence": json.dumps(result)}).rowcount
+    if written != 1:
+        raise RuntimeError("canonical_cold_activation_certificate_changed")
+    assert_fact_storage_contract(conn)
+    if PostgresMarketDataRepository._current_commit_seq_with_session(conn) != execution["source_commit_seq"]:
+        raise RuntimeError("canonical_cold_activation_authority_watermark_mismatch")
+    verified_objects.assert_unchanged()
+    database_fence.assert_quiet(conn)
+    return result
+
+
+def _read_authority(conn, expected):
+    identity = PostgresMigrationSource(conn.engine, expected_system_identifier=expected["system_identifier"])
+    if identity.identity(conn) != expected:
+        raise RuntimeError("canonical_cold_activation_outcome_wrong_database")
+    rows = conn.execute(text("""
+        SELECT layout_version,state,completed_at IS NOT NULL,evidence FROM market.fact_storage_state
+        ORDER BY layout_version LIMIT 2
+    """)).all()
+    if len(rows) != 1 or tuple(rows[0][1:3]) != ("ready", True):
+        raise RuntimeError("canonical_cold_activation_outcome_uncertain")
+    return rows[0][0], rows[0][3], PostgresMarketDataRepository._current_commit_seq_with_session(conn)
+
+
+def _assert_original_inventory(conn, expected_inventory):
+    assert_fact_storage_contract(conn)
+    if _inventory_hash(conn) != expected_inventory:
+        raise RuntimeError("canonical_cold_activation_original_boundary_changed")
+
+
+def verify_committed_raw_mapping_index(conn, *, scope, receipt):
+    placement = assert_raw_mapping_index_placement(conn, **scope, on_history=True)
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("after"), dict):
+        raise RuntimeError("canonical_cold_activation_raw_index_outcome_changed")
+    recorded = {key: value for key, value in receipt["after"].items() if key != "forks"}
+    observed = {key: value for key, value in placement["member"].items() if key != "forks"}
+    signed = {key: value for key, value in receipt.items() if key != "receipt_hash"}
+    if (receipt.get("receipt_hash") != archive_evidence_hash(signed)
+            or receipt.get("database_identity") != placement["database_identity"]
+            or receipt.get("target") != placement["target"] or recorded != observed):
+        raise RuntimeError("canonical_cold_activation_raw_index_outcome_changed")
+
+
+def verify_committed_custody(conn, *, execution, receipt):
+    current = assert_custody_placement(conn, **custody_placement_scope(execution))
+    if "custody_move" not in execution:
+        if receipt is not None:
+            raise RuntimeError("canonical_cold_activation_unapproved_custody_move")
+        return
+    if (not isinstance(receipt, dict) or not isinstance(receipt.get("before"), list)
+            or not isinstance(receipt.get("after"), list)
+            or type(receipt.get("copy_bytes")) is not int
+            or not 0 <= receipt["copy_bytes"] <= execution["custody_move"]["max_copy_bytes"]
+            or receipt.get("receipt_hash") != archive_evidence_hash({
+                key: value for key, value in receipt.items() if key != "receipt_hash"
+            })
+            or custody_placement_hash(receipt["before"]) != execution["custody_move"]["source_placement_hash"]
+            or custody_placement_hash(receipt["after"]) != current["placement_hash"]
+            or receipt.get("database_identity") != current["database_identity"]
+            or receipt.get("target") != current["target"]
+            or receipt.get("relation_oids") != current["relation_oids"]):
+        raise RuntimeError("canonical_cold_activation_custody_move_outcome_changed")
+
+
+def read_original_watermark(conn, *, expected, expected_inventory):
+    """Check original SQL authority before a final boundary receipt exists."""
+    layout, _, watermark = _read_authority(conn, expected)
+    if layout != FACT_STORAGE_LAYOUT_VERSION:
+        raise RuntimeError("canonical_cold_transition_old_authority_required")
+    _assert_original_inventory(conn, expected_inventory)
+    return watermark
+
+
+def read_activation_outcome(conn, *, execution, expected_execution_hash, require_identity_retired=False):
+    """Reconcile durable SQL state for this exact operation on the pinned database."""
+    validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
+    return _read_activation_outcome(conn, execution=execution, expected_execution_hash=expected_execution_hash,
+        certificate_metadata={"approved_package_hash": execution["approved_package_hash"]},
+        require_identity_retired=require_identity_retired)
+
+
+def _read_activation_outcome(conn, *, execution, expected_execution_hash, certificate_metadata,
+                             require_identity_retired=False):
+    expected = execution["target_database"]
+    raw_index_scope = raw_index_placement_scope(execution)
+    layout, evidence, watermark = _read_authority(conn, expected)
+    if watermark != execution["source_commit_seq"]:
+        raise RuntimeError("canonical_cold_activation_outcome_commit_boundary_changed")
+    if layout == FACT_STORAGE_LAYOUT_VERSION:
+        _assert_original_inventory(conn, execution["loaded_inventory_hash"])
+        assert_original_identity_registry(conn, scope=execution["identity_registry"])
+        assert_raw_mapping_index_placement(conn, **raw_index_scope, on_history=False)
+        assert_original_custody_placement(conn, execution)
+        return "original"
+    if (layout != COLD_HISTORY_LAYOUT_VERSION or not isinstance(evidence, dict)
+            or evidence.get("execution_hash") != expected_execution_hash
+            or evidence.get("audit_set_hash") != execution["audit_set_hash"]
+            or evidence.get("loaded_inventory_hash") != execution["loaded_inventory_hash"]
+            or any(evidence.get(key) != value for key, value in certificate_metadata.items())
+            or evidence.get("database") != expected
+            or evidence.get("source_commit_seq") != execution["source_commit_seq"]):
+        raise RuntimeError("canonical_cold_activation_outcome_uncertain")
+    assert_fact_storage_contract(conn)
+    verify_committed_raw_mapping_index(conn, scope=raw_index_scope, receipt=evidence.get("raw_mapping_index"))
+    verify_committed_custody(conn, execution=execution, receipt=evidence.get("custody_move"))
+    if require_identity_retired:
+        identity = evidence["identity"]
+        approved_identity = execution["identity_registry"]
+        retired = conn.execute(text(f"""
+            SELECT database_identity,cutoff,old_oid,new_oid,recovery_digest,finalized_at IS NOT NULL
+            FROM {_SWAP_RECEIPT} WHERE singleton
+        """)).one_or_none()
+        expected_retirement = (
+            identity["database_identity"], date.fromisoformat(evidence["cold_before_day"]), approved_identity["old_oid"],
+            approved_identity["new_oid"], execution["evidence"]["independent_recovery"], True,
+        )
+        if (_oid(conn, PREVIOUS) is not None or _oid(conn, SOURCE) != approved_identity["new_oid"]
+                or any(identity[key] != oid for key, oid in approved_identity.items()) or retired != expected_retirement):
+            raise RuntimeError("canonical_cold_activation_old_identity_retirement_unconfirmed")
+    return "committed"
+
+
+def _assert_verified_archive(conn, batch):
+    require_configured_archive_mount(batch.object_store.root, require_writable=True)
+    rows = conn.execute(text("""
+        SELECT object_key,object_sha256,byte_count FROM market.cold_fact_pages
+        ORDER BY object_key COLLATE "C"
+    """).execution_options(yield_per=256))
+    count = 0
+    try:
+        for key, digest, size in rows:
+            verified = batch.objects.get(key)
+            if verified is None or (verified.object_sha256, verified.byte_count) != (digest, size):
+                raise RuntimeError(f"canonical_cold_activation_archive_witness_mismatch: key={key}")
+            count += 1
+    finally:
+        rows.close()
+    if count != len(batch.objects):
+        raise RuntimeError("canonical_cold_activation_archive_witness_scope_mismatch")
+    batch.assert_unchanged()

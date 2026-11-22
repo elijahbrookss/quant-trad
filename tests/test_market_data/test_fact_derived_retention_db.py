@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.canonical_adapters import DERIVED_MARKET_STATE_SOURCE, canonicalize_basis_feature, canonicalize_bbo_feature
@@ -12,13 +13,37 @@ from market_data.market_state import MarketStateValuationContract, derive_basis_
 from portal.backend.db import InstrumentRecord
 from portal.backend.service.market.backtest_dataset_service import validate_frozen_dataset_series
 from portal.backend.service.storage.repos import fact_archival, fact_reclamation, market_data, market_structure
+from portal.backend.service.storage.repos.fact_archive_generation import canonical_dependency_projection
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
-from portal.backend.service.storage.repos.fact_derived_admission import resolve_material_source_revisions
+from portal.backend.service.storage.repos.fact_derived_admission import (
+    _transaction_local_jit_disabled, resolve_material_source_revisions,
+)
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture, _publish_book_result
 from tests.test_market_data.test_fact_reclamation_db import _physical
 
 pytestmark = pytest.mark.db
+
+
+def test_material_resolver_jit_scope_restores_actual_psycopg2_connection(storage):
+    with storage.database.session() as session:
+        original = session.execute(text("SELECT current_setting('jit')")).scalar_one()
+        session.execute(text("SELECT set_config('jit','on',true)"))
+        with _transaction_local_jit_disabled(session):
+            assert session.execute(text("SELECT current_setting('jit')")).scalar_one() == "off"
+        assert session.execute(text("SELECT current_setting('jit')")).scalar_one() == "on"
+
+    with storage.database.session() as session:
+        with pytest.raises(DBAPIError) as caught:
+            with _transaction_local_jit_disabled(session):
+                session.execute(text("SELECT 1 / 0"))
+        assert "division by zero" in str(caught.value).lower()
+        session.rollback()
+        assert session.execute(text("SELECT current_setting('jit')")).scalar_one() == original
+
+    # A later checkout from the real pool inherits neither local override.
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT current_setting('jit')")).scalar_one() == original
 
 
 def _archive_day(archive, day):
@@ -109,14 +134,27 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
             "fact_type": "market.bbo", "material_hash": features[0][0].material_hash,
             "commit_seq": basis_outcome.max_commit_seq, "known_at": BASE + timedelta(minutes=1),
         }]
-        mixed_sources, mixed_edges = resolve_material_source_revisions(session,
-            requests=[{**request, "root_id": f"mixed-{index}"}
-                      for index in range(70) for request in mixed_requests],
-            reader=tiered, max_rows=210, max_logical_bytes=64 * 1024**2)
-        assert len(mixed_sources) == 3
-        assert len(mixed_edges) == 140
+        mixed_requests.append({
+            "root_id": "mixed", "role": "spot-bbo", "series_id": features[1][0].series_id,
+            "fact_type": "market.bbo", "material_hash": features[1][0].material_hash,
+            "commit_seq": basis_outcome.max_commit_seq, "known_at": BASE + timedelta(minutes=1),
+        })
+        requests = [{**request, "root_id": f"mixed-{index}"}
+                    for index in range(70) for request in mixed_requests]
+        kwargs = dict(requests=requests, reader=tiered, max_rows=350, max_logical_bytes=64 * 1024**2)
+        mixed_sources, mixed_edges = resolve_material_source_revisions(session, **kwargs)
+        # Compare the same unchanged SQL and hydration against the previous
+        # contiguous 128-request batching on real hot/cold fixture revisions.
+        from portal.backend.service.storage.repos import fact_derived_admission as admission
+        with monkeypatch.context() as previous:
+            previous.setattr(admission, "_material_source_batches",
+                lambda rs: (rs[offset:offset + 128] for offset in range(0, len(rs), 128)))
+            assert resolve_material_source_revisions(session, **kwargs) == (mixed_sources, mixed_edges)
+        assert len(mixed_sources) == 4
+        assert len(mixed_edges) == 210
         assert all(len(mixed_edges[(f"mixed-{index}", "book")]) == 1
-                   and len(mixed_edges[(f"mixed-{index}", "bbo")]) == 2 for index in range(70))
+                   and len(mixed_edges[(f"mixed-{index}", "bbo")]) == 2
+                   and len(mixed_edges[(f"mixed-{index}", "spot-bbo")]) == 1 for index in range(70))
         assert all(row["market_commit_seq"] not in {
             future_known_outcome.max_commit_seq, late_outcome.max_commit_seq,
         } for row in mixed_sources.values())
@@ -160,7 +198,7 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
                                                {"id": old_page["id"]}).mappings().one())
             assert session.execute(text("SELECT count(*) FROM market.fact_archive_canonical_dependencies WHERE manifest_id=:id"),
                                    {"id": old_page["id"]}).scalar_one() == 0
-        with pytest.raises(RuntimeError, match="canonical_archive_verification_missing_or_stale"):
+        with pytest.raises(RuntimeError, match="canonical_archive_verification_generation_changed"):
             reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
         assert _physical(storage, day)["relation"] is not None
         assert archive.restart_partition_verification(day)["status"] == "partition_verification_restarted"
@@ -173,9 +211,9 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
                 "WHERE manifest_id=:id AND verifier_version=:version"),
                 {"id": old_page["id"], "version": old_receipt["verifier_version"]}).mappings().one()) == old_receipt
     with storage.database.session() as session:
-        edges = session.execute(text("""
+        edges = session.execute(text(f"""
             SELECT source.id,source.fact_type,source.market_commit_seq,source.known_at
-            FROM market.fact_archive_canonical_dependencies AS edge
+            FROM {canonical_dependency_projection("edge")}
             JOIN market.fact_archive_manifests AS manifest ON manifest.id=edge.manifest_id
             JOIN market.fact_versions AS source ON source.id=edge.fact_version_id
             WHERE manifest.storage_day=:day ORDER BY source.id
@@ -225,3 +263,60 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
         for identity in fixture.manifests:
             status = fixture.structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)
             assert status["canonical_dependency_count"] > 0 and status["pinned"] is True
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_checkpoint_source_groups_decode_real_cold_pages_with_unchanged_working_limit(storage, tmp_path, monkeypatch, corrupt):
+    import json
+    from market_data.fact_archive import FactArchiveLimits
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from portal.backend.service.storage.repos import fact_dependencies
+    day = storage.today - timedelta(days=2)
+    _placement(monkeypatch, day)
+    # One small selected row and unrelated large retained evidence per page.
+    # Their source identities are inputs to hydration, never reselected here.
+    for index in range(3):
+        for kind in ("selected", "ballast"):
+            storage.repo.ingest_facts(series_id=storage.series_id, source_id=storage.source_id,
+                facts=[replace(storage.fact, observation_key=f"checkpoint-{index}-{kind}",
+                    provenance={**storage.fact.provenance,
+                        "fixture_padding": "x" * 40_000 if kind == "ballast" else ""})])
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(database=storage.database,
+        object_store=store, temporary_directory=tmp_path / "staging",
+        limits=FactArchiveLimits(max_rows=2, row_group_size=2))
+    _archive_day(archive, day)
+    reclaimer = fact_reclamation.PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    assert reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)["status"] == "partition_reclaimed"
+    _placement(monkeypatch, storage.today)
+    storage.repo.ingest_facts(series_id=storage.series_id, source_id=storage.source_id,
+        facts=[replace(storage.fact, observation_key="checkpoint-hot")])
+    tiered = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: store)
+    with storage.database.session() as session:
+        ids = session.execute(text("SELECT id FROM market.fact_versions WHERE observation_key LIKE 'checkpoint-%-selected' "
+                                   "OR observation_key='checkpoint-hot' ORDER BY id")).scalars().all()
+        assert len(ids) == 4
+        previous = fact_dependencies.read_canonical_dependency_rows(session, ids, reader=tiered,
+            max_logical_bytes=64 * 1024**2)
+        manifests = session.execute(text("SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day "
+                                          "ORDER BY page_ordinal"), {"day": day}).mappings().all()
+        assert len(manifests) == 3
+        logical = [int(row["descriptor"]["logical_byte_count"]) for row in manifests]
+        retained = 6 * sum(len(json.dumps(row, default=str).encode("utf-8")) for row in previous.values())
+        limit = max(logical) + retained
+        assert max(logical) < limit < sum(logical)
+        with pytest.raises(fact_dependencies.CanonicalSourceByteBudgetExceeded):
+            fact_dependencies.read_canonical_dependency_rows(session, ids, reader=tiered, max_logical_bytes=limit)
+        objects = ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits())
+        tiered.limits = replace(tiered.limits, max_logical_bytes=limit)
+        if corrupt:
+            path = store.local_path(manifests[0]["object_key"])
+            path.write_bytes(path.read_bytes()[:-1] + b"!")
+            with pytest.raises(RuntimeError, match="checksum_mismatch"):
+                fact_dependencies.read_checkpoint_dependency_rows(session, ids, reader=tiered,
+                    byte_verifier=objects, max_logical_bytes=limit, max_objects=objects.limits.max_objects)
+        else:
+            assert fact_dependencies.read_checkpoint_dependency_rows(session, ids, reader=tiered,
+                byte_verifier=objects, max_logical_bytes=limit, max_objects=objects.limits.max_objects) == previous
+            assert objects.byte_count == sum(row["byte_count"] for row in manifests)
+            assert len(objects.objects) == 3

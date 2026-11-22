@@ -65,7 +65,7 @@ class RepositoryArtifactStorage:
         return list_bot_trade_events_for_trades(trade_ids)
 
     def upsert_bot_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return upsert_bot_run(payload)
+        return upsert_bot_run(payload, preserve_admitted_config=True)
 
 
 _ARTIFACT_STORAGE: ArtifactStorage = RepositoryArtifactStorage()

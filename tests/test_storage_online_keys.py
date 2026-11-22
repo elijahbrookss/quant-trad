@@ -133,20 +133,12 @@ def test_publication_refuses_unfinished_key_preparation(key_attempt,monkeypatch)
     preserved(a)
 
 
-def test_cli_key_preparation_is_explicit_and_read_only_by_default(key_attempt, monkeypatch):
-    from cli import main
+def test_key_preparation_must_be_separate(key_attempt):
     from scripts.automation import storage_online_operation as operation
     a = key_attempt
-    calls = []
-    monkeypatch.setattr(keys, "prepare_operation", lambda path, **kw: calls.append((path, kw)) or {"phase": "inspected"})
-    args = main.build_parser().parse_args(["storage", "migrate", "--operation-file", str(a.path),
-                                          "--prepare-forward-keys-file", str(a.package_path)])
-    assert args.func(args) == 0
-    assert calls == [(str(a.path), dict(package_file=str(a.package_path), execute=False))]
     for option in ("forward_package_file", "cancel_attempt_file", "replacement_package_file", "capacity_file", "extend_attempt_seconds"):
         with pytest.raises(ValueError, match="must_be_separate"):
             operation.run_operation_plan(a.path, prepare_forward_keys_file=a.package_path, **{option: 1})
-    assert len(calls) == 1
 
 
 def test_surviving_key_worker_retires_before_cancellation_preflight(key_attempt, monkeypatch):

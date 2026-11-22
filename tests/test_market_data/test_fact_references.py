@@ -165,7 +165,8 @@ class _BookSession(_Session):
             else:
                 for request in json.loads(params["requests"]):
                     result.extend({**row, "request_key": request["request_key"]} for row in self.book_mappings
-                                  if 1 <= row["receive_ordinal"] <= request["receive_ordinal"])
+                                  if request.get("first_receive_ordinal", 1)
+                                  <= row["receive_ordinal"] <= request["receive_ordinal"])
             return _Result(result[:params["limit"]])
         return super().execute(statement, params)
 
@@ -208,7 +209,7 @@ def test_existing_hot_backlog_avoids_rescanning_an_unbounded_live_epoch():
     session = _BookSession(_book_mappings((100_000,)), protected=True)
     lock_canonical_raw_references(session, [_book(100_000)], max_mapping_rows=2)
     assert any("fact_hot_payloads AS hot" in sql for sql, _ in session.statements)
-    assert not any("BETWEEN 1" in sql for sql, _ in session.statements)
+    assert not any("BETWEEN requested.first_receive_ordinal" in sql for sql, _ in session.statements)
     assert session.statements[-2][1]["ids"] == ["manifest-100000"]
 
 

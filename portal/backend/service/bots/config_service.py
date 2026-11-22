@@ -23,6 +23,8 @@ from engines.bot_runtime.core.execution_plan import compile_runtime_execution_pl
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, normalize_execution_semantics
 from engines.bot_runtime.runtime.components.runtime_policy import ExecutionMode
 from atm import normalise_template
+from engines.bot_runtime.core.simulation_fees import apply_simulation_fee_schedule
+from engines.bot_runtime.core.bar_execution_clock import validate_causal_execution_policy
 
 from .strategy_loader import StrategyLoader
 from .startup_validation import validate_wallet_config as normalize_wallet_config
@@ -680,6 +682,8 @@ class BotConfigService:
         else:
             execution_assumptions = legacy_execution_assumptions()
 
+        from engines.bot_runtime.core.bar_execution_clock import validate_causal_run_mode
+        validate_causal_run_mode(execution_assumptions, run_type, str(bot.get("execution_mode") or "fast"))
         raw_book_bundle = bot.get("execution_book_tape_bundle")
         if raw_book_bundle is not None:
             if run_type != "backtest":
@@ -717,8 +721,16 @@ class BotConfigService:
             {"limit_maker"} if execution_plan.entry.order_type == "limit_maker" else set()
         )
 
+        raw_simulation_fees = bot.get("simulation_fee_schedules")
+        if raw_simulation_fees is not None and not isinstance(raw_simulation_fees, Mapping):
+            raise ValueError("simulation_fee_schedules must be an object")
+        declared_fee_ids = set((raw_simulation_fees or {}).keys())
+        strategy_ids = {str(link.instrument_id) for link in strategy.instrument_links}
+        if declared_fee_ids and declared_fee_ids != strategy_ids:
+            raise ValueError("simulation_fee_schedules must exactly cover Strategy instruments")
         for link in strategy.instrument_links:
-            instrument = self._resolve_runtime_instrument(strategy, link)
+            instrument = apply_simulation_fee_schedule(
+                self._resolve_runtime_instrument(strategy, link), bot)
             symbol = str(
                 instrument.get("symbol")
                 or getattr(link, "symbol", "")
@@ -778,6 +790,8 @@ class BotConfigService:
                     required_time_in_force={"gtc"},
                     post_only_order_types=post_only_order_types,
                 )
+                validate_causal_execution_policy(execution_assumptions, profile, execution_plan,
+                    execution_context.model.input_capability)
                 resolved_contexts.append(execution_context)
                 readiness_entries.append(
                     {

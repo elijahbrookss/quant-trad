@@ -1,9 +1,10 @@
 """Frozen deployed 9868e58f canonical ingestion method for migration fixtures.
 
-The function body is AST-identical to that revision's PostgresMarketDataRepository
-method. Bind its code to the repository module globals in the fixture; this keeps
-relative imports, collection fencing and database acknowledgement behavior intact.
-It is not imported by production code and never provisions v2 identities.
+After the explicit rejection of the newer gap-only option, the function body is
+AST-identical to that revision's PostgresMarketDataRepository method. Bind its
+code to the repository module globals in the fixture; this keeps relative imports,
+collection fencing and database acknowledgement behavior intact. It is not
+imported by production code and never provisions v2 identities.
 """
 from __future__ import annotations
 
@@ -18,7 +19,10 @@ class SourceV1Ingestion:
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
         require_same_source: bool = False,
+        fill_missing_only: bool = False,
     ) -> IngestionOutcome:
+        if fill_missing_only:
+            raise RuntimeError("market_data_gap_acquisition_requires_canonical_cold_coinbase")
         inserted_count = 0
         corrected_count = 0
         noop_count = 0

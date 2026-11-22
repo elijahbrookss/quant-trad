@@ -207,14 +207,6 @@ def test_expired_amendment_journal_never_renews_or_replays(attempt,monkeypatch):
     assert attempt.calls.count("apply")==1
 
 
-def test_cli_amendment_is_explicit(attempt,monkeypatch):
-    from cli import main
-    calls=[]
-    monkeypatch.setattr(operation,"run_operation_plan",lambda path,**kw:calls.append((path,kw)) or {"phase":"inspected"})
-    args=main.build_parser().parse_args(["storage","migrate","--operation-file",str(attempt.path),
-        "--extend-attempt-seconds","345600","--capacity-file",str(attempt.capacity_path)])
-    assert args.func(args)==0
-    assert calls==[(str(attempt.path),dict(execute=False,extend_attempt_seconds=345600,capacity_file=str(attempt.capacity_path)))]
 
 
 @pytest.mark.parametrize("state",[
@@ -459,16 +451,8 @@ def test_package_and_deadline_partial_journals_exclude_each_other(package_attemp
     assert not a.calls
 
 
-def test_package_cli_uses_existing_operator_and_separate_amendments(package_attempt,monkeypatch):
-    from cli import main
+def test_package_amendments_must_be_separate(package_attempt):
     a = package_attempt
-    calls = []
-    monkeypatch.setattr(deadline,"amend_worker_package",lambda path,**kw:
-        calls.append((path,kw)) or {"phase":"inspected"})
-    args = main.build_parser().parse_args(["storage","migrate","--operation-file",str(a.path),
-        "--replacement-package-file",str(a.package_path)])
-    assert args.func(args) == 0
-    assert calls == [(str(a.path),dict(package_file=str(a.package_path),execute=False))]
     with pytest.raises(ValueError,match="must_be_separate"):
         operation.run_operation_plan(a.path,replacement_package_file=a.package_path,extend_attempt_seconds=345600)
 

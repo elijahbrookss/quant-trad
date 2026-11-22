@@ -23,7 +23,7 @@ def stage(conn, cutoff):
     assert conn.scalar(text('SELECT current_database()')).startswith('qt_migration_')
     assert conn.scalar(text('SELECT count(*) FROM market.fact_versions'))<=32
     refs=conn.execute(text("SELECT conrelid::regclass::text AS relation,conname,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE contype='f' AND confrelid='market.fact_versions'::regclass AND conparentid=0 ORDER BY conrelid,conname")).mappings().all()
-    assert len(refs)==3
+    assert len(refs)==5
     MarketFactIdentityRecord.__table__.create(conn)
     # Tiny fixture setup, not an approved full-size identity backfill.
     conn.exec_driver_sql('INSERT INTO market.fact_identities SELECT id,storage_day,series_id,observation_key,revision FROM market.fact_versions')

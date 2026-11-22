@@ -10,7 +10,7 @@ import json
 import logging
 
 from core.execution_control import (
-    ExecutionControl, ExecutionStopUncertainError, controlled_execution, current_execution_control, consume_execution_json,
+    ExecutionControl, ExecutionStopUncertainError, controlled_execution, current_execution_control, consume_execution_json, execution_outcome,
 )
 from core.settings import get_settings
 
@@ -167,21 +167,40 @@ def research_execution_scope(*, check_on_exit: bool = True):
         yield control
 
 
+_METRICS_OPERATION_ACTIVE = ContextVar("research_metrics_operation_active", default=False)
+
+
 def bounded_research_execution(function):
     """Nested computation calls share one budget; they cannot reset the clock."""
     @wraps(function)
     def invoke(*args, **kwargs):
-        outer = current_execution_control() is None
-        with research_execution_scope() as control:
-            try:
+        outer = not _METRICS_OPERATION_ACTIVE.get()
+        token = _METRICS_OPERATION_ACTIVE.set(True)
+        control = current_execution_control()
+        error = None
+        try:
+            with research_execution_scope() as active_control:
+                control = active_control
                 result = function(*args, **kwargs)
-                # Before publication. Nested operations count repeated work too.
+                # Existing budget encoding supplies bytes; no metrics-only serialization.
                 consume_execution_json("result_bytes", result)
                 control.check()
                 return result
-            finally:
+        except BaseException as caught:
+            error = caught
+            raise
+        finally:
+            try:
                 if outer:
+                    # An uncertain interrupt helper may still own the control lock.
+                    # Reporting must not wait on it and prevent uncertainty propagation.
+                    metrics = (control.try_snapshot() if control is not None
+                               and not isinstance(error, ExecutionStopUncertainError) else None)
                     logging.getLogger(__name__).info(
-                        "research_execution_metrics | operation=%s metrics=%s",
-                        function.__name__, json.dumps(control.snapshot(), sort_keys=True))
+                        "research_execution_metrics | operation=%s status=%s error_type=%s metrics=%s",
+                        function.__name__, execution_outcome(error),
+                        type(error).__name__ if error is not None else None,
+                        json.dumps(metrics, sort_keys=True))
+            finally:
+                _METRICS_OPERATION_ACTIVE.reset(token)
     return invoke

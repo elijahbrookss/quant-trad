@@ -25,7 +25,7 @@ from data_providers.streams.coinbase import (
     CoinbaseAdvancedTradeStream,
     CoinbaseMessageParser,
 )
-from data_providers.streams.contracts import MarketSubscription
+from data_providers.streams.contracts import CanonicalMarketEvent, MarketSubscription
 from data_providers.streams.runtime import ContinuousStreamPolicy
 from market_data.archive import (
     DurableRawSpoolSegment,
@@ -70,6 +70,7 @@ from market_data.structure import (
     translate_coinbase_market_trade,
 )
 
+from ..storage.repos.fact_references import CanonicalBookPrefixBudgetExceeded
 from ..storage.repos.market_structure import (
     MarketTradeConflictError,
     PostgresMarketStructureRepository,
@@ -89,6 +90,9 @@ from .market_trade_quality import (
 
 
 logger = logging.getLogger(__name__)
+
+_BOOK_PREFIX_CHUNKS_PER_ATTEMPT = 4
+_BOOK_PREFIX_ATTEMPT_SECONDS = 20
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,100 @@ class _EpochProjectionState:
     book_reducer: Optional[Level2BookReconstructor] = None
     book_checkpoint_id: Optional[str] = None
     book_last_position: Optional[BookSourcePosition] = None
+
+
+@dataclass(frozen=True)
+class _EmptyLevel2SnapshotBoundary:
+    """One provider-observed empty book boundary without fabricated levels."""
+
+    position: BookSourcePosition
+    effective_at: datetime
+    known_at: datetime
+    evidence: Mapping[str, Any]
+
+
+def _empty_level2_snapshot_boundary(
+    *,
+    event: CanonicalMarketEvent,
+    record: RawStreamRecord,
+    contract: L2ProductContract,
+) -> Optional[_EmptyLevel2SnapshotBoundary]:
+    """Classify Coinbase's schema-valid empty snapshot as unavailable book state.
+
+    An empty snapshot is provider evidence, but it is not a complete two-sided
+    book and therefore cannot become an L2 event Fact. The raw frame remains
+    authoritative while the projection records an exact invalidating boundary.
+    Empty updates retain the normal fail-loud path because they do not establish
+    a replacement snapshot or a valid state transition.
+    """
+
+    if event.event_kind != "market_l2_snapshot":
+        return None
+    payload = dict(event.payload or {})
+    updates = payload.get("updates")
+    if (
+        not isinstance(updates, Sequence)
+        or isinstance(updates, (str, bytes))
+        or len(updates) != 0
+    ):
+        return None
+    if str(event.provider).upper() != "COINBASE":
+        raise ValueError(
+            "market_l2_empty_snapshot_invalid: provider must be Coinbase"
+        )
+    if str(event.product_id or "") != contract.provider_product_id:
+        raise ValueError(
+            "market_l2_empty_snapshot_invalid: product contract mismatch"
+        )
+    event_ordinal = int(payload.get("event_ordinal") or 0)
+    known_at = record.received_at
+    provider_clock = str(event.provider_message_time or "").strip()
+    if provider_clock:
+        normalized = (
+            f"{provider_clock[:-1]}+00:00"
+            if provider_clock.endswith("Z")
+            else provider_clock
+        )
+        try:
+            effective_at = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError(
+                "market_l2_empty_snapshot_invalid: provider_message_time "
+                "must be ISO-8601"
+            ) from exc
+        if effective_at.tzinfo is None:
+            effective_at = effective_at.replace(tzinfo=UTC)
+        effective_at = effective_at.astimezone(UTC)
+    else:
+        effective_at = known_at
+    position = BookSourcePosition(
+        definition_id=record.definition_id,
+        session_id=record.session_id,
+        connection_epoch=record.connection_epoch,
+        provider_product_id=contract.provider_product_id,
+        provider_sequence_num=event.provider_sequence_num,
+        receive_ordinal=record.receive_ordinal,
+        event_ordinal=event_ordinal,
+    )
+    return _EmptyLevel2SnapshotBoundary(
+        position=position,
+        effective_at=effective_at,
+        known_at=known_at,
+        evidence={
+            "provider": "COINBASE",
+            "provider_product_id": contract.provider_product_id,
+            "provider_sequence_num": event.provider_sequence_num,
+            "provider_message_time": (
+                effective_at.isoformat() if provider_clock else None
+            ),
+            "received_at": known_at.isoformat(),
+            "event_kind": event.event_kind,
+            "event_ordinal": event_ordinal,
+            "update_count": 0,
+            "projection_state": "book_unavailable_awaiting_fresh_snapshot",
+            "cause": "provider_empty_l2_snapshot",
+        },
+    )
 
 
 class _SessionEventWriter:
@@ -1426,6 +1524,38 @@ class ContinuousStreamRuntime:
                         "market_l2_update",
                     }:
                         continue
+                    empty_snapshot = _empty_level2_snapshot_boundary(
+                        event=event,
+                        record=record,
+                        contract=contract,
+                    )
+                    if empty_snapshot is not None:
+                        position = empty_snapshot.position
+                        if (
+                            position.connection_epoch,
+                            position.receive_ordinal,
+                            position.event_ordinal,
+                        ) <= (
+                            checkpoint_position.connection_epoch,
+                            checkpoint_position.receive_ordinal,
+                            checkpoint_position.event_ordinal,
+                        ):
+                            continue
+                        reducer.invalidate_transport(
+                            position=position,
+                            effective_at=empty_snapshot.effective_at,
+                            known_at=empty_snapshot.known_at,
+                            raw_record_id=record.raw_record_id,
+                            classification="book_invalid",
+                            reason=(
+                                "provider Level 2 snapshot contained no book "
+                                "levels; book remains unavailable until a fresh "
+                                "complete snapshot"
+                            ),
+                            evidence=empty_snapshot.evidence,
+                        )
+                        state.book_last_position = position
+                        continue
                     fact = translate_coinbase_l2_event(
                         event,
                         raw_record=record,
@@ -1878,6 +2008,46 @@ class ContinuousStreamRuntime:
                     "market_l2_update",
                 }:
                     continue
+                empty_snapshot = _empty_level2_snapshot_boundary(
+                    event=event,
+                    record=record,
+                    contract=contract,
+                )
+                if empty_snapshot is not None:
+                    max_event_ordinal_by_receive[record.receive_ordinal] = max(
+                        empty_snapshot.position.event_ordinal,
+                        max_event_ordinal_by_receive.get(
+                            record.receive_ordinal, -1
+                        ),
+                    )
+                    collect(
+                        reducer.invalidate_transport(
+                            position=empty_snapshot.position,
+                            effective_at=empty_snapshot.effective_at,
+                            known_at=empty_snapshot.known_at,
+                            raw_record_id=record.raw_record_id,
+                            classification="book_invalid",
+                            reason=(
+                                "provider Level 2 snapshot contained no book "
+                                "levels; book remains unavailable until a fresh "
+                                "complete snapshot"
+                            ),
+                            evidence=empty_snapshot.evidence,
+                        )
+                    )
+                    state.book_last_position = empty_snapshot.position
+                    logger.warning(
+                        "continuous_l2_empty_snapshot_invalidated | "
+                        "definition_id=%s session_id=%s connection_epoch=%s "
+                        "receive_ordinal=%s event_ordinal=%s sequence_num=%s",
+                        claim.definition_id,
+                        claim.session_id,
+                        record.connection_epoch,
+                        record.receive_ordinal,
+                        empty_snapshot.position.event_ordinal,
+                        empty_snapshot.position.provider_sequence_num,
+                    )
+                    continue
                 accepted_at = datetime.now(UTC)
                 if preserve_existing_fact_clocks:
                     position_probe = translate_coinbase_l2_event(
@@ -1990,8 +2160,7 @@ class ContinuousStreamRuntime:
             state.book_checkpoint_id = book_checkpoint.checkpoint_id
             checkpoint_ids.append(book_checkpoint.checkpoint_id)
 
-        ingest = self.repository.ingest_book_facts(
-            claim,
+        ingest_options = dict(
             snapshots=snapshots,
             batches=batches,
             validity_versions=validity_versions,
@@ -2008,6 +2177,39 @@ class ContinuousStreamRuntime:
             final_event_ordinal=final_position.event_ordinal,
             final_sequence_num=final_position.provider_sequence_num,
         )
+        try:
+            ingest = self.repository.ingest_book_facts(claim, **ingest_options)
+        except CanonicalBookPrefixBudgetExceeded as exc:
+            # The first valid snapshot may follow a long invalid/control-only
+            # epoch. Publish resumable raw custody before retrying the same
+            # canonical operation, leaving the local spool until it commits.
+            if len(exc.prefixes) != 1 or exc.prefixes[0]["connection_epoch"] != connection_epoch:
+                raise
+            prefix = exc.prefixes[0]
+            deadline = time.monotonic() + _BOOK_PREFIX_ATTEMPT_SECONDS
+
+            def check_budget():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("continuous_l2_raw_prefix_time_budget_exceeded")
+
+            for _ in range(_BOOK_PREFIX_CHUNKS_PER_ATTEMPT):
+                progress = self.repository.prepare_level2_raw_prefix(
+                    claim, prefix=prefix, object_store=object_store,
+                    temporary_directory=temporary_root, check_budget=check_budget,
+                )
+                if progress is None:
+                    break
+                logger.info(
+                    "continuous_l2_raw_prefix_verified | definition_id=%s session_id=%s epoch=%s "
+                    "first_receive_ordinal=%s last_receive_ordinal=%s required_receive_ordinal=%s",
+                    claim.definition_id, claim.session_id, connection_epoch, progress["first_receive_ordinal"],
+                    progress["last_receive_ordinal"], progress["required_receive_ordinal"],
+                )
+                if progress["last_receive_ordinal"] == prefix["receive_ordinal"]:
+                    break
+            else:
+                raise RuntimeError("continuous_l2_raw_prefix_pending: retry committed progress") from exc
+            ingest = self.repository.ingest_book_facts(claim, **ingest_options)
 
         bbo_facts = ()
         depth_facts = ()

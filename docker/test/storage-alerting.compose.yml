@@ -1,4 +1,20 @@
 services:
+  alloy-config-check:
+    image: grafana/alloy:v1.18.1
+    command: [validate, /etc/alloy/config.alloy]
+    network_mode: none
+    volumes:
+      - ../alloy/config.alloy:/etc/alloy/config.alloy:ro
+
+  alloy-clock-test:
+    image: grafana/alloy:v1.18.1
+    command: [run, --disable-reporting, /etc/alloy/clock-config.alloy]
+    depends_on:
+      - loki
+    volumes:
+      - ${QT_CLOCK_ALERT_TEST_CONFIG:?test config required}:/etc/alloy/clock-config.alloy:ro
+      - ${QT_CLOCK_ALERT_TEST_EXPORT_ROOT:?synthetic export required}:/run/qt-clock-health:ro
+
   loki:
     image: grafana/loki:3.7.6
     # Synthetic 24h-old samples have just arrived and are still in the ingester.
@@ -27,12 +43,14 @@ services:
       GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
     ports:
       - "127.0.0.1::3000"
-    # Disposable SQLite bootstrap needs no durable fsync-backed data volume.
-    tmpfs:
-      - /var/lib/grafana:uid=472,gid=0,size=256m
+    # Preserve SQLite across enable/disable/re-enable container recreation.
+    # This unique project's named volume is destroyed in the proof's finally.
     volumes:
+      - grafana-data:/var/lib/grafana
       - ../grafana/provisioning/datasources/loki.yml:/etc/grafana/provisioning/datasources/loki.yml:ro
       - ../grafana/provisioning/alerting/storage-safety.yml:/etc/grafana/provisioning/alerting/storage-safety.yml:ro
+      - ${QT_CLOCK_ALERT_TEST_RULE_FILE:?test rule required}:/etc/grafana/provisioning/alerting/clock-safety.yml:ro
 
 volumes:
   loki-data:
+  grafana-data:

@@ -30,6 +30,7 @@ from engines.bot_runtime.core.execution_profile import (
 )
 from engines.bot_runtime.core.execution_assumptions import (
     ResolvedExecutionAssumptions,
+    TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION,
     legacy_execution_assumptions,
     resolve_execution_assumptions,
 )
@@ -51,6 +52,7 @@ from engines.bot_runtime.core.passive_execution import (
 )
 from market_data.backtest import resolve_backtest_warmup_bars
 from atm import normalise_template
+from engines.bot_runtime.core.simulation_fees import apply_simulation_fee_schedule
 from risk import normalise_risk_config
 from strategies.compiler import compile_strategy
 from utils.log_context import build_log_context, with_log_context
@@ -302,6 +304,16 @@ class SeriesBuilderConstructionMixin:
         Returns:
             StrategySeries ready for runtime execution
         """
+        raw_causal_assumptions = self.config.get("execution_assumptions")
+        if isinstance(raw_causal_assumptions, Mapping) and raw_causal_assumptions.get("model_version") in {
+            "causal_spot_resting_bar.v1", "causal_spot_resting_bar.v2",
+            TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION,
+        }:
+            from engines.bot_runtime.core.bar_execution_clock import validate_causal_run_mode
+            validate_causal_run_mode(resolve_execution_assumptions(
+                self.config.get("economic_claim_intent"), raw_causal_assumptions,
+                source=str(raw_causal_assumptions.get("source") or "run_start_request")),
+                self.run_type, str(self.config.get("execution_mode") or "fast"))
         # Step 1: Resolve strategy metadata from the canonical instrument link.
         instrument_id = instrument_link.instrument_id
         if not instrument_id:
@@ -309,6 +321,7 @@ class SeriesBuilderConstructionMixin:
         instrument = self._instrument_for_link(strategy, instrument_link)
         if instrument and instrument.get("instrument_snapshot"):
             instrument = instrument.get("instrument_snapshot")
+        instrument = apply_simulation_fee_schedule(instrument or {}, {**self.config, "run_type": self.run_type})
         symbol = str((instrument or {}).get("symbol") or instrument_link.symbol or "").strip()
         if not symbol:
             raise RuntimeError(f"Instrument link for strategy {strategy.id} missing symbol")
@@ -424,6 +437,8 @@ class SeriesBuilderConstructionMixin:
             if "economic_claim_intent" in self.config
             else legacy_execution_assumptions()
         )
+        from engines.bot_runtime.core.bar_execution_clock import validate_causal_run_mode
+        validate_causal_run_mode(execution_assumptions, self.run_type, str(self.config.get("execution_mode") or "fast"))
         pinned_manifest_hash = str(raw_execution_assumptions.get("manifest_hash") or "").strip()
         if pinned_manifest_hash and pinned_manifest_hash != execution_assumptions.manifest_hash:
             raise RuntimeError("execution_assumption_manifest_hash_mismatch")

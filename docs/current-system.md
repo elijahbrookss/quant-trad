@@ -60,7 +60,9 @@ Market Data Read Binding** records the exact slice a durable consumer used.
 
 An **Indicator** turns known market evidence into a typed measurement, state, or
 signal. A **Check** asks a bounded analytical question. A Check preview is only
-exploration; durable Check evidence is frozen and replayable. A promising result
+exploration; durable Check evidence is frozen and hash-verified. Current methods support
+provider-free replay; retired evidence remains readable with execution and replay
+availability reported separately. A promising result
 can be admitted deliberately as a **Research Observation**, which is research
 memory rather than market truth.
 
@@ -107,9 +109,10 @@ QT protects six high-consequence outcomes:
 1. **Causal and canonical truth.** Historical results use only information that
    was knowable at the time, and canonical observations are not silently
    rewritten.
-2. **Frozen research authority.** Durable research identifies and can replay the
-   exact market evidence it used; exploratory previews do not silently become
-   durable evidence.
+2. **Frozen research authority.** Durable research identifies the exact market
+   evidence it used. Current methods support provider-free replay; retired
+   evidence retains verified custody with execution/replay availability stated
+   separately. Exploratory previews do not silently become durable evidence.
 3. **Decision and execution authority.** Indicators and Strategies can explain
    a decision, while the runtime alone owns execution and accounting truth.
 4. **Capital, order, and accounting integrity.** Order history, settlement,
@@ -118,9 +121,10 @@ QT protects six high-consequence outcomes:
 5. **Credential confinement.** Provider secrets stay behind credential
    references and do not belong in normal configuration, logs, or research
    artifacts.
-6. **Durable persistence and recovery.** PostgreSQL is the one durable source of
-   platform truth, and destructive recovery is treated as a real operational
-   obligation rather than assumed from configuration alone.
+6. **Durable persistence and recovery.** PostgreSQL owns operational state.
+   Canonical archive objects and the PostgreSQL records that commit their
+   publication must be recoverable at the same boundary. Destructive recovery
+   requires an isolated rehearsal.
 
 The [core promises](core-promises.md) connect these outcomes to their platform
 contracts, accepted decisions, and normal engineering checks.

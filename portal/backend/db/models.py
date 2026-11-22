@@ -16,6 +16,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     UniqueConstraint,
     and_,
@@ -481,6 +482,22 @@ class ResearchItemRecord(Base):
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
+
+
+class ResearchImageRecord(Base):
+    """Append-only presentation images; scientific payloads remain untouched."""
+
+    __tablename__ = "portal_research_images"
+    __table_args__ = (
+        Index("ix_portal_research_images_item_created", "item_id", "created_at"),
+        CheckConstraint("octet_length(content) BETWEEN 1 AND 4194304", name="ck_research_image_bytes"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    item_id = Column(String(64), ForeignKey("portal_research_items.id", ondelete="RESTRICT"), nullable=False)
+    manifest = Column(JSONB, nullable=False)
+    content = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class ResearchLinkRecord(Base):

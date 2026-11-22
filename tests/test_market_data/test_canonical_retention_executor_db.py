@@ -18,6 +18,90 @@ from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _pl
 pytestmark = pytest.mark.db
 
 
+def test_reviewed_verification_batch_resumes_exact_receipts_and_stops_at_last_pin(storage, tmp_path, monkeypatch):
+    import json
+
+    from portal.backend.service.market.canonical_retention import CanonicalFactRetentionExecutor
+    from portal.backend.service.storage.repos.fact_archival import SelectedVerificationPage
+    from scripts.db import canonical_cold_prepare_verification as prepare
+
+    day = storage.today - timedelta(days=31)
+    _placement(monkeypatch, day)
+    for index in range(4):
+        _ingest(storage, replace(storage.fact, observation_key=f"reviewed-verification-{index}"))
+    policy = CanonicalFactRetentionPolicy(
+        execution_enabled=True, max_steps_per_run=5, max_page_rows=1, archive_min_free_bytes=0,
+    )
+    repository = PostgresCanonicalFactRetentionRepository(database=storage.database)
+    executor = CanonicalFactRetentionExecutor(repository=repository)
+    staged = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+    assert [outcome["status"] for outcome in staged["outcomes"]] == ["partition_sealed"] + ["page_acknowledged"] * 4
+    with storage.database.session() as session:
+        manifests = session.execute(text("""
+            SELECT p.page_ordinal,p.id,p.manifest_hash,g.generation,g.preparation_id,g.catalog_commitment,p.object_key
+            FROM market.fact_archive_manifests p JOIN market.fact_archive_active_generations g ON g.manifest_id=p.id
+            WHERE p.storage_day=:day ORDER BY p.page_ordinal
+        """), {"day": day}).all()
+        identity = dict(session.execute(text("""
+            SELECT system_identifier::text AS system_identifier,current_database() AS database,
+                   d.oid::bigint AS database_oid,'market.fact_versions'::regclass::oid::bigint AS header_oid
+            FROM pg_catalog.pg_control_system() CROSS JOIN pg_catalog.pg_database d WHERE d.datname=current_database()
+        """)).mappings().one())
+    monkeypatch.setenv("PG_DSN", storage.dsn)
+    prepared = tmp_path / "prepare.json"
+    arguments = ["--storage-day", day.isoformat(), "--first-page-ordinal", str(manifests[0].page_ordinal),
+                 "--page-count", "3", "--receipt", str(prepared)]
+    for key, value in identity.items():
+        arguments += ["--" + key.replace("_", "-"), str(value)]
+    with pytest.raises(SystemExit, match="prepare_day_coverage_changed"):
+        prepare.main(arguments + ["--day-page-count", "3"])
+    assert not prepared.exists()
+    assert prepare.main(arguments + ["--day-page-count", "4"]) == 0
+    receipt = json.loads(prepared.read_text())
+    assert receipt["source"] == identity and receipt["day_expected_rows"] == 4
+    pins = tuple(SelectedVerificationPage(**page) for page in receipt["pages"])
+    assert pins == tuple(SelectedVerificationPage(*row[:6]) for row in manifests[:3])
+    prepare.require_prepared_source(identity)
+    with pytest.raises(RuntimeError, match="prepare_source_changed"):
+        prepare.require_prepared_source(identity | {"header_oid": identity["header_oid"] + 1})
+    options = dict(policy=policy, storage_root=tmp_path, storage_day=day, expected_action="verify_page")
+
+    def proof_ordinals():
+        with storage.database.session() as session:
+            return session.execute(text("""
+                SELECT p.page_ordinal FROM market.fact_archive_verifications v
+                JOIN market.fact_archive_manifests p ON p.id=v.manifest_id WHERE p.storage_day=:day
+                ORDER BY p.page_ordinal
+            """), {"day": day}).scalars().all()
+
+    with pytest.raises(ValueError, match="selected_batch_policy_limit"):
+        executor.run_selected(**(options | {"policy": replace(policy, max_steps_per_run=2)}),
+                              verification_batch=pins, execute=True)
+    stale = (pins[0], replace(pins[1], catalog_commitment="0" * 64), pins[2])
+    with pytest.raises(RuntimeError, match="selected_batch_changed"):
+        executor.run_selected(**options, verification_batch=stale, execute=True)
+    planned = executor.run_selected(**options, verification_batch=pins)
+    assert planned["already_verified_pages"] == 0 and proof_ordinals() == []
+
+    bad = tmp_path / "objects" / manifests[1].object_key
+    original = bad.read_bytes()
+    bad.write_bytes(b"b" * len(original))
+    interrupted = executor.run_selected(**options, verification_batch=pins, execute=True)
+    assert interrupted["status"] == "failed" and interrupted["newly_verified_pages"] == 1
+    assert interrupted["next_reviewed_page_ordinal"] == pins[1].page_ordinal
+    assert proof_ordinals() == [pins[0].page_ordinal]
+    bad.write_bytes(original)
+
+    fresh = CanonicalFactRetentionExecutor(repository=repository)
+    resumed = fresh.run_selected(**options, verification_batch=pins, execute=True)
+    assert resumed["status"] == "completed"
+    assert resumed["already_verified_pages"] == 1 and resumed["newly_verified_pages"] == 2
+    assert proof_ordinals() == [page.page_ordinal for page in pins]
+    replayed = fresh.run_selected(**options, verification_batch=pins, execute=True)
+    assert replayed["already_verified_pages"] == 3 and replayed["outcomes"] == []
+    assert _state(storage)[0]["state"] == "sealed" and _physical(storage, day)["hot_rows"] == 4
+
+
 def test_lifecycle_executor_resumes_pages_verifies_and_reclaims_without_changing_frozen_history(storage, tmp_path, monkeypatch):
     monkeypatch.setattr(market_lifecycle, "db", storage.database)
     day = storage.today - timedelta(days=31)
@@ -158,31 +242,38 @@ def test_statement_cancel_rolls_back_page_and_preserves_budget_resume(
                                          max_run_seconds=60, archive_min_free_bytes=0)
     assert executor.run(policy=policy, storage_root=tmp_path, execute=True)["outcomes"][0]["status"] == "partition_sealed"
     physical = _physical(storage, day)
+    # A fresh worker resumes from sealed PostgreSQL state, not the prior
+    # process's newly retained progress cooldown.
+    executor = module.CanonicalFactRetentionExecutor(repository=repository)
     clock = [0.0]
     monkeypatch.setattr(module, "monotonic", lambda: clock[0])
-    original = PostgresCanonicalFactArchiveRepository._stage_catalog_rows
+    from portal.backend.service.storage.repos.fact_archive_generation import ArchiveGenerationCoordinator
     cancellations = []
 
-    def cancel_after_catalog_write(archive, session, record_type, manifest_id, rows):
-        original(archive, session, record_type, manifest_id, rows)
-        # Apply the artificial timeout only to the intended statement. Source
-        # selection and catalog setup retain the ordinary SQL policy.
-        session.execute(text("SET LOCAL statement_timeout='25ms'"))
-        try:
-            session.execute(text("SELECT pg_sleep(0.2)"))
-        except DBAPIError as exc:
-            cancellations.append(exc.orig.pgcode)
-            clock[0] = 60.0 if deadline_elapsed else 1.0
-            raise
+    def cancel_before_activation(coordinator, **kwargs):
+        # Hidden catalog batches may already be committed. Cancellation before
+        # activation must leave them invisible and resumable without publishing
+        # a manifest, cursor, or authoritative generation.
+        with coordinator.database.session() as session:
+            coordinator.lock_day(session, kwargs["day"])
+            session.execute(text("SET LOCAL statement_timeout='25ms'"))
+            try:
+                session.execute(text("SELECT pg_sleep(0.2)"))
+            except DBAPIError as exc:
+                cancellations.append(exc.orig.pgcode)
+                clock[0] = 60.0 if deadline_elapsed else 1.0
+                raise
         pytest.fail("The disposable PostgreSQL statement must time out")
 
     with monkeypatch.context() as patch:
-        patch.setattr(PostgresCanonicalFactArchiveRepository, "_stage_catalog_rows", cancel_after_catalog_write)
+        patch.setattr(ArchiveGenerationCoordinator, "activate", cancel_before_activation)
         failed = executor.run(policy=policy, storage_root=tmp_path, execute=True)
     assert cancellations == ["57014"]
     assert failed["outcomes"][0]["status"] == ("deferred" if deadline_elapsed else "failed")
     assert failed["failure_count"] == (0 if deadline_elapsed else 1)
-    assert failed["next_after_storage_day"] == (day - timedelta(days=1) if deadline_elapsed else day).isoformat()
+    assert failed["next_after_storage_day"] == day.isoformat()
+    if deadline_elapsed:
+        assert failed["retry_schedule"][0]["attempt_count"] == 0
     if deadline_elapsed:
         assert failed["stop_reason"] == "time_budget"
     with storage.database.session() as session:
@@ -200,6 +291,7 @@ def test_statement_cancel_rolls_back_page_and_preserves_budget_resume(
 
     # A later bounded attempt uses only committed progress. The uncertain object
     # from the rolled-back publication cannot serve as catalog acknowledgement.
+    clock[0] += policy.max_run_seconds + 1
     retry = executor.run(policy=policy, storage_root=tmp_path, execute=True,
                          after_storage_day=None if deadline_elapsed else day - timedelta(days=1))
     assert retry["failure_count"] == 0
@@ -208,3 +300,33 @@ def test_statement_cancel_rolls_back_page_and_preserves_budget_resume(
     with storage.database.session() as session:
         assert session.scalar(text("SELECT count(*) FROM market.fact_archive_manifests WHERE storage_day=:day"),
                               {"day": day}) == 1
+
+
+def test_fresh_native_executor_discovers_later_days_and_replans_cooled_progress(storage,tmp_path,monkeypatch):
+    from portal.backend.service.market import canonical_retention as module
+    monkeypatch.setattr(market_lifecycle,"db",storage.database)
+    days=[storage.today-timedelta(days=33-index) for index in range(3)]
+    for index,day in enumerate(days):
+        _placement(monkeypatch,day)
+        _ingest(storage,replace(storage.fact,observation_key=f"fresh-discovery-{index}"))
+    clock=[0.0];monkeypatch.setattr(module,"monotonic",lambda:clock[0])
+    policy=CanonicalFactRetentionPolicy(execution_enabled=True,max_steps_per_run=1,
+        max_run_seconds=60,max_page_rows=1,archive_min_free_bytes=0)
+    executor=module.CanonicalFactRetentionExecutor(repository=PostgresCanonicalFactRetentionRepository(database=storage.database))
+    for index,day in enumerate(days):
+        clock[0]=float(index)
+        result=executor.run(policy=policy,storage_root=tmp_path,execute=True)
+        assert result["failure_count"]==0
+        assert [(item["storage_day"],item["status"]) for item in result["outcomes"]]==[(day.isoformat(),"partition_sealed")]
+        assert result["next_after_storage_day"]==day.isoformat()
+        assert all(item["attempt_count"]==0 for item in result["retry_schedule"])
+    assert len(executor._retry_states)==3
+    for index,day in enumerate(days):
+        clock[0]=61.0+index
+        result=executor.run(policy=policy,storage_root=tmp_path,execute=True)
+        assert result["failure_count"]==0
+        assert [(item["storage_day"],item["status"]) for item in result["outcomes"]]==[(day.isoformat(),"page_acknowledged")]
+    with storage.database.session() as session:
+        rows=session.execute(text("SELECT storage_day,count(*) AS pages,sum(row_count) AS rows "
+            "FROM market.fact_archive_manifests GROUP BY storage_day ORDER BY storage_day")).mappings().all()
+    assert [(item["storage_day"],item["pages"],item["rows"]) for item in rows]==[(day,1,1) for day in days]

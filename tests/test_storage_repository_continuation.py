@@ -13,19 +13,20 @@ from scripts.automation import storage_online_repositories as repositories
 from scripts.automation import storage_online_operation as operation
 
 
-def test_database_archiver_probe_uses_database_uid_and_no_keys(monkeypatch):
+@pytest.mark.parametrize('version', ['pgBackRest 2.59.1', 'pgBackRest 2.59.3'])
+def test_database_archiver_probe_uses_database_uid_and_no_keys(monkeypatch, version):
     calls = []
     def docker(*args, **kwargs):
         calls.append((args, kwargs))
-        return "pgBackRest 2.59.1\n"
+        return version+"\n"
     monkeypatch.setattr(host, 'docker', docker)
     assert recovery.inspect_database_archiver('database') == {
-        'pgbackrest_version': 'pgBackRest 2.59.1'}
+        'pgbackrest_version': version}
     assert calls == [(('exec', '--user', '70:70', 'database',
                       '/usr/local/bin/pgbackrest', 'version'), {'timeout': 10})]
 
 
-@pytest.mark.parametrize('version', ['pgBackRest 2.58.0', '', 'unconfirmed'])
+@pytest.mark.parametrize('version', ['pgBackRest 2.58.0', 'pgBackRest 2.59.2', '', 'unconfirmed'])
 def test_database_archiver_probe_rejects_wrong_or_missing_version(monkeypatch, version):
     monkeypatch.setattr(host, 'docker', lambda *a, **kw: version)
     with pytest.raises(RuntimeError, match='archiver_version_mismatch'):
@@ -218,22 +219,17 @@ def test_continuation_cannot_be_combined_with_other_operations(other):
             **{other: True if other == 'prepare_forward_only' else 'unused'})
 
 
-def test_cli_routes_explicit_continuation_without_opening_api(monkeypatch, capsys):
-    from cli import main
-    monkeypatch.setattr(main, '_client', lambda *a: pytest.fail('HTTP client opened'))
+def test_legacy_operator_routes_explicit_continuation(monkeypatch):
     calls = []
     def continuation(path, **kwargs):
         calls.append((path, kwargs))
         return dict(phase='inspected')
     monkeypatch.setattr(recovery, 'continue_repositories', continuation)
-    parser = main.build_parser()
-    for tail in ([], ['--execute']):
-        args = parser.parse_args(['storage', 'migrate', '--operation-file', 'plan',
-            '--recover-repositories-file', 'request', *tail])
-        assert args.func(args) == 0
+    for execute in (False, True):
+        assert operation.run_operation_plan('plan',
+            recover_repositories_file='request', execute=execute) == dict(phase='inspected')
     assert calls == [('plan', dict(request_file='request', execute=False)),
                      ('plan', dict(request_file='request', execute=True))]
-    assert 'inspected' in capsys.readouterr().out
 
 
 def test_online_preflight_requires_incremental_settings_before_source_stop(monkeypatch):
@@ -264,7 +260,7 @@ def test_archiver_request_requires_exact_prior_attempt_and_immutable_image(reque
         assert recovery._continuation_request(path) == value
 
 
-@pytest.mark.parametrize('fault', [None, 'binaries', 'configuration', 'tool'])
+@pytest.mark.parametrize('fault', [None, 'binaries', 'configuration', 'tool', 'legacy-tool'])
 def test_replacement_requires_same_database_binaries_and_image_configuration(monkeypatch, fault):
     old, new = 'sha256:'+'a'*64, 'sha256:'+'b'*64
     binaries = 'postgres (PostgreSQL) 15.6\na postgres\nb extension.so\nc extension.control\n'
@@ -280,7 +276,8 @@ def test_replacement_requires_same_database_binaries_and_image_configuration(mon
             return binaries
         assert args[0] == 'run' and '--mount' not in args and '--volume' not in args
         assert args[args.index('--network')+1] == 'none' and '--read-only' in args
-        return ('wrong\n' if fault == 'tool' else 'pgBackRest 2.59.1\n') + (
+        version = {'tool': 'wrong', 'legacy-tool': 'pgBackRest 2.59.1'}.get(fault, 'pgBackRest 2.59.3')
+        return version+'\n' + (
             binaries+'changed\n' if fault == 'binaries' else binaries)
     monkeypatch.setattr(host, 'docker', docker)
     if fault:

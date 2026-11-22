@@ -111,7 +111,8 @@ def test_research_budget_environment_reaches_execution_without_expanding_pinned_
 def test_canonical_executor_environment_bindings(monkeypatch, request):
     request.addfinalizer(settings_module.clear_settings_cache)
     values = {"EXECUTION_ENABLED": True, "MAX_STEPS_PER_RUN": 3, "MAX_RUN_SECONDS": 120,
-              "EXECUTION_STATEMENT_TIMEOUT_MS": 4321, "MAX_PAGE_ROWS": 17,
+              "EXECUTION_STATEMENT_TIMEOUT_MS": 4321,
+              "PINNED_RANGES_STATEMENT_TIMEOUT_MS": 2468, "MAX_PAGE_ROWS": 17,
               "MAX_PAGE_LOGICAL_BYTES": 100000, "MAX_VERIFICATION_BYTES": 900000,
               "MAX_VERIFICATION_OBJECTS": 80, "MAX_VERIFICATION_PAGES": 99}
     for name, value in values.items():
@@ -201,3 +202,23 @@ def test_history_cache_requires_explicit_headroom_and_global_gate(monkeypatch, r
     assert settings.storage.history_cache_bytes==1048576
     assert settings.storage.history_cache_min_free_bytes==2097152
     assert settings.async_jobs.research_global_serialization is True
+
+
+@pytest.mark.parametrize("value,expected", [(None, 10), ("1", 1), ("60", 60)])
+def test_final_handoff_environment_default_and_supported_bounds(monkeypatch, request, value, expected):
+    request.addfinalizer(settings_module.clear_settings_cache)
+    key = "QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_HANDOFF_SECONDS"
+    monkeypatch.delenv(key, raising=False)
+    if value is not None:
+        monkeypatch.setenv(key, value)
+    policy = get_settings(force_reload=True).market_data_lifecycle.canonical_retention
+    assert policy.max_handoff_seconds == expected
+    assert policy.to_dict()["max_handoff_seconds"] == expected
+
+
+@pytest.mark.parametrize("value", ["0", "61", "true", "1.5"])
+def test_final_handoff_environment_rejects_invalid_values(monkeypatch, request, value):
+    request.addfinalizer(settings_module.clear_settings_cache)
+    monkeypatch.setenv("QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_HANDOFF_SECONDS", value)
+    with pytest.raises((ValueError, RuntimeError)):
+        get_settings(force_reload=True)

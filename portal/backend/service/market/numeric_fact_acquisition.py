@@ -23,6 +23,8 @@ from data_providers.providers.chainlink import (
     ChainlinkAggregatorV3Provider,
     HttpJsonRpcTransport,
 )
+from data_providers.providers.factory import get_provider
+from data_providers.registry import get_provider_config
 from market_data.contracts import (
     NumericFact,
     NumericFactRecord,
@@ -112,6 +114,13 @@ class NumericFactAcquisitionService:
 
     @staticmethod
     def _build_provider(binding: NumericFactBinding) -> NumericFactProvider:
+        registered = get_provider_config(binding.source.get("provider"))
+        if registered and registered.capabilities.get("numericFactAdapter") == binding.adapter:
+            if binding.endpoint_ref != registered.capabilities.get("numericFactEndpointRef"):
+                raise ValueError("numeric_fact_endpoint_invalid: registered adapter endpoint mismatch")
+            provider = get_provider(registered.id, venue=binding.source.get("venue"))
+            provider.validate_binding(binding)
+            return provider
         endpoint = str(os.environ.get(binding.endpoint_ref) or "").strip()
         if not endpoint:
             raise RuntimeError(
@@ -182,6 +191,10 @@ class NumericFactAcquisitionService:
         known_at: datetime | None = None,
         known_at_method: str | None = None,
     ) -> NumericFact:
+        receipt_based = observation.known_at_method == "platform_receipt"
+        selected_known_at = known_at or observation.known_at
+        if receipt_based:
+            selected_known_at = max(accepted_at, selected_known_at)
         return NumericFact(
             fact_type=binding.fact_type,
             contract_version=binding.contract_version,
@@ -192,9 +205,9 @@ class NumericFactAcquisitionService:
             effective_at=observation.effective_at,
             effective_at_method=observation.effective_at_method,
             source_published_at=observation.source_published_at,
-            received_at=None,
+            received_at=observation.known_at if receipt_based else None,
             accepted_at=accepted_at,
-            known_at=known_at or observation.known_at,
+            known_at=selected_known_at,
             known_at_method=known_at_method or observation.known_at_method,
             source_event_key=observation.source_event_key,
             source_event_group_key=observation.source_event_group_key,

@@ -45,6 +45,7 @@ code_paths:
   - src/core/settings.py
   - tests/test_market_data/test_archive_shared_ownership.py
   - scripts/automation/storage_host_boundary.py
+  - tests/test_storage_inventory_removal.py
   - scripts/automation/storage_online_drain.py
   - tests/test_storage_online_drain.py
   - tests/test_market_data/test_storage_online_collector_drain_db.py
@@ -2331,3 +2332,29 @@ adds no new data-copy algorithm, recovery format, policy or recurring process.
 Host unit checks and native SQL fixtures have different scopes; production use
 also requires qualification of the actual confined command, dynamic capacity and
 collection/read impact. Merely exposing this command is not deployment admission.
+
+
+## Journaled database disappearance during inventory
+
+A caller that has durably recorded removal of the exact cleanly stopped database
+may observe that container disappear between Docker listing and inspection.
+Inventory accepts that transition only for `database_preparing` with the exact
+`removing_database_id`. The fixed-format Docker inspection must explicitly report
+only that full ID missing, with no other diagnostic text. Its partial output must
+contain every other listed ID exactly once and satisfy all existing service,
+project, state and required-client checks. Fresh project/network listings must
+then match that exact remaining set, followed by one complete fresh inspection
+and the same client checks. A WARN records the observed database disappearance.
+
+Unknown daemon errors, another missing ID, new or reappearing IDs, incomplete,
+duplicate, malformed or unsafe rows, and any second inspection failure refuse.
+The existing caller deadline bounds all observations. No removal is replayed,
+clock renewed, client omitted, or recovery success inferred from the exception.
+The caller still owns its source/deployment holds, journal and identity checks.
+
+Deterministic CLI-adapter regressions exercise this exact interleaving without
+running Docker. The preserved hosted failure at source `85c56eb1` reported only
+`storage_pause_docker_failed: operation=inspect exit=1` while removal was in flight;
+its redacted diagnostics do not establish that this interleaving caused it.
+The correction requires source-matched disposable recovery qualification before
+release and grants no production action or migration authority.

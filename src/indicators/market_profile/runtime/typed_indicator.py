@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from math import ceil
 from typing import Any, Mapping
 
 from engines.bot_runtime.core.domain import Candle
@@ -77,17 +78,29 @@ class TypedMarketProfileIndicator(Indicator):
         self._first_return = (FirstReturnState(
             atr_period=int(params.get("retest_atr_period", DEFAULT_RETEST_ATR_PERIOD)),
             lifetime_bars=int(params.get("reclaim_max_bars", DEFAULT_RECLAIM_MAX_BARS)),
-        ) if version == "v2" else None)
+        ) if version in {"v2", "v3"} else None)
         self.runtime_spec = build_runtime_spec(
             get_indicator_manifest("market_profile", version),
             instance_id=indicator_id,
             version=version,
         )
         self._indicator_id = str(indicator_id or "").strip()
+        self._causal_timing = version == "v3"
+        if self._causal_timing and source_facts.get("profile_boundary_semantics") != "source_availability.v3":
+            raise RuntimeError("market_profile_source_contract_invalid: v3 requires source_availability.v3")
+        self._profile_availability = dict(source_facts.get("profile_availability") or {})
         self._bin_size = _as_float(params.get("bin_size"), "bin_size")
         self._price_precision = _as_int(params.get("price_precision"), "price_precision")
         self._profile_params = dict(source_facts.get("profile_params") or {})
         self._profiles_payload = list(source_facts.get("profiles") or [])
+        if self._causal_timing:
+            for profile in self._profiles_payload:
+                required_clocks = ("formed_at", "source_known_at", "known_at", "source_end")
+                if not isinstance(profile, Mapping) or any(type(profile.get(key)) is not int for key in required_clocks):
+                    raise RuntimeError("market_profile_source_contract_invalid: v3 source clocks required")
+                if (profile["known_at"] < profile["source_known_at"]
+                        or profile["source_known_at"] < max(profile["formed_at"], profile["source_end"] + 1800)):
+                    raise RuntimeError("market_profile_source_contract_invalid: availability precedes source close")
         self._symbol = str(source_facts.get("symbol") or "")
         source_continuity = source_facts.get("source_candle_continuity")
         self._source_candle_continuity = (
@@ -105,6 +118,8 @@ class TypedMarketProfileIndicator(Indicator):
         self._previous_profile_key: str | None = None
         self._previous_location: str | None = None
         self._current_bar_time = datetime.min
+        self._current_epoch = 0
+        self._current_availability_epoch = 0
         self._current_effective_profiles: list[Any] = []
         self._current_transform_summary: dict[str, Any] = {}
         self._current_overlay_summary: dict[str, Any] = {}
@@ -199,15 +214,23 @@ class TypedMarketProfileIndicator(Indicator):
             raise RuntimeError("market_profile_apply_failed: market_profile has no dependencies")
 
         self._current_bar_time = bar.time
-        current_epoch = int(bar.time.timestamp())
+        evaluation_time = (bar.known_at or bar.end_time) if self._causal_timing else bar.time
+        if self._causal_timing and (bar.end_time <= bar.time or evaluation_time < bar.end_time):
+            raise RuntimeError("market_profile_bar_clock_invalid: completed chart candle availability required")
+        current_epoch = int(evaluation_time.timestamp())
+        self._current_epoch = current_epoch
+        self._current_availability_epoch = ceil(evaluation_time.timestamp())
         effective_profiles, transform_summary = self._profile_resolver.resolve(
             current_epoch=current_epoch,
         )
         self._current_transform_summary = dict(transform_summary or {})
         if self._source_candle_continuity:
-            self._current_transform_summary["source_candle_continuity"] = (
-                self._source_continuity_context()
-            )
+            # Full frozen-input diagnostics describe the build, including future
+            # rows. Keep them on runtime_diagnostics, outside the causal overlay.
+            if not self._causal_timing:
+                self._current_transform_summary["source_candle_continuity"] = (
+                    self._source_continuity_context()
+                )
             self._log_source_continuity_warning_once()
         if not effective_profiles:
             if self._first_return is not None:
@@ -344,11 +367,12 @@ class TypedMarketProfileIndicator(Indicator):
         )
 
     def runtime_diagnostics(self) -> Mapping[str, Any]:
-        if not self._source_candle_continuity:
-            return {}
-        return {
-            "source_candle_continuity": self._source_continuity_context(),
-        }
+        diagnostics = {}
+        if self._source_candle_continuity:
+            diagnostics["source_candle_continuity"] = self._source_continuity_context()
+        if self._causal_timing:
+            diagnostics["profile_availability"] = dict(self._profile_availability)
+        return diagnostics
 
     def _build_overlay(
         self,
@@ -391,7 +415,7 @@ class TypedMarketProfileIndicator(Indicator):
         overlay["indicator_id"] = self._indicator_id
         if self._symbol:
             overlay["symbol"] = self._symbol
-        overlay["known_at"] = int(bar_time.timestamp())
+        overlay["known_at"] = self._current_availability_epoch if self._causal_timing else int(bar_time.timestamp())
         return overlay
 
     def snapshot(self) -> Mapping[str, RuntimeOutput]:
@@ -405,7 +429,7 @@ class TypedMarketProfileIndicator(Indicator):
                     ready=False,
                     value=self._build_overlay(
                         bar_time=self._current_bar_time,
-                        current_epoch=int(self._current_bar_time.timestamp()),
+                        current_epoch=self._current_epoch,
                     ),
                 )
             }
@@ -415,7 +439,7 @@ class TypedMarketProfileIndicator(Indicator):
                 ready=True,
                 value=self._build_overlay(
                     bar_time=self._current_bar_time,
-                    current_epoch=int(self._current_bar_time.timestamp()),
+                    current_epoch=self._current_epoch,
                 ),
             )
         }

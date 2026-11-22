@@ -491,3 +491,25 @@ def test_runtime_readiness_pins_x5_queue_policy_and_trade_tape(monkeypatch):
                 passive_queue_policy=_passive_queue_policy(),
             )
         )
+
+
+@pytest.mark.parametrize('fee_ids', [['instrument-1'], ['other'], ['instrument-1', 'extra']])
+def test_simulation_fee_startup_pins_exact_instrument_scope(monkeypatch, fee_ids):
+    from engines.bot_runtime.core.fees import FeeSchedule
+    schedule = FeeSchedule(maker_rate=.005, taker_rate=.009, source='simulation:declared',
+        version='scenario.v1', schedule_id='scenario', venue_profile_id='canonical_bar_simulation',
+        fee_currency='USD').to_dict()
+    strategy = _strategy_with_instrument({'id': 'instrument-1', 'symbol': 'BTC-USD', 'instrument_type': 'spot'})
+    _patch_strategy_lookup(monkeypatch, strategy)
+    monkeypatch.setattr('portal.backend.service.market.instrument_service.resolve_instrument', lambda *args: None)
+    bot = _bot_payload(execution_semantics='spot', execution_behavior='simulated', economic_claim_intent='exploration',
+        simulation_fee_schedules={identifier: schedule for identifier in fee_ids})
+    if fee_ids != ['instrument-1']:
+        with pytest.raises(ValueError, match='exactly cover'):
+            BotConfigService().prepare_startup_artifacts(bot)
+    else:
+        artifacts = BotConfigService().prepare_startup_artifacts(bot)
+        context = artifacts['resolved_execution_context_bundle']['contexts'][0]
+        assert context['fee_schedule']['schedule_hash'] == schedule['schedule_hash']
+        assert context['fee_schedule']['source'] == 'simulation:declared'
+        assert 'fee_schedule' not in strategy.instrument_links[0].instrument_snapshot

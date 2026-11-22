@@ -719,7 +719,7 @@ def test_canonical_research_check_cli_uses_shared_operation_routes(monkeypatch):
         ("POST", "/api/research/checks/check-1/observations"),
     ]
     assert calls[1][2]["mode"] == "preview"
-    assert calls[2][2]["preparation"] == {"freeze": True, "created_by": "operator-1"}
+    assert calls[2][2]["preparation"] == {"freeze": True, "acquire_missing": False, "created_by": "operator-1"}
     assert calls[3][2]["mode"] == "evidence"
     assert calls[3][2]["dataset_id"] == "mds_1"
     assert calls[5][2] == {"title": "Evidence-backed"}
@@ -775,3 +775,60 @@ def test_research_check_catalog_uses_shared_get_contract(monkeypatch, capsys, ar
     assert main(["--no-audit-log", "research", "check", *args]) == 0
     assert observed == {"method": "GET", "path": path, "body": None}
     assert json.loads(capsys.readouterr().out) == expected
+
+
+@pytest.mark.parametrize("output_format", [None, "auto", "json"])
+def test_check_run_synchronous_output_and_route_remain_json(monkeypatch, capsys, output_format):
+    result = {"schema_version": "research_check_fixture.v1", "check_id": "check-1"}
+    observed = _capture_request(monkeypatch, json.dumps(result).encode())
+    request = {"scope": {}, "detector": {}, "dataset_id": "mds-1"}
+    argv = ["--no-audit-log", "research", "check", "run", "--request-json", json.dumps(request)]
+    if output_format:
+        argv.extend(["--format", output_format])
+    assert main(argv) == 0
+    assert json.loads(capsys.readouterr().out) == result
+    assert observed == {"method": "POST", "path": "/api/research/checks/run", "body": {**request, "mode": "evidence"}}
+
+
+@pytest.mark.parametrize("output_format", [None, "auto", "text"])
+def test_check_dispatch_retains_existing_text_default(monkeypatch, capsys, output_format):
+    observed = _capture_request(monkeypatch, b'{"job_id":"job-1","status":"queued","job_type":"research_check_run"}')
+    argv = ["--no-audit-log", "research", "check", "run", "--request-json",
+            '{"scope":{},"detector":{}}', "--dispatch"]
+    if output_format:
+        argv.extend(["--format", output_format])
+    assert main(argv) == 0
+    output = capsys.readouterr().out
+    assert output.startswith("Research job queued.\nJob id: job-1\n")
+    assert "research jobs status job-1" in output
+    assert observed["path"] == "/api/research/jobs/checks/run"
+
+
+def test_check_run_text_without_dispatch_fails_before_network(monkeypatch, capsys):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("network must not be called")))
+    assert main(["--no-audit-log", "research", "check", "run", "--request-json",
+                 '{"scope":{},"detector":{}}', "--format", "text"]) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "--format text requires --dispatch"}
+
+
+def test_saved_selection_request_and_execution_snapshot_use_shared_read_operations(monkeypatch,capsys):
+    ready={"request":{"scope":{"saved":True}},"read_only":True}
+    observed=_capture_request(monkeypatch,json.dumps(ready).encode())
+    assert main(["--no-audit-log","research","check","from-selection","saved-id","--result-hash","a"*64,"--request-only"])==0
+    assert observed=={"method":"POST","path":"/api/research/checks/saved-selection/request",
+        "body":{"source_check_id":"saved-id","measurement_profile":"18","expected_hashes":{"result_hash":"a"*64}}}
+    assert json.loads(capsys.readouterr().out)==ready['request']
+    observed=_capture_request(monkeypatch)
+    assert main(["--no-audit-log","research","jobs","snapshot","--job-id","known","--limit","2",
+        "--request-json",json.dumps({"scope":{},"detector":{}})])==0
+    assert observed=={"method":"POST","path":"/api/research/jobs/snapshot",
+        "body":{"limit":2,"job_id":"known","request":{"scope":{},"detector":{},"mode":"evidence"}}}
+
+
+def test_cli_preparation_explicit_acquisition_flag(monkeypatch):
+    observed = _capture_request(monkeypatch, b'{"status":"frozen"}')
+    request = {"scope": {}, "detector": {}}
+    assert main(["--no-audit-log", "research", "check", "prepare", "--request-json", json.dumps(request),
+                 "--acquire-missing", "--freeze"]) == 0
+    assert observed["path"] == "/api/research/checks/prepare"
+    assert observed["body"]["preparation"] == {"freeze": True, "acquire_missing": True}

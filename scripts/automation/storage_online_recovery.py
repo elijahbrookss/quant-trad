@@ -29,6 +29,11 @@ RECIPE = "storage-online-recovery-database.compose.json"
 _ACTIONS = ("stop", "remove", "create", "start")
 _CONTINUATION = ContextVar("storage_committed_recovery_continuation", default=None)
 CONTINUATION_STATE = "storage-online-repository-continuation.json"
+# The retained 2.59.1 archiver remains qualified with the patched capture client;
+# new replacement images use 2.59.3. See rehearse_incremental_recovery.py's
+# cross-version chain and verify_encrypted_recovery_handoff.py's legacy reader.
+_RETAINED_ARCHIVER_VERSIONS = ("pgBackRest 2.59.1", "pgBackRest 2.59.3")
+_REPLACEMENT_ARCHIVER_VERSION = "pgBackRest 2.59.3"
 
 
 def inspect_database_archiver(database_id):
@@ -43,9 +48,9 @@ def inspect_database_archiver(database_id):
     except RuntimeError as exc:
         raise RuntimeError("storage_database_archiver_unavailable: qualify the PostgreSQL "
                            "image with pgBackRest before pausing collection") from exc
-    if version != "pgBackRest 2.59.1":
+    if version not in _RETAINED_ARCHIVER_VERSIONS:
         raise RuntimeError("storage_database_archiver_version_mismatch: PostgreSQL must "
-                           "use the same pinned pgBackRest 2.59.1 recovery tooling")
+                           "use qualified retained 2.59.1 or patched 2.59.3 pgBackRest tooling")
     return {"pgbackrest_version": version}
 
 
@@ -102,6 +107,43 @@ def inspect_socket_volume(socket_volume, pgdata_volume):
     return socket_info
 
 
+
+def _require_database_quiescent(identity):
+    # One snapshot retains the refusal's actual counts and a bounded identity
+    # sample. Never log SQL text, transaction GIDs, users or connection secrets.
+    observed = json.loads(host.maintenance_query(identity, """
+WITH activity AS MATERIALIZED (
+    SELECT pid, backend_type, state, left(application_name, 64) AS application_name,
+           backend_start, xact_start, wait_event_type, wait_event
+    FROM pg_stat_activity WHERE datname=:'target'
+), sample AS (SELECT * FROM activity ORDER BY pid LIMIT 16)
+SELECT json_build_object(
+    'backends', (SELECT count(*) FROM activity),
+    'prepared', (SELECT count(*) FROM pg_prepared_xacts WHERE database=:'target'),
+    'backend_sample', (SELECT coalesce(json_agg(sample ORDER BY pid), '[]'::json) FROM sample),
+    'backend_sample_truncated', (SELECT count(*) > 16 FROM activity))::text
+"""))
+    if observed["backends"] != 0 or observed["prepared"] != 0:
+        print("storage_online_recovery_quiescence_refused=" + json.dumps(observed, sort_keys=True),
+              file=sys.stderr, flush=True)
+        raise RuntimeError("storage_online_recovery_database_not_quiescent")
+
+
+def _wait_database_quiescent(identity, deadline, *, interval_seconds=0.2):
+    """Wait within the operation deadline for transient database workers to exit."""
+    while True:
+        try:
+            _require_database_quiescent(identity)
+            return
+        except RuntimeError as exc:
+            if str(exc) != "storage_online_recovery_database_not_quiescent":
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(interval_seconds, remaining))
+
+
 def prepare_database(state_root, *, saved, worker_process, keys_root, socket_volume,
                      max_duration_seconds, source_check):
     """Single live invocation; every failed dispatch remains unresolved, never retried."""
@@ -149,12 +191,7 @@ def prepare_database(state_root, *, saved, worker_process, keys_root, socket_vol
             observed = json.loads(host.maintenance_query(identity, _GATE_OBSERVE))
             if observed != expected_gate:
                 raise RuntimeError("storage_online_recovery_gate_changed")
-            other = json.loads(host.maintenance_query(identity,
-                "SELECT json_build_object('backends',(SELECT count(*) FROM pg_stat_activity "
-                "WHERE datname=:'target'),'prepared',(SELECT count(*) FROM pg_prepared_xacts "
-                "WHERE database=:'target'))::text"))
-            if other != {"backends": 0, "prepared": 0}:
-                raise RuntimeError("storage_online_recovery_database_not_quiescent")
+            _wait_database_quiescent(identity, deadline)
 
         gate(original["id"])
         _admit_mount_writers(rows, operator_id=worker_id)
@@ -374,7 +411,7 @@ def inspect_archiver_replacement(database, image):
         "-ec", "/usr/local/bin/pgbackrest version; "+_DATABASE_BINARIES)
     if (not original.startswith("postgres (PostgreSQL) ")
             or len(original.splitlines()) < 4
-            or candidate != "pgBackRest 2.59.1\n"+original):
+            or candidate != _REPLACEMENT_ARCHIVER_VERSION+"\n"+original):
         raise RuntimeError("storage_archiver_replacement_database_binaries_changed")
     return dict(original=database["image"], candidate=image,
         configuration_sha256=host.digest(configs[0]),

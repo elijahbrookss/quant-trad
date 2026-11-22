@@ -51,7 +51,7 @@ def collect_runtime_indicator_diagnostics(indicators: Sequence[Any]) -> list[Dic
     return diagnostics
 
 
-def _source_facts_builder_accepts_diagnostics(builder: Any) -> bool:
+def _source_facts_builder_accepts_keyword(builder: Any, keyword: str) -> bool:
     try:
         signature = inspect.signature(builder)
     except (TypeError, ValueError):
@@ -59,7 +59,7 @@ def _source_facts_builder_accepts_diagnostics(builder: Any) -> bool:
     for parameter in signature.parameters.values():
         if parameter.kind == inspect.Parameter.VAR_KEYWORD:
             return True
-        if parameter.name == "source_diagnostics":
+        if parameter.name == keyword:
             return True
     return False
 
@@ -190,8 +190,10 @@ def build_runtime_indicator_instance(
                     "execution_context": execution_context,
                     "source_frame": source_frame,
                 }
-                if _source_facts_builder_accepts_diagnostics(source_facts_builder):
+                if _source_facts_builder_accepts_keyword(source_facts_builder, "source_diagnostics"):
                     source_facts_kwargs["source_diagnostics"] = source_diagnostics
+                if _source_facts_builder_accepts_keyword(source_facts_builder, "version"):
+                    source_facts_kwargs["version"] = str(meta.get("version") or indicator_cls.MANIFEST.version)
                 source_facts = source_facts_builder(**source_facts_kwargs)
                 source_fact_duration_ms = (perf_counter() - source_facts_started_at) * 1000.0
     build_started_at = perf_counter()

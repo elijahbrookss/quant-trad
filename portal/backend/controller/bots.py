@@ -141,6 +141,7 @@ class BotStartRequest(BaseModel):
     duration_seconds: Optional[float] = Field(default=None, gt=0)
     market_data_stream_policy: Optional[Dict[str, Any]] = None
     execution_assumptions: Optional[Dict[str, Any]] = None
+    simulation_fee_schedules: Optional[Dict[str, Dict[str, Any]]] = None
     execution_book_tape_bundle: Optional[Dict[str, Any]] = None
     passive_queue_policy: Optional[Dict[str, Any]] = None
 
@@ -157,6 +158,7 @@ class BotDataPreflightRequest(BaseModel):
 
 
 class BotBacktestDatasetPrepareRequest(BaseModel):
+    simulation_fee_schedules: Optional[Dict[str, Dict[str, Any]]] = None
     evaluation_start: str
     evaluation_end: str
     acquire_missing: bool = False
@@ -406,6 +408,8 @@ def prepare_bot_backtest_dataset(
         }
         if body.numeric_acquisition is not None:
             prepare_kwargs["numeric_acquisition"] = body.numeric_acquisition
+        if body.simulation_fee_schedules is not None:
+            prepare_kwargs["simulation_fee_schedules"] = body.simulation_fee_schedules
         return bot_service.prepare_backtest_dataset(bot_id, **prepare_kwargs)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc

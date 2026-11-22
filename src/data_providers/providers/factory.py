@@ -141,6 +141,15 @@ def _resolve_ids(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[s
     return provider, venue
 
 
+def get_provider_class(provider_id: Optional[str] = None, *, exchange: Optional[str] = None):
+    """Resolve code-owned capabilities without constructing a transport adapter."""
+    provider, _ = _resolve_ids(provider_id, exchange)
+    config = get_provider_config(provider)
+    if config is None:
+        raise ValueError(f"Unsupported provider: {provider}")
+    return _provider_class(config)
+
+
 def get_provider(provider_id: Optional[str] = None, *, venue: Optional[str] = None, exchange: Optional[str] = None) -> BaseDataProvider:
     """Return a data provider instance for the requested provider/venue."""
 

@@ -136,6 +136,8 @@ services:
     restart: unless-stopped
     init: true
     stop_grace_period: 1m
+    mem_limit: 8g
+    memswap_limit: 8g
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     env_file:

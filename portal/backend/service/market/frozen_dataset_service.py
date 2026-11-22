@@ -17,7 +17,7 @@ from market_data.contracts import (
     dataset_series_identity_payload,
 )
 from market_data.acquisition_coverage import (
-    missing_complete_coverage,
+    missing_recorded_coverage,
     normalize_acquisition_coverage,
 )
 from market_data.fact_registry import get_fact_contract
@@ -127,6 +127,17 @@ def _record_source(record: Any) -> tuple[str, dict[str, Any]]:
         "source_kind": str(getattr(source, "source_kind", "") or ""),
         "adapter_version": str(getattr(source, "adapter_version", "") or ""),
     }
+
+
+def read_requirement_records(store: MarketDataStore, *, fact_type: str, **selection) -> list[Any]:
+    """Retain canonical identity/clocks for native legacy-decoded families.
+
+    Their typed read API intentionally projects away SourceIdentity. Admission
+    and preparation need the original canonical envelope, using the same source,
+    watermark and time predicates rather than reconstructing provenance.
+    """
+    reader = store.read_facts if fact_type in {"market.trade", "market.trade_flow"} else store.read_series_records
+    return list(reader(**selection))
 
 
 def matching_source_identity_keys(
@@ -360,7 +371,7 @@ def prepare_frozen_dataset_from_requirements(
             inspect_candles = (getattr(store, "inspect_candle_selection", None)
                 if str(requirement.get("fact_type")) == CANDLE_FACT_TYPE else None)
             candle_selection = inspect_candles(**selection_args) if callable(inspect_candles) else None
-            records = [] if candle_selection is not None else list(store.read_series_records(**selection_args))
+            records = [] if candle_selection is not None else read_requirement_records(store, fact_type=str(requirement["fact_type"]), **selection_args)
             count = int(candle_selection["row_count"]) if candle_selection is not None else len(records)
             if not count:
                 continue
@@ -375,7 +386,7 @@ def prepare_frozen_dataset_from_requirements(
                     anchor = candle_selection["first_observation_at"]
                 else:
                     source_bound_records = (records if tuple(source_keys) == requested_source_keys
-                                            else list(store.read_series_records(**selection_args)))
+                                            else read_requirement_records(store, fact_type=str(requirement["fact_type"]), **selection_args))
                     count = len(source_bound_records)
                     anchor = (min(record.fact.open_time for record in source_bound_records)
                               if count and str(requirement.get("fact_type")) == CANDLE_FACT_TYPE else None)
@@ -587,11 +598,12 @@ def resolve_frozen_dataset_read_binding(
                     created_at_lte=getattr(dataset, "created_at", None),
                 )
             )
-            uncovered = missing_complete_coverage(
+            uncovered = missing_recorded_coverage(
                 start=required_start,
                 end=required_end,
                 source_identity_keys=tuple(sorted(allowed_gap_sources)),
                 coverage=acquisition_coverage,
+                allow_partial=requirement.get("coverage_policy") == "recorded_partial",
             )
             if uncovered:
                 raise ValueError(
@@ -664,4 +676,5 @@ __all__ = [
     "project_frozen_dataset",
     "resolve_frozen_dataset_read_binding",
     "matching_source_identity_keys",
+    "read_requirement_records",
 ]

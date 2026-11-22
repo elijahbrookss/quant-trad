@@ -15,6 +15,15 @@ from sqlalchemy import text
 from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
 
 
+RAW_REFERENCE_MAPPING_LIMIT = 50_000
+
+
+class CanonicalBookPrefixBudgetExceeded(RuntimeError):
+    def __init__(self, prefixes):
+        super().__init__("canonical_raw_reference_prefix_budget_exceeded: late book import requires a bounded complete prefix")
+        self.prefixes = tuple(prefixes)
+
+
 def lock_stream_raw_mapping_access(session):
     """Wait for raw-table maintenance before holding a stream's lease row.
 
@@ -38,18 +47,12 @@ def _book_position(position, *, observation_key):
     return {name: position[name] for name in ("definition_id", "session_id", "connection_epoch", "receive_ordinal")}
 
 
-def _unprotected_book_prefixes(session, prefixes):
-    """A hot book row or committed prefix holds every object in its session.
-
-    SELECT retains relation locks through this writer's commit, so reclamation
-    cannot drop that row between this proof and publication of its successor.
-    A cold-only session's immutable prefix is also a lifetime anchor, sharing
-    the lifecycle session-hold predicate. It needs no hot payload lock and must
-    not rescan an ever-growing prefix for each new update. A late import with
-    neither holder must lock/check its complete prefix before creating a hold.
-    """
+def _unverified_book_ranges(session, prefixes):
+    """Reuse the hot hold or the dense end of an exact verified archive chain."""
     if not prefixes:
         return {}
+    # Reading the hot parent retains relation locks through commit, so
+    # reclamation cannot remove a hot holder between this check and publication.
     protected = set(session.execute(text("""
         SELECT requested.request_key FROM jsonb_to_recordset(CAST(:prefixes AS jsonb))
             AS requested(request_key text,definition_id text,session_id text)
@@ -60,10 +63,19 @@ def _unprotected_book_prefixes(session, prefixes):
                 jsonb_build_object('definition_id',requested.definition_id,'session_id',requested.session_id)))
                OR hot.provenance @> jsonb_build_object('_qt_depth_evidence',jsonb_build_object('source_position',
                 jsonb_build_object('definition_id',requested.definition_id,'session_id',requested.session_id))))
-           OR EXISTS (SELECT 1 FROM market.fact_book_prefix_chunks AS prefixes
-                WHERE prefixes.definition_id=requested.definition_id AND prefixes.session_id=requested.session_id)
     """), {"prefixes": json.dumps(list(prefixes.values()))}).scalars())
-    return {key: value for key, value in prefixes.items() if key not in protected}
+    ranges = {key: value for key, value in prefixes.items() if key not in protected}
+    exact = [value for value in ranges.values() if value["provider_product_id"]]
+    if exact:
+        from .fact_book_prefix import book_prefix_tips
+
+        for key, last_ordinal in book_prefix_tips(session, exact).items():
+            prefix = ranges[key]
+            if last_ordinal >= prefix["receive_ordinal"]:
+                del ranges[key]
+            else:
+                ranges[key] = {**prefix, "first_receive_ordinal": last_ordinal + 1}
+    return ranges
 
 
 def _held_trade_coverage_endpoints(session, coverages):
@@ -90,13 +102,14 @@ def _held_trade_coverage_endpoints(session, coverages):
     """), {"coverages": json.dumps(list(coverages.values()))}).mappings().all()
 
 
-def lock_canonical_raw_references(session, facts, *, max_mapping_rows=50_000):
+def lock_canonical_raw_references(session, facts, *, max_mapping_rows=RAW_REFERENCE_MAPPING_LIMIT):
     if type(max_mapping_rows) is not int or max_mapping_rows <= 0:
         raise ValueError("canonical_raw_reference_budget_invalid")
     raw_ids, positions, coverages, prefixes = set(), {}, {}, {}
     for fact in facts:
         evidence = fact.provenance
         book_position = None
+        book_product = None
         if fact.fact_type in {"market.trade", "market.l2_book"}:
             key = "_qt_trade_evidence" if fact.fact_type == "market.trade" else "_qt_l2_evidence"
             reference = evidence.get(key)
@@ -107,6 +120,7 @@ def lock_canonical_raw_references(session, facts, *, max_mapping_rows=50_000):
                 raw_ids.add(identity)
                 if fact.fact_type == "market.l2_book":
                     book_position = _book_position(reference, observation_key=fact.observation_key)
+                    book_product = reference.get("provider_product_id")
         elif fact.fact_type in {"market.bbo", "market.depth_observation"}:
             reference = evidence.get(LEGACY_MATERIAL_EVIDENCE_KEYS[fact.fact_type])
             position = reference.get("source_position") if isinstance(reference, Mapping) else None
@@ -115,6 +129,7 @@ def lock_canonical_raw_references(session, facts, *, max_mapping_rows=50_000):
                 identity = "position:" + json.dumps(item, sort_keys=True, separators=(",", ":"))
                 positions[identity] = {"request_key": identity, **item}
                 book_position = item
+                book_product = position.get("provider_product_id")
         elif fact.fact_type == "market.trade_flow":
             reference = evidence.get("_qt_trade_flow_evidence")
             if isinstance(reference, Mapping) and reference.get("coverage_interval_id"):
@@ -126,9 +141,11 @@ def lock_canonical_raw_references(session, facts, *, max_mapping_rows=50_000):
                 coverages[key] = {"request_key": key, "interval_id": identity, "revision": revision}
         if book_position is not None:
             scope = {name: book_position[name] for name in ("definition_id", "session_id", "connection_epoch")}
+            scope["provider_product_id"] = book_product if isinstance(book_product, str) and book_product else None
             key = "prefix:" + json.dumps(scope, sort_keys=True, separators=(",", ":"))
             if key not in prefixes or book_position["receive_ordinal"] > prefixes[key]["receive_ordinal"]:
-                prefixes[key] = {"request_key": key, **book_position}
+                prefixes[key] = {"request_key": key, **book_position, **scope, "first_receive_ordinal": 1,
+                                 "root_fact_version_id": fact.observation_key}
     requested = {"record:" + identity for identity in raw_ids} | set(positions) | set(coverages)
     if not requested:
         return
@@ -146,9 +163,11 @@ def lock_canonical_raw_references(session, facts, *, max_mapping_rows=50_000):
     requested = {"record:" + identity for identity in raw_ids} | set(positions) | set(coverages)
     if len(requested) > max_mapping_rows:
         raise RuntimeError("canonical_raw_reference_budget_exceeded: reduce canonical batch size")
-    prefixes = _unprotected_book_prefixes(session, prefixes)
-    if sum(prefix["receive_ordinal"] for prefix in prefixes.values()) > max_mapping_rows:
-        raise RuntimeError("canonical_raw_reference_prefix_budget_exceeded: late book import requires a bounded complete prefix")
+    prefixes = _unverified_book_ranges(session, prefixes)
+    prefix_width = sum(prefix["receive_ordinal"] - prefix["first_receive_ordinal"] + 1
+                       for prefix in prefixes.values())
+    if prefix_width and len(requested) + prefix_width > max_mapping_rows:
+        raise CanonicalBookPrefixBudgetExceeded(prefixes.values())
     requested.update(prefixes)
     queries = []
     if raw_ids:
@@ -190,13 +209,16 @@ def lock_canonical_raw_references(session, facts, *, max_mapping_rows=50_000):
         queries.append(("""
             SELECT requested.request_key,mappings.raw_record_id,mappings.manifest_id,mappings.receive_ordinal
             FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS requested(
-                request_key text,definition_id text,session_id text,connection_epoch bigint,receive_ordinal bigint)
+                request_key text,definition_id text,session_id text,connection_epoch bigint,
+                first_receive_ordinal bigint,receive_ordinal bigint)
             JOIN market.raw_archive_manifests AS manifests
               ON manifests.definition_id=requested.definition_id AND manifests.session_id=requested.session_id
              AND manifests.connection_epoch=requested.connection_epoch
+             AND manifests.first_receive_ordinal<=requested.receive_ordinal
+             AND manifests.last_receive_ordinal>=requested.first_receive_ordinal
             JOIN market.raw_archive_record_mappings AS mappings ON mappings.manifest_id=manifests.id
              AND mappings.session_id=requested.session_id AND mappings.connection_epoch=requested.connection_epoch
-             AND mappings.receive_ordinal BETWEEN 1 AND requested.receive_ordinal
+             AND mappings.receive_ordinal BETWEEN requested.first_receive_ordinal AND requested.receive_ordinal
         """, {"requests": json.dumps(list(prefixes.values()))}))
     found = []
     for query, parameters in queries:
@@ -212,13 +234,14 @@ def lock_canonical_raw_references(session, facts, *, max_mapping_rows=50_000):
         key = row["request_key"]
         if key in prefixes:
             ordinal = row["receive_ordinal"]
-            if type(ordinal) is not int or not 1 <= ordinal <= prefixes[key]["receive_ordinal"]:
+            if (type(ordinal) is not int or not
+                    prefixes[key]["first_receive_ordinal"] <= ordinal <= prefixes[key]["receive_ordinal"]):
                 raise RuntimeError(f"canonical_raw_reference_prefix_position_invalid: reference={key}")
             prior = prefix_positions[key].setdefault(ordinal, row["raw_record_id"])
             if prior != row["raw_record_id"]:
                 raise RuntimeError(f"canonical_raw_reference_prefix_ambiguous: reference={key} ordinal={ordinal}")
     for key, prefix in prefixes.items():
-        if len(prefix_positions[key]) != prefix["receive_ordinal"]:
+        if len(prefix_positions[key]) != prefix["receive_ordinal"] - prefix["first_receive_ordinal"] + 1:
             raise RuntimeError(f"canonical_raw_reference_prefix_incomplete: reference={key}")
     manifests = sorted({row["manifest_id"] for row in found})
     locked = session.execute(text("""

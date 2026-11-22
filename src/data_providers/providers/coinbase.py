@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - handled in __init__
     COINBASE_SDK_AVAILABLE = False
 
 from core.logger import logger
+from core.execution_control import execution_checkpoint
 from data_providers.registry import _REGISTRY
 from data_providers.facts import (
     ProviderFundingRateSnapshot,
@@ -733,7 +734,9 @@ class CoinbaseProvider(BaseDataProvider):
         product_type = str(product.product_type or "").upper()
         is_future = product_type == "FUTURE"
 
-        contract_size = None
+        # Spot quantities are base units, matching canonical CCXT normalization.
+        # Derivatives still require their explicit provider contract size.
+        contract_size = Decimal(1) if product_type == "SPOT" else None
         if is_future:
             raw_contract_size = future_details.get("contract_size")
             if raw_contract_size is None:
@@ -884,6 +887,13 @@ class CoinbaseProvider(BaseDataProvider):
             )
         return granularity
 
+    @classmethod
+    def native_candle_interval(cls, timeframe_seconds: int) -> str:
+        for interval, granularity in cls.GRANULARITY_MAP.items():
+            if cls.GRANULARITY_SECONDS[granularity] == timeframe_seconds:
+                return interval
+        raise ValueError(f"native_candle_acquisition_unsupported: timeframe_seconds={timeframe_seconds}")
+
     def fetch_from_api(
         self,
         symbol: str,
@@ -911,6 +921,7 @@ class CoinbaseProvider(BaseDataProvider):
 
         window_start = start_ts
         while window_start < end_ts:
+            execution_checkpoint()
             window_end = min(end_ts, window_start + chunk_seconds)
             response = self._ensure_public_client().get_public_candles(
                 product_id=symbol,

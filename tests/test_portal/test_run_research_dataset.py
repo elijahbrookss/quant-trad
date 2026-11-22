@@ -334,6 +334,21 @@ def test_execution_section_projects_order_lifecycle_residuals_and_fill_parent() 
     assert execution["fills"][0]["order_lifecycle_event_id"] == lifecycle_event["event_id"]
 
 
+@pytest.mark.parametrize('name', ['ENTRY_FILLED', 'EXIT_FILLED'])
+def test_fill_clock_uses_canonical_availability_not_source_bar_label(name):
+    opened = '2026-03-15T01:00:00Z'
+    available = '2026-03-15T01:15:00Z'
+    event = _event(81, name, {'bar_time': opened, 'trade_id': 'trade-1',
+        'side': 'buy' if name == 'ENTRY_FILLED' else 'sell', 'qty': .125, 'price': 100})
+    event['known_at'] = available
+    event['payload']['event_ts'] = available
+    before = copy.deepcopy(event)
+    fill = run_research_dataset._execution_section(run=_run(), events=[event])['fills'][0]
+    assert fill['known_at'] == available
+    assert fill['event_time'] == available
+    assert event == before  # Projection never edits its source evidence.
+
+
 def _decision(seq: int, decision_id: str, state: str, *, trade_id: str | None = None, reason_code: str | None = None) -> dict[str, Any]:
     context = {
         "decision_id": decision_id,
@@ -518,6 +533,17 @@ def _observer_gap(
             ],
         },
     }
+
+
+def test_cost_stress_counts_closed_trade_entry_when_remaining_quantity_is_zero():
+    assert run_research_dataset._trade_turnover_notional({
+        "quantity": 0,
+        "entry_price": 100,
+        "legs": [
+            {"contracts": 1, "exit_price": 105},
+            {"contracts": 2, "exit_price": 110},
+        ],
+    }) == pytest.approx(625)
 
 
 def _trades(extra: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:

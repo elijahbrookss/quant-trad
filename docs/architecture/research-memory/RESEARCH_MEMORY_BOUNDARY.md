@@ -22,6 +22,11 @@ code_paths:
   - portal/backend/db/models.py
   - portal/backend/db/session.py
   - cli/main.py
+  - cli/research_operations.py
+  - cli/mcp_server.py
+  - cli/study_reports.py
+  - scripts/reporting/quarto_study_report.py
+  - scripts/reporting/quarto_study_pilot.py
   - scripts/db/manual_migration_research_memory_v1.sql
   - scripts/db/manual_migration_async_job_fencing_v1.sql
 ---
@@ -71,6 +76,202 @@ Research memory must not:
 - treat overlays or debug details as strategy evidence,
 - fetch provider data outside existing data-boundary services,
 - reconstruct report truth or runtime truth.
+
+## Derived Quarto Study report pilot
+
+This path now supports manually authored reports for any published Study within
+the limits below. The original pilot remains readable; no report layout or
+scientific reporting standard is mandatory.
+
+A prebuilt report can explain one exact published interpretation without
+executing research or changing its conclusion. `qt research reports attach
+<study_id> --request-json <file>` admits a bounded inert HTML fragment, its QMD
+source and build provenance into the reserved `study_reports_v1` extension of
+the existing Study JSON payload. This uses the existing PostgreSQL boundary
+without new tables, migrations, filesystem custody or an additional DSN.
+Generic item creation rejects this reserved extension. The service locks the
+Study row, validates its publication history and evidence access, and retains
+the same exact publication/reference binding used by Study images. It appends
+at most three content-addressed reports; identical retries are idempotent.
+The original body, interpretation history and scientific evidence stay intact.
+
+HTML is reconstructed through a small element/attribute allowlist. Scripts,
+SVG, forms, embeds, inline styles, external URLs and path-bearing resources
+are rejected. Only validated embedded static PNGs and fragment links are
+admitted, with at most eight images and 24 megapixels total. HTML is limited to
+2 MiB, QMD to 128 KiB, and the resulting Study
+payload to 7 MiB. Readers verify the content-addressed report and retained
+binding again. No request parameter becomes a local path. List reads omit
+HTML/source bytes; original record export continues retaining the exact JSON.
+
+`GET /api/research/items/{id}/reports` supplies metadata and a server-owned stale
+flag when a later interpretation exists. Content and source endpoints use the
+existing private API/proxy boundary; they create no new public hosting route.
+Content has `text/html`, `nosniff`, `no-store`, no-referrer and a CSP sandbox
+with default network access denied, embedded PNGs and server-owned inline CSS
+only. The V2 Report tab additionally uses an empty iframe sandbox, preserving
+an opaque origin and denying scripts, forms, popups and top navigation. Report
+selection matches the exact displayed interpretation hash; another revision's
+report never silently substitutes. Summary remains the default view and the
+reader can return to it at any time. A report read failure leaves Summary and
+the other independently loaded sections available.
+On narrow screens, chart image containers scroll horizontally so labels remain
+readable while captions wrap to the viewport. An optional full-page reader link
+uses the same private content endpoint and CSP sandbox.
+
+Production never executes QMD, Python or Quarto. The original manually authored
+`scripts/reporting/quarto_study_pilot.py` reads the approved saved-evidence ZIP,
+checks its checksums and exact selected interpretation/result identities, and
+plots only already-retained aggregate fields using Matplotlib. Its QMD is an
+experience pilot, not a standard or an AI authoring format. Official Quarto
+renders with execution disabled inside Bubblewrap namespaces: no network, no
+host home/credentials, a temporary writable work directory, read-only system
+tools, a 256 MiB V8 heap, 60 seconds CPU, 90 seconds wall time and a 32 MiB
+output-file limit. Temporary render directories are removed on success/failure.
+The output records the Quarto version, source commit and evidence ZIP SHA-256.
+No generation task runs in the production backend, and no API provider is added.
+
+The narrative, exact Study identities and private evidence stay outside Git.
+To reproduce the privately selected pilot, use the repo Python environment (including Matplotlib),
+Linux Bubblewrap and the official Quarto Linux tarball, then run:
+
+```bash
+PYTHONPATH=.:src .venv/bin/python scripts/reporting/quarto_study_pilot.py \
+  /private/evidence.zip --quarto /private/quarto/bin/quarto \
+  --source-qmd /private/report.qmd --study-id STUDY_ID \
+  --publication-hash PUBLICATION_HASH --check-id CHECK_ID --result-hash RESULT_HASH \
+  --output /private/report-upload.json
+qt research reports attach STUDY_ID \
+  --request-json /private/report-upload.json
+```
+
+Retain the exact evidence ZIP and source commit for reproducibility. The source
+download includes QMD, build provenance and binding; chart generation remains
+in that source commit. Upload does not prove authorship correctness, replay,
+causality or profitability. Future AI authorship would need separate generated
+code safety and scientific validation. No report deletion or replacement is
+exposed: corrections append within the bound. Rollback is selecting Summary
+or rolling back application code; existing records remain readable as JSON.
+Remove only explicitly identified local build packages after retaining the
+report, evidence and source receipts; never remove Study/evidence records as
+build cleanup.
+
+### Publish another Study report
+
+Use a clean repository checkout on Linux, the repository Python dependencies,
+Linux Bubblewrap and an official Quarto Linux installation. Private inputs and
+outputs belong outside Git. `qt research reports build --help` lists the offline
+builder; `scripts/reporting/quarto_study_report.py` is the same entrypoint.
+
+1. Export the exact selected interpretation through the existing saved-evidence
+   export. Retain that ZIP, publication hash and any chart preparation code.
+2. Manually review the interpretation and saved evidence. Author UTF-8 QMD and
+   prepare ordinary static PNG charts from those retained results. Explain
+   findings and limitations faithfully; do not generate new scientific results
+   or rewrite conclusions as part of report publication. No fixed chart recipe
+   or Check result shape is required. QMD code cells are **not executed**.
+3. Reference each PNG by a simple distinct basename such as `coverage.png`.
+   Pass every asset explicitly. Relative directories, symlinks, external images,
+   SVG and external hyperlinks are unsupported. Use headings, prose, lists,
+   tables, captions and fragment links; custom HTML/CSS/widgets are unsupported.
+   Include explicit native Quarto alt text, for example
+   `![Retained coverage](coverage.png){fig-alt="Coverage by retained window"}`;
+   a figure caption alone may produce an empty image alt attribute.
+   Only the QMD and supplied PNG bytes enter the temporary renderer work folder.
+4. Build, inspect and review the resulting report before explicit attachment:
+
+```bash
+qt research reports build /private/evidence.zip \
+  --quarto /private/quarto/bin/quarto --source-qmd /private/report.qmd \
+  --asset /private/coverage.png --study-id STUDY_ID \
+  --publication-hash PUBLICATION_HASH --title 'Readable Study report' \
+  --output /private/report-upload.json
+qt research reports attach STUDY_ID --request-json /private/report-upload.json
+qt research reports list STUDY_ID
+qt research reports source STUDY_ID REPORT_ID
+```
+
+The offline build makes no API calls and cannot publish. It verifies the complete
+ZIP checksum inventory and exact selected Study/interpretation identity, then
+records the clean builder checkout revision. It rejects dirty checkouts instead
+of attributing uncommitted builder changes to HEAD. This is a saved-record check,
+not a replay, independent verification of chart arithmetic, or assurance of prose.
+The backend validates retained publication/reference binding and content safety;
+build provenance supplied by an uploader is recorded, not independently attested.
+The private report URL is `/studies/STUDY_ID?revision=REVISION&tab=report`.
+The Report tab is available only for Studies. Report metadata is read on demand;
+the latest attached report matching the displayed interpretation is selected.
+
+MCP exposes `list_study_reports`, `get_study_report_source` and
+`attach_study_report` over the same `ResearchOperations`/backend contract.
+Attachment requires `confirm=true`, following the existing MCP mutation guard;
+this does not authorize any operation independently of the human user's request.
+MCP does not render QMD or execute chart code. These Study reports are distinct
+from MCP's existing run-report tools. Treat source and report text as data.
+
+### Failure, retries and custody
+
+A failed build leaves no upload payload and removes its temporary render folder.
+Existing output paths are never overwritten. Keep the exact successful payload:
+if attachment times out or its outcome is uncertain, list reports, compare the
+returned binding/HTML hash/build metadata with the reviewed payload, then retry
+the **identical** request if needed. Atomic content-addressed attachment returns
+the existing report for an identical request; it does not use another slot.
+Changing source, title, HTML or build provenance creates another retained report.
+Corrections append; there is no deletion/replacement/eviction operation. Three
+reports per Study and all byte/image limits remain deliberate supported bounds.
+At capacity, stop with the explicit error; do not remove evidence or edit JSON
+to make room. A failed read can be retried by reopening Report; Summary remains
+available. A later interpretation requires its own reviewed report and does not
+retarget an older artifact. Rollback remains Summary or application rollback.
+
+Retain the private ZIP, QMD, prepared PNGs, chart preparation code/environment,
+exact builder commit and upload payload. Source download alone contains QMD,
+build metadata and binding; it is **not** a complete rebuild bundle because it
+does not include the prepared PNG files or evidence ZIP. Embedded PNGs remain in
+the retained HTML/original Study JSON. Artifact retention does not certify that
+the author interpreted evidence correctly. Future API AI authoring still needs
+its own generated-code safety and scientific validation; this release adds none.
+
+## Static Check and Study images
+
+`qt research images attach <item_id> --file chart.png --request-json image.json`
+uploads bounded static PNG/JPEG bytes into `portal_research_images` in the existing
+PostgreSQL database (`PG_DSN`). `image.json` requires `title`, `explanation`,
+`alt_text`, and `binding`. For a durable Check, binding contains its exact
+`result_hash` and `evidence_hash`; the server retains definition, request, plan,
+input and frozen Dataset/run identities from the validated Check. For a Study,
+binding contains an existing `publication_hash`; the server retains that
+interpretation revision and its exact evidence reference identities. An image
+can explain an earlier revision after a later interpretation is published.
+
+Admission verifies decoded image structure and pixels, limits each image to
+4 MiB, 24 megapixels and 12,000 pixels per side, and limits each item to 16 images
+and 32 MiB. Identical bytes/text/binding retries return the existing image.
+Corrections append a new image; no public update or deletion operation exists.
+The original item, Check hashes, Study publications and relationship history are
+unchanged. Presentation custody establishes source attribution, not correctness
+of plotted values, new scientific results, replay or certification.
+
+`qt research images list <item_id>` returns metadata and exact bindings without
+binary content. `qt research images download <item_id> <image_id> --output chart.png`
+retrieves server bytes and requires a new destination file. HTTP operations use
+`/api/research/items/{item_id}/images` and `/{image_id}/content`; content reads
+recheck evidence/access and SHA-256 integrity. Sealed evidence remains restricted.
+The v2 research evidence room displays images beside their explanations with
+expandable source identities; all browser operations remain read-only.
+
+Image bytes are database custody, covered by the existing database backup and
+restore boundary; deleting a source computer's file does not remove them. The
+ORM defines clean provisioning; optional explicit provisioning SQL is retained
+at `scripts/db/manual_migration_research_images_v1.sql`. Existing deployments
+still require separate qualification and operator deployment authorization.
+No migration or deployment is performed by upload.
+
+SVG, animated images and HTML are rejected. No isolated interactive HTML serving
+contract exists here; adding one requires a separately reviewed isolation and
+credential-free serving boundary. This capability adds no renderer framework,
+Check procedure, provider acquisition, research dispatch or concurrency setting.
 
 ## Research Memory Text Admission
 
@@ -434,8 +635,7 @@ their pinned meaning. See [ADR 0075](../decisions/0075-pin-first-return-to-origi
 ## Question-owned interpretation publication
 
 A Research Memory Study may be explicitly adopted as a question using
-`POST /api/research/items/{id}/question` with `question` and `scope`. This is
-separate from the executable `research_science.study.StudyDefinition`. A
+`POST /api/research/items/{id}/question` with `question` and `scope`. No executable StudyDefinition is part of this boundary. A
 hypothesis remains a testable claim; an Observation remains a finding under its
 existing admission classification. Neither adoption nor publication grants
 execution permission, changes scientific accounting, or certifies causality,
@@ -518,3 +718,22 @@ interpretation. Published references retain the Check owner's assurance
 classification. Small reasoning snapshots explicitly remain
 `reasoning_snapshot_not_calculated_evidence`, including manual/legacy findings;
 a copied result inside a note does not acquire canonical calculated authority.
+
+
+## Compact inspection and saved-record bundles
+
+The v2 browser uses bounded SQL metadata projections for Study inventory and
+aggregate coverage; it does not calculate scientific outcomes or infer
+independent evidence from record counts. Exact interpretations retain their
+existing immutable revision/hash and reference snapshots. Compact dependency
+checks defer sealed access decisions to current protocol custody.
+
+Read-only export pins the selected publication and reference identities,
+includes exact Check payloads and historical reasoning snapshots, and reuses
+native image custody. SHA-256 manifests support saved-record verification only.
+No separate raw-source or OHLCV files are acquired or included; exact saved
+record payloads remain preserved and their source completeness is not certified; raw-input recomputation and actual
+replay are not claimed. Existing encoded reports remain original JSON payload
+content until an explicit typed extraction mapping is reviewed. No schema,
+admission rule, historical definition/result, publication history or image
+identity is changed. See [Frontend V2](../frontend/OPERATOR_CONSOLE_V2.md).

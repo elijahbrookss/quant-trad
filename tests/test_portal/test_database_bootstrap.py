@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 import pytest
 from sqlalchemy import CheckConstraint
+from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.schema import CreateIndex, CreateSchema, CreateTable
 
 from portal.backend.db import session as db_session
@@ -78,6 +79,7 @@ class _Inspector:
             dict[str, dict[str, Any]] | None
         ) = None,
         book_checkpoint_rollup_trigger_ready: bool = True,
+        cold_storage_ready: bool = False,
     ) -> None:
         self.schemas = {str(schema) for schema in schemas}
         self.tables: dict[str | None, set[str]] = {}
@@ -116,6 +118,7 @@ class _Inspector:
         self.book_checkpoint_rollup_trigger_ready = (
             book_checkpoint_rollup_trigger_ready
         )
+        self.cold_storage_ready = cold_storage_ready
 
     def get_schema_names(self) -> list[str]:
         return sorted(self.schemas)
@@ -210,6 +213,9 @@ class _Connection:
         self.inspector = inspector
         self.executed: list[Any] = []
 
+    def scalar(self, statement: Any, params: dict[str, Any] | None = None) -> Any | None:
+        return self.execute(statement, params).scalar_one_or_none()
+
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _Result:
         self.executed.append(statement)
         statement_text = str(statement)
@@ -285,6 +291,10 @@ class _Connection:
             return _Result(
                 (missing_series_id,) if missing_series_id is not None else ()
             )
+        if "FROM market.fact_storage_state" in statement_text:
+            if self._regclass("market.fact_storage_state") is None:
+                raise AssertionError("cold readiness queried an absent storage-state relation")
+            return _Result((self.inspector.cold_storage_ready,))
         if "latest_fact_commit_seq" in statement_text:
             return _Result(self.inspector.stale_book_fact or ())
         if "latest_checkpoint_id" in statement_text:
@@ -632,8 +642,9 @@ def test_book_operational_rollup_stale_checkpoint_requires_reseed(
         database._assert_book_operational_rollup_migration(connection)
 
 
+@pytest.mark.parametrize("cold_ready", [False, True])
 def test_book_operational_rollup_stale_fact_requires_reseed(
-    monkeypatch,
+    monkeypatch, cold_ready,
 ) -> None:
     inspector = _Inspector(
         schemas={"public", "market"},
@@ -643,13 +654,59 @@ def test_book_operational_rollup_stale_fact_requires_reseed(
             "fact_high_water_commit_seq": 100,
             "latest_fact_commit_seq": 101,
         },
+        cold_storage_ready=cold_ready,
     )
+    if not cold_ready:
+        inspector.tables["market"].remove("fact_storage_state")
     database, connection = _database_with_fake_engine(monkeypatch, inspector)
 
     with pytest.raises(
         RuntimeError,
         match="stale canonical Fact counters.*series_id=23",
     ):
+        database._assert_book_operational_rollup_migration(connection)
+
+
+@pytest.mark.parametrize("storage_state", ["absent", "not-ready", "ready"])
+def test_book_operational_rollup_checks_only_authoritative_cold_history(
+    monkeypatch, storage_state,
+) -> None:
+    inspector = _Inspector(
+        schemas={"public", "market"}, tables=_CLEAN_BOOTSTRAP_TABLES,
+        cold_storage_ready=storage_state == "ready",
+    )
+    if storage_state == "absent":
+        inspector.tables["market"].remove("fact_storage_state")
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    database._assert_book_operational_rollup_migration(connection)
+
+    statements = [str(statement) for statement in connection.executed]
+    assert any("FROM market.fact_storage_state" in statement for statement in statements) is (
+        storage_state != "absent"
+    )
+    fact_check = next(statement for statement in statements if "latest_fact_commit_seq" in statement)
+    assert ("market.cold_fact_pages" in fact_check) is (storage_state == "ready")
+    assert "market.fact_versions" in fact_check
+    assert any("latest_checkpoint_id" in statement for statement in statements)
+
+
+@pytest.mark.parametrize("failed_read", ["presence", "authority"])
+def test_book_operational_rollup_does_not_hide_storage_state_query_errors(
+    monkeypatch, failed_read,
+) -> None:
+    inspector = _Inspector(schemas={"public", "market"}, tables=_CLEAN_BOOTSTRAP_TABLES)
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+    execute = connection.execute
+
+    def fail(statement, params=None):
+        if ((failed_read == "presence" and (params or {}).get("table_ref") == "market.fact_storage_state")
+                or (failed_read == "authority" and "FROM market.fact_storage_state" in str(statement))):
+            raise RuntimeError("fixture_storage_state_query_failed")
+        return execute(statement, params)
+
+    monkeypatch.setattr(connection, "execute", fail)
+    with pytest.raises(RuntimeError, match="fixture_storage_state_query_failed"):
         database._assert_book_operational_rollup_migration(connection)
 
 
@@ -697,6 +754,29 @@ def test_bootstrap_existing_valid_tables_repairs_missing_model_indexes(monkeypat
     created_indexes = {statement.element.name for statement in connection.executed if isinstance(statement, CreateIndex)}
     assert created_tables == []
     assert REQUIRED_BOT_RUN_EVENT_INDEXES <= created_indexes
+
+
+@pytest.mark.parametrize("table_name", db_session.COLD_TABLE_NAMES)
+def test_column_validation_rejects_missing_cold_catalog_relation(monkeypatch, table_name) -> None:
+    inspector = _Inspector(
+        schemas={"public", "market", "observability_events", "observability_metrics"},
+        tables=[
+            _table_key(table) for table in Base.metadata.sorted_tables
+            if _table_key(table) != ("market", table_name)
+        ],
+    )
+    get_columns = inspector.get_columns
+
+    def reflect_columns(name, schema=None):
+        if (schema, name) == ("market", table_name):
+            raise NoSuchTableError(f"market.{table_name}")
+        return get_columns(name, schema=schema)
+
+    monkeypatch.setattr(inspector, "get_columns", reflect_columns)
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    with pytest.raises(NoSuchTableError, match=rf"market\.{table_name}"):
+        database._assert_columns(connection)
 
 
 def test_bootstrap_fails_loud_on_existing_column_drift_before_index_repair(monkeypatch) -> None:

@@ -35,6 +35,17 @@ class _FakeRuntimeIndicator:
         }
 
 
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
+def test_market_profile_source_preparation_selects_the_pinned_version(monkeypatch, version):
+    from tests.test_indicators.test_market_profile_availability import source_frame
+    monkeypatch.setattr(runtime_graph.candle_service, "fetch_ohlcv_for_context", lambda *a, **kw: source_frame(1))
+    indicator = runtime_graph.build_runtime_indicator_instance("mp", meta={"type": "market_profile", "version": version,
+        "params": {"bin_size": 1., "use_merged_value_areas": False}}, execution_context=IndicatorExecutionContext(
+        symbol="TEST", start="2025-01-01", end="2025-01-03", interval="15m"))
+    expected = "2025-01-02T00:00:00Z" if version == "v3" else "2025-01-01T23:30:00Z"
+    assert indicator._profiles_payload[0]["known_at"] == int(pd.Timestamp(expected).timestamp())
+
+
 def test_runtime_indicator_source_fetch_uses_canonical_candle_service(monkeypatch):
     source_frame = SimpleNamespace(empty=False, rows=12)
     captured = {}

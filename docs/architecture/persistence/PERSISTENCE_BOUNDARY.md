@@ -52,6 +52,11 @@ code_paths:
 ---
 # Persistence Boundary
 
+Report-artifact writes preserve an existing admitted run envelope and its
+configuration/material hashes. Their reduced configuration projection cannot
+replace startup custody. Records without an admitted `bot`/`start_request`
+envelope retain legacy projection behavior; no historical repair is implicit.
+
 ## Offline scientific authority and governance
 
 Phase 4-6 records remain inside the primary PostgreSQL boundary. The schema
@@ -124,6 +129,11 @@ registry, commit-clock, and trigger contract and fails loud when an existing
 database is missing or has drifted objects. Historical SQL under `scripts/db/`
 therefore remains upgrade and migration-lineage evidence for older databases,
 not clean-install input.
+
+Column validation includes every current cold-catalog relation. A missing cold
+table is a schema failure, including on an older v2 database used for rehearsal;
+there is no startup exemption for that layout. This check neither activates
+cold authority nor changes the separate physical HDD placement checks.
 
 Required operational indexes are part of the current schema contract. If they
 are still absent after bootstrap attempts to create model-declared indexes,

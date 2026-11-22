@@ -6,7 +6,8 @@ import json
 import pytest
 from sqlalchemy import text
 
-from market_data.archive import DurableRawSpoolSegment, FilesystemRawArchiveObjectStore, publish_spool_archive
+from market_data.archive import (DurableRawSpoolSegment, FilesystemRawArchiveObjectStore,
+                                 encode_raw_records_to_parquet, publish_spool_archive)
 from market_data.canonical_adapters import canonicalize_market_trade
 from market_data.contracts import SourceIdentity
 from market_data.structure import MarketSide
@@ -19,7 +20,8 @@ from tests.test_market_data.test_market_state_phase3 import _trade
 pytestmark = pytest.mark.db
 
 
-def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-lineage", ordinals=(1, 2)):
+def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-lineage", ordinals=(1, 2),
+                       records_per_manifest=1):
     monkeypatch.setattr(market_structure, "db", storage.database)
     structures = market_structure.market_structure_repository
     day = storage.today - timedelta(days=2)
@@ -38,15 +40,28 @@ def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-l
     claim = structures.claim_stream(definition_id=definition_id, owner_id="exact-lineage-test", lease_seconds=600, bounded=True)
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
     raws, manifests = [], []
-    for ordinal in ordinals:
+    ordinals = tuple(ordinals)
+    for offset in range(0, len(ordinals), records_per_manifest):
+        group = ordinals[offset:offset + records_per_manifest]
         segment = DurableRawSpoolSegment(root=tmp_path / "spool", definition_id=claim.definition_id,
-                                        session_id=claim.session_id, connection_epoch=0, segment_ordinal=ordinal - 1)
-        raw = _record(segment, ordinal)
-        segment.append(raw)
-        segment.seal()
-        encoded, ack, records = publish_spool_archive(segment, object_store=store, temporary_directory=tmp_path / "raw-staging")
+                                        session_id=claim.session_id, connection_epoch=0, segment_ordinal=group[0] - 1)
+        records = [_record(segment, ordinal) for ordinal in group]
+        if records_per_manifest == 1:
+            segment.append(records[0])
+            segment.seal()
+            encoded, ack, records = publish_spool_archive(segment, object_store=store,
+                temporary_directory=tmp_path / "raw-staging")
+        else:
+            # This fixture qualifies lineage SQL, not per-frame spool fsync.
+            # Retain the real encoder, verified object store, commit owner,
+            # record identities, and database mappings for all generated frames.
+            segment.close()
+            encoded = encode_raw_records_to_parquet(records, archive_segment_id=segment.spool_segment_id,
+                temporary_directory=tmp_path / "raw-staging")
+            ack = store.put_verified(object_key=f"fixture/{group[0]}.parquet",
+                source_path=encoded.path, expected_sha256=encoded.sha256)
         manifests.append(structures.commit_archive(claim, encoded=encoded, acknowledgement=ack, records=records).manifest_id)
-        raws.append(raw)
+        raws.extend(records)
     return SimpleNamespace(day=day, source=source, source_id=source_id, series_id=series_id,
                            store=store, raws=raws, manifests=manifests, structures=structures, claim=claim)
 
@@ -116,6 +131,64 @@ def test_trade_prefix_progress_holds_raw_evidence_and_resumes_after_interruption
     assert set(verify()) == set(fixture.manifests)
 
 
+def test_sequential_prefix_intervals_commit_atomically_and_resume_with_full_budget(storage, tmp_path, monkeypatch):
+    from sqlalchemy import event
+    from market_data.archive import RawArchiveReadLimits
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from portal.backend.service.storage.repos import fact_book_prefix, fact_lineage
+
+    # Match the incident's 9,092 source positions across 147 raw manifests,
+    # using entirely generated inputs in the disposable database.
+    fixture = _raw_trade_fixture(storage, tmp_path, monkeypatch,
+        ordinals=range(1, 9093), records_per_manifest=62)
+    assert len(fixture.manifests) == 147
+    prefix = {name: getattr(fixture.raws[-1], name) for name in fact_lineage.BOOK_SCOPE_FIELDS} | {
+        "first_receive_ordinal": 1, "receive_ordinal": 9092, "root_fact_version_id": "bounded-prefix-root",
+    }
+    queries = []
+
+    def observe(_conn, _cursor, statement, parameters, _context, _executemany):
+        if "WITH candidate_manifests AS MATERIALIZED" in statement and "AS prefixes(" in statement:
+            queries.append((parameters["first_requested_ordinal"], parameters["last_requested_ordinal"]))
+
+    def advance():
+        with storage.database.session() as session:
+            session.execute(text("SET LOCAL statement_timeout='5s'"))
+            market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
+            return fact_book_prefix.prepare_next_trade_prefix(session, prefixes=[prefix], object_store=fixture.store,
+                byte_verifier=ArchiveVerificationBatch(fixture.store, limits=ArchiveVerificationLimits()),
+                limits=RawArchiveReadLimits(), max_mapping_rows=50_000, max_objects=1000)
+
+    event.listen(storage.database._engine, "before_cursor_execute", observe)
+    try:
+        assert advance()["last_receive_ordinal"] == 2000
+        dependencies = fact_book_prefix._dependencies
+
+        def interrupted(*args, **kwargs):
+            dependencies(*args, **kwargs)
+            raise RuntimeError("bounded-prefix interrupted after holds flushed")
+
+        with monkeypatch.context() as interrupt:
+            interrupt.setattr(fact_book_prefix, "_dependencies", interrupted)
+            with pytest.raises(RuntimeError, match="bounded-prefix interrupted"):
+                advance()
+        with storage.database.session() as session:
+            assert session.execute(text("SELECT count(*) FROM market.fact_book_prefix_chunks")).scalar_one() == 1
+            assert session.execute(text("SELECT count(*) FROM market.fact_book_prefix_dependencies")).scalar_one() == 33
+        assert advance()["first_receive_ordinal"] == 2001
+        for last in (6000, 8000, 9092):
+            assert advance()["last_receive_ordinal"] == last
+        assert advance() is None
+        assert queries == [(1, 2000), (2001, 4000), (2001, 4000), (4001, 6000),
+                           (6001, 8000), (8001, 9092)]
+        with storage.database.session() as session:
+            refs, _ = fact_book_prefix.resolve_verified_trade_prefixes(session, prefixes=[prefix], witnesses=[prefix],
+                byte_verifier=ArchiveVerificationBatch(fixture.store, limits=ArchiveVerificationLimits()), max_objects=1000)
+            assert set(refs) == set(fixture.manifests)
+    finally:
+        event.remove(storage.database._engine, "before_cursor_execute", observe)
+
+
 def test_sparse_prefix_endpoints_keep_paired_scopes_and_ignore_intervening_archives(storage, tmp_path, monkeypatch):
     from sqlalchemy import event
     from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
@@ -143,10 +216,12 @@ def test_sparse_prefix_endpoints_keep_paired_scopes_and_ignore_intervening_archi
     prefixes += [{**scope, "root_fact_version_id": f"overlap-{index}"}
                  for index, scope in enumerate(prefixes[:6])]
     bound = {identity for fixture in fixtures for identity in fixture.manifests}
-    returned = []
+    returned, queries = [], []
     def observe(conn, cursor, statement, parameters, context, executemany):
-        if "raw_archive_record_mappings AS mappings" in statement and "AS prefixes(" in statement:
+        if ("raw_archive_record_mappings AS mappings" in statement and "AS prefixes(" in statement
+                and not statement.startswith("EXPLAIN")):
             returned.append(cursor.rowcount)
+            queries.append((statement, parameters))
     event.listen(storage.database._engine, "after_cursor_execute", observe)
     try:
         with storage.database.session() as session:
@@ -156,6 +231,22 @@ def test_sparse_prefix_endpoints_keep_paired_scopes_and_ignore_intervening_archi
                 book_prefix_ranges=prefixes, max_mapping_rows=len(prefixes), bound_manifest_ids=bound)
         assert set(references) == expected
         assert returned == [len(expected)], "overlapping sparse witnesses must not duplicate placements"
+        # Check actual PostgreSQL execution, not just the returned references:
+        # intervening manifests must be removed before mapping expansion. A
+        # flattened semijoin can return the same references after wasted reads.
+        statement, parameters = queries[0]
+        with storage.database.session() as session:
+            plan = session.connection().exec_driver_sql(
+                "EXPLAIN (ANALYZE, FORMAT JSON) " + statement, parameters).scalar_one()[0]["Plan"]
+        pending, manifest_plans = [plan], []
+        while pending:
+            node = pending.pop()
+            if node.get("Subplan Name") == "CTE candidate_manifests":
+                manifest_plans.append(node)
+            pending.extend(node.get("Plans", []))
+        assert len(manifest_plans) == 1
+        assert manifest_plans[0]["Actual Rows"] == len(expected)
+        assert manifest_plans[0]["Actual Loops"] == 1
     finally:
         event.remove(storage.database._engine, "after_cursor_execute", observe)
 
@@ -509,7 +600,7 @@ def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path
             with monkeypatch.context() as old_verifier:
                 old_verifier.setattr(fact_archival, "FACT_ARCHIVE_VERIFIER_VERSION", "market.canonical_archive_verification.v1")
                 assert archive.verify_next_page(day)["page_ordinal"] == 0
-            with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+            with pytest.raises(RuntimeError, match="verification_generation_changed"):
                 archive.verify_partition(day)
         assert archive.verify_next_page(day)["status"] == "page_verified"
     assert archive.verify_partition(day)["row_count"] == 2
@@ -574,7 +665,7 @@ def test_older_verified_partitions_restart_without_reusing_deletion_authority(st
         raw_key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
                                   {"id": fixture.manifests[0]}).scalar_one()
     reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
-    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+    with pytest.raises(RuntimeError, match="verification_generation_changed"):
         reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
     assert _physical(storage, day)["hot_rows"] == 2
     policy = CanonicalFactRetentionPolicy(execution_enabled=True, hot_days=1, max_steps_per_run=1,

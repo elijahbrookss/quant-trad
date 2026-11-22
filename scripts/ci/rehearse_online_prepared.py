@@ -514,6 +514,8 @@ os.chown(root,70,70)
     fixture_only_publication_and_verification=True,production_admission=False)
   if options.completion_observation:
    final_bytes=(state/final_host.STATE).read_bytes()
+   hold_bytes=(state/host_boundary.HOLD).read_bytes()
+   retired_history=False
    # Actual expiry, not altered clocks or a restarted migration allowance.
    while time.time() <= saved['deadline']+.1:
     time.sleep(min(.2,saved['deadline']+.2-time.time()))
@@ -525,11 +527,68 @@ os.chown(root,70,70)
      assert time.monotonic()<observed_deadline, 'complete paired recovery observation timed out'
      observed=operation.run_operation_plan(operation_file)
      if observed['ready']:break
+     lifecycle=json.loads(host_boundary.database_query(pgid,
+       "SELECT coalesce(jsonb_agg(context->'storage_lifecycle'),'[]'::jsonb)::text FROM market.collector_worker_state WHERE worker_role='market_storage_maintenance'"))
+     assert len(lifecycle)==1
+     maintenance=lifecycle[0].get('maintenance') or {}
+     if (maintenance.get('history_movement') or {}).get('configured') is not True:
+      # This old held-v2 operator must stay refused by the final runtime.
+      # Qualify the real recovery pair without inventing its retired worker.
+      assert not canonical and observed['reason']=='maintenance_starting', observed
+      assert maintenance['local_recovery']['configured'] is True
+      outcome=lifecycle[0].get('last_run') or {}
+      if outcome:
+       assert lifecycle[0]['state']!='degraded' and outcome['failure_count']==0, outcome
+       pair=outcome['local_recovery']
+       assert pair['state'] in ('completed','not_due'), pair
+       spec=json.loads((control/'runtime-recovery.json').read_text())
+       assert pair['policy_hash']==spec['policy_hash'], pair
+       code="""import json,os,sys
+from pathlib import Path
+from sqlalchemy import create_engine,select
+from sqlalchemy.pool import NullPool
+from core.storage_targets import StoragePolicy
+from portal.backend.db.storage_target_models import StoragePolicyRecord
+from portal.backend.service.storage.recovery_copies import _identity,_snapshot_layout
+pair=json.loads(sys.argv[1]);engine=create_engine(os.environ['PG_DSN'],poolclass=NullPool,hide_parameters=True)
+try:
+ with engine.connect() as conn:
+  conn.exec_driver_sql('SET TRANSACTION READ ONLY')
+  identity,_=_identity(conn);layout=_snapshot_layout(conn)
+  policy,revision=conn.execute(select(StoragePolicyRecord.policy,StoragePolicyRecord.revision).where(StoragePolicyRecord.id==1)).one()
+  assert pair['policy_hash']==StoragePolicy.from_dict(policy).fingerprint and pair['policy_revision']==revision
+  assert pair['storage_layout']==layout
+ paths=list(Path('/qt-history/recovery-incremental').glob('*/'+pair['generation']+'/complete.json'));assert len(paths)==1
+ certificate=json.loads(paths[0].read_text())
+ assert certificate['schema_version']=='qt.encrypted_recovery_pair.v1' and certificate['name']==pair['generation']
+ assert certificate['database_identity']==identity and certificate['storage_layout']==layout
+ assert certificate['database_type']=='full' and certificate['archive_objects']>0
+ print(json.dumps(certificate),flush=True)
+finally:engine.dispose()
+"""
+       checked=run(['exec',saved['runtime']['candidate_ids']['storage-maintenance'],'python','-c',code,json.dumps(pair)],timeout=30)
+       certificate=json.loads(checked.stdout)
+       (state/'runtime-pair-certificate.json').write_text(json.dumps(certificate))
+       report['current_layout_recovery']=dict(complete_pair_confirmed=True,certificate=certificate,
+         maintenance_outcome=outcome,frozen_preserved=host_boundary.database_query(pgid,frozen_sql)==before_final_frozen,
+         production_admission=False)
+       assert report['current_layout_recovery']['frozen_preserved']
+       retired_history=True
+       break
      time.sleep(.2)
     again=operation.run_operation_plan(operation_file,execute=True)
-    if not canonical:assert again['ready'] and not again['ordinary_relaunch_authorized']
+    if retired_history:
+     assert again['ready'] is False and again['reason']=='maintenance_starting', again
+     assert not again['ordinary_relaunch_authorized'] and not again['complete_backup_confirmed']
+     assert (state/host_boundary.HOLD).read_bytes()==hold_bytes
+     report['retired_history_handoff_refusal']=dict(reason=again['reason'],hold_unchanged=True,
+       candidate_ids_unchanged=final_host._load(state/final_host.STATE)['runtime']['candidate_ids']==saved['runtime']['candidate_ids'])
+     assert report['retired_history_handoff_refusal']['candidate_ids_unchanged']
+     observed=dict(observed,database_identity=certificate['database_identity'],storage_layout=certificate['storage_layout'],
+       plan_id=saved['commit']['confirmed_plan_id'])
+    elif not canonical:assert again['ready'] and not again['ordinary_relaunch_authorized']
     assert observed['plan_id']==saved['commit']['confirmed_plan_id']
-    if not canonical:assert again['recovery_generation']==observed['recovery_generation']
+    if not canonical and not retired_history:assert again['recovery_generation']==observed['recovery_generation']
     if not canonical:assert (state/final_host.STATE).read_bytes()==final_bytes
     assert (state/initial.STATE).read_bytes()==prepared_bytes
     report['completion_observation']=dict(observed,after_original_final_deadline=True,

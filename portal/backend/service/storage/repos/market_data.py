@@ -10,10 +10,11 @@ import uuid
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from portal.backend.db.execution_control import owned_connection_cancel
+from .fact_archive_generation import material_alias_projection
 from core.execution_control import (
     consume_execution_json, consume_execution_resource, current_execution_control,
     execution_checkpoint, measure_execution_stage,
@@ -29,8 +30,10 @@ from market_data.canonical import (
 from market_data.canonical_storage import (
     LEGACY_MATERIAL_EVIDENCE_KEYS,
     record_from_storage_row as _canonical_row_to_record,
+    record_to_storage_row,
     source_from_storage_row as _canonical_source,
 )
+from market_data.cold_history import select_fact_rows
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     FUNDING_RATE_FACT_TYPE,
@@ -64,6 +67,7 @@ from market_data.fact_registry import (
     NORMALIZED_FACT_VERSION,
     get_fact_contract,
     get_fact_payload_schema,
+    supported_fact_contracts,
 )
 from market_data.store import FrozenDataset, IngestionOutcome
 from market_data.structure import (
@@ -78,6 +82,7 @@ from ....db import db
 from ....db.fact_storage_schema import current_fact_storage_day
 
 from .market_lifecycle import market_storage_lifecycle_repository
+from .cold_history import cold_layout_active, cold_page_is_visible, publish_cold_candle_rows
 from .fact_storage import (
     CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM,
     CANONICAL_RANGE_ROW_FROM, CANONICAL_RANGE_HEADER_FROM,
@@ -88,6 +93,39 @@ from .fact_storage import (
 _SERIES_IDENTITY_VERSION = "market_series.v1"
 _DIMENSIONAL_SERIES_IDENTITY_VERSION = "market_series.v2"
 _MANAGED_L2_BOOK_CONTRACT_VERSION = "market.l2_book.v1"
+
+
+def _observation_runs(rows, step_seconds):
+    runs = {}
+    sources = {}
+    counts = Counter()
+    step = timedelta(seconds=step_seconds)
+    for row in rows:
+        key = row["source_identity_key"]
+        sources[key] = {
+            "provider": row["source_provider"], "venue": row["source_venue"],
+            "source_kind": row["source_kind"], "adapter_version": row["source_adapter_version"],
+        }
+        counts[key] += 1
+        timestamp = row["observation_time"]
+        source_runs = runs.setdefault(row["source_id"], [])
+        if source_runs and timestamp <= source_runs[-1]["last"]:
+            continue
+        if source_runs and timestamp == source_runs[-1]["last"] + step:
+            source_runs[-1]["last"] = timestamp
+        else:
+            source_runs.append({"first": timestamp, "last": timestamp})
+    ordered = sorted(
+        ((run["first"], source_id, run) for source_id, values in runs.items() for run in values),
+        key=lambda item: (item[0], item[1]),
+    )
+    intervals = [run for _, _, run in ordered]
+    return {
+        "row_count": sum(counts.values()), "timeframe_seconds": step_seconds,
+        "first_observation_at": intervals[0]["first"] if intervals else None,
+        "source_summary": {"sources": sources, "counts": dict(counts)},
+        "observation_intervals": intervals,
+    }
 
 
 def _json_text(value: Mapping[str, Any] | None) -> str:
@@ -463,6 +501,7 @@ _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
         "derivatives.funding_rate.v1",
         "market.reference_price.v1",
         "market.reserve_balance.v1",
+        "derivatives.liquidation_volume.v1",
         "market.trade.v1",
         "market.trade_flow.v1",
         "market.trade_flow_feature.v1",
@@ -598,7 +637,7 @@ def _load_lineage_material_rows(
             raise ValueError(f"market_dataset_provenance_key_invalid: fact_type={fact_type} evidence_key={evidence_key}")
         base_params["evidence_key"] = str(evidence_key)
         selection = (
-            """
+            f"""
             SELECT versions.id, hot.provenance -> :evidence_key
                 ->> 'legacy_material_hash' AS lineage_material_hash
             FROM market.fact_versions AS versions
@@ -609,7 +648,7 @@ def _load_lineage_material_rows(
                   ->> 'legacy_material_hash' = ANY(:material_hashes)
             UNION ALL
             SELECT aliases.fact_version_id AS id, aliases.material_hash AS lineage_material_hash
-            FROM market.fact_archive_material_aliases AS aliases
+            FROM {material_alias_projection("aliases")}
             JOIN market.fact_versions AS versions ON versions.id=aliases.fact_version_id
             JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
               AND manifest.storage_day=versions.storage_day
@@ -630,6 +669,10 @@ def _load_lineage_material_rows(
         ORDER BY selected.lineage_material_hash, versions.market_commit_seq DESC, versions.id
     """)
     candidates_by_hash: dict[str, list[dict[str, Any]]] = {}
+    cold = (
+        canonical_fact_storage_repository.cold_history(session)
+        if cold_layout_active(session) else None
+    )
     for material_hash_chunk in _lineage_query_chunks(requested):
         params = {
             **base_params,
@@ -640,6 +683,18 @@ def _load_lineage_material_rows(
         rows = canonical_fact_storage_repository.hydrate_rows(session, [
             {key: value for key, value in row.items() if key != "lineage_material_hash"} for row in selected
         ])
+        if cold is not None:
+            existing = {row["id"] for row in rows}
+            cold_claims = [
+                (fact_id, claim) for fact_id, claim in cold.material_candidates(
+                    session, series_ids=[series_id], material_hashes=material_hash_chunk,
+                    evidence_key=evidence_key, include_canonical=evidence_key is None,
+                    include_legacy=evidence_key is not None,
+                ) if fact_id not in existing
+            ]
+            decoded = cold.read_by_ids(session, [fact_id for fact_id, _ in cold_claims])
+            rows.extend(decoded[fact_id] for fact_id, _ in cold_claims)
+            claims.extend(claim for _, claim in cold_claims)
         chunk_set = set(material_hash_chunk)
         for row, claim in zip(rows, claims, strict=True):
             row = dict(row)
@@ -1348,7 +1403,7 @@ class PostgresMarketDataRepository:
 
     @staticmethod
     def _current_commit_seq_with_session(session) -> int:
-        return int(
+        hot = int(
             session.execute(
                 text(
                     # The existing (series_id, market_commit_seq) index can find
@@ -1364,6 +1419,29 @@ class PostgresMarketDataRepository:
                 )
             ).scalar_one()
         )
+        if not cold_layout_active(session):
+            return hot
+        cold = session.execute(text(f"""
+            SELECT COALESCE(MAX(last_commit_seq), 0) FROM market.cold_fact_pages AS page
+            WHERE {cold_page_is_visible("page")}
+        """)).scalar_one()
+        return max(hot, int(cold))
+
+    @staticmethod
+    def _series_commit_seq_with_session(session, series_id):
+        hot = session.execute(text(
+            "SELECT COALESCE(MAX(market_commit_seq), 0) "
+            "FROM market.fact_versions WHERE series_id=:series_id"
+        ), {"series_id": series_id}).scalar_one()
+        if not cold_layout_active(session):
+            return int(hot)
+        cold = session.execute(text(f"""
+            SELECT COALESCE(MAX(bounds.last_commit_seq), 0)
+            FROM market.cold_fact_page_series AS bounds
+            JOIN market.cold_fact_pages AS page ON page.id=bounds.page_id
+            WHERE bounds.series_id=:series_id AND {cold_page_is_visible("page")}
+        """), {"series_id": series_id}).scalar_one()
+        return max(int(hot), int(cold))
 
     def list_series_metadata(self, *, instrument_id: Optional[str] = None) -> list[dict[str, Any]]:
         """Discover registered identities without scanning accepted facts.
@@ -1408,7 +1486,40 @@ class PostgresMarketDataRepository:
             "market.derivative_state",
             "market.market_response",
         )
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
+            canonical_rows = """
+                SELECT versions.observation_key AS observation_identity
+                FROM market.fact_versions AS versions WHERE versions.series_id=series.id
+            """
+            cold_bounds = ""
+            bounds_columns = "bounds.first_fact_time, bounds.last_fact_time, COALESCE(bounds.max_commit_seq, 0) AS max_commit_seq"
+            if cold_layout_active(session):
+                # Use the existing HDD key index. Count revisions from both
+                # owners, grouping the same observation across corrections.
+                canonical_rows = f"""
+                    SELECT sha256(convert_to(versions.observation_key,'UTF8')) AS observation_identity
+                    FROM market.fact_versions AS versions WHERE versions.series_id=series.id
+                    UNION ALL
+                    SELECT loc.key_digest AS observation_identity
+                    FROM market.cold_fact_locators AS loc
+                    JOIN market.cold_fact_pages AS page ON page.id=loc.page_id
+                    WHERE loc.series_id=series.id AND {cold_page_is_visible("page")}
+                """
+                cold_bounds = f"""
+                    LEFT JOIN LATERAL (
+                        SELECT min(scope.first_observation_at) AS first_fact_time,
+                               max(scope.last_observation_at) AS last_fact_time,
+                               max(scope.last_commit_seq) AS max_commit_seq
+                        FROM market.cold_fact_page_series AS scope
+                        JOIN market.cold_fact_pages AS page ON page.id=scope.page_id
+                        WHERE scope.series_id=series.id AND {cold_page_is_visible("page")}
+                    ) AS history ON TRUE
+                """
+                bounds_columns = """
+                    LEAST(bounds.first_fact_time, history.first_fact_time) AS first_fact_time,
+                    GREATEST(bounds.last_fact_time, history.last_fact_time) AS last_fact_time,
+                    COALESCE(GREATEST(bounds.max_commit_seq, history.max_commit_seq),0) AS max_commit_seq
+                """
             rows = session.execute(
                 text(
                     f"""
@@ -1429,10 +1540,7 @@ class PostgresMarketDataRepository:
                            CASE WHEN series.fact_type = 'derivatives.funding_rate'
                              THEN COALESCE(canonical.fact_count, 0) ELSE 0
                            END AS funding_rate_count,
-                           CASE WHEN series.fact_type IN (
-                                      'market.reference_price',
-                                      'market.reserve_balance'
-                                  )
+                           CASE WHEN series.fact_type = ANY(:numeric_types)
                              THEN COALESCE(canonical.fact_count, 0) ELSE 0
                            END AS numeric_fact_count,
                            CASE WHEN series.fact_type = 'market.trade'
@@ -1447,9 +1555,7 @@ class PostgresMarketDataRepository:
                                   )
                              THEN COALESCE(canonical.fact_count, 0) ELSE 0
                            END AS feature_count,
-                           bounds.first_fact_time,
-                           bounds.last_fact_time,
-                           COALESCE(bounds.max_commit_seq, 0) AS max_commit_seq
+                           {bounds_columns}
                     FROM market.series AS series
                     LEFT JOIN LATERAL (
                         -- Count through the narrow observation/revision key so
@@ -1460,9 +1566,8 @@ class PostgresMarketDataRepository:
                                count(*) AS fact_count
                         FROM (
                             SELECT count(*) AS version_count
-                            FROM market.fact_versions AS versions
-                            WHERE versions.series_id = series.id
-                            GROUP BY versions.observation_key
+                            FROM ({canonical_rows}) AS accepted_versions
+                            GROUP BY observation_identity
                         ) AS observation_versions
                     ) AS canonical ON TRUE
                     LEFT JOIN LATERAL (
@@ -1490,12 +1595,15 @@ class PostgresMarketDataRepository:
                                    LIMIT 1
                                ) AS max_commit_seq
                     ) AS bounds ON TRUE
+                    {cold_bounds}
                     {where_sql}
                     ORDER BY series.instrument_id, series.fact_type,
                              series.timeframe_seconds NULLS FIRST, series.id
                     """
                 ),
-                {**params, "feature_types": list(feature_types)},
+                {**params, "feature_types": list(feature_types),
+                 "numeric_types": [contract.fact_type for contract in supported_fact_contracts()
+                                   if contract.uses_exact_numeric_storage]},
             ).mappings().all()
         return [dict(row) for row in rows]
 
@@ -2088,6 +2196,7 @@ class PostgresMarketDataRepository:
         source_revision: Optional[str] = None,
         ingestion_run_id: Optional[str] = None,
         allow_corrections: bool = True,
+        fill_missing_only: bool = False,
     ) -> IngestionOutcome:
         series_id = int(series_id)
         source_id = int(source_id)
@@ -2098,6 +2207,11 @@ class PostgresMarketDataRepository:
             raise ValueError("market_data_ingest_invalid: source_id must be positive")
         if not rows:
             raise ValueError("market_data_ingest_invalid: at least one candle is required")
+        if type(fill_missing_only) is not bool or (fill_missing_only and any(
+            fact.known_at != fact.accepted_at or fact.known_at_method != "platform_acceptance"
+            for fact in rows
+        )):
+            raise ValueError("market_data_ingest_invalid: gap-only candles require platform acceptance")
         duplicate_times = [
             current.open_time
             for previous, current in zip(rows, rows[1:])
@@ -2146,6 +2260,7 @@ class PostgresMarketDataRepository:
                     for fact in rows
                 ],
                 allow_corrections=bool(allow_corrections),
+                fill_missing_only=fill_missing_only,
             )
         except Exception as exc:
             self._fail_ingestion_run(run_id, exc)
@@ -2627,6 +2742,7 @@ class PostgresMarketDataRepository:
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
         require_same_source: bool = False,
+        fill_missing_only: bool = False,
     ) -> IngestionOutcome:
         with db.session() as session:
             return self._ingest_canonical_rows_with_session(
@@ -2637,6 +2753,7 @@ class PostgresMarketDataRepository:
                 allow_corrections=allow_corrections,
                 collection_fence=collection_fence,
                 require_same_source=require_same_source,
+                fill_missing_only=fill_missing_only,
             )
 
     def _ingest_canonical_rows_with_session(
@@ -2649,6 +2766,7 @@ class PostgresMarketDataRepository:
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
         require_same_source: bool = False,
+        fill_missing_only: bool = False,
     ) -> IngestionOutcome:
         inserted_count = 0
         corrected_count = 0
@@ -2657,6 +2775,7 @@ class PostgresMarketDataRepository:
         storage_day = None
         from .fact_references import lock_canonical_raw_references
 
+        market_storage_lifecycle_repository.acquire_publication_lock(session)
         session.execute(
             text("SELECT pg_advisory_xact_lock(:series_id)"),
             {"series_id": series_id},
@@ -2667,6 +2786,32 @@ class PostgresMarketDataRepository:
             collection_fence=collection_fence,
         )
         source_id, source = self._canonical_source_for_run(session, run_id)
+        cold_active = cold_layout_active(session)
+        cold_batch = []
+        cold_cutoff = None
+        series_dimensions = {}
+        historical = (
+            cold_active and source.provider.lower() == "coinbase" and source.source_kind == "historical_api"
+            and rows and all(fact.fact_type == CANDLE_FACT_TYPE for fact in rows)
+        )
+        if fill_missing_only and not historical:
+            raise RuntimeError("market_data_gap_acquisition_requires_canonical_cold_coinbase")
+        if historical:
+            from .cold_history import require_cold_acquisition_headroom
+
+            cold_cutoff = session.execute(text("""
+                SELECT clock_timestamp() - make_interval(days => (policy->>'recent_days')::integer)
+                FROM public.portal_storage_policy WHERE id=1
+            """)).scalar_one_or_none()
+            if cold_cutoff is None:
+                raise RuntimeError("cold_fact_publish_storage_policy_missing")
+            if fill_missing_only and any(fact.observation_time >= cold_cutoff for fact in rows):
+                raise RuntimeError("market_data_gap_acquisition_outside_cold_window")
+            if any(fact.observation_time < cold_cutoff for fact in rows):
+                require_cold_acquisition_headroom(session)
+                series_dimensions = session.execute(text(
+                    "SELECT dimensions FROM market.series WHERE id=:series_id"
+                ), {"series_id": series_id}).scalar_one()
         latest_identities = session.execute(text("""
             SELECT DISTINCT ON (observation_key) id,storage_day,observation_key,revision
             FROM market.fact_identities
@@ -2676,21 +2821,37 @@ class PostgresMarketDataRepository:
         latest_by_key = {}
         if latest_identities:
             latest_headers = session.execute(text("""
-                SELECT id,observation_key,revision,row_hash,market_commit_seq,source_id
+                SELECT id,observation_key,revision,row_hash,material_hash,market_commit_seq,source_id
                 FROM market.fact_versions
                 WHERE id=ANY(:ids) AND storage_day=ANY(:days)
             """), {"ids": [row["id"] for row in latest_identities],
                    "days": sorted({row["storage_day"] for row in latest_identities})}).mappings().all()
-            if (len(latest_headers) != len(latest_identities)
-                    or {row["id"] for row in latest_headers} != {row["id"] for row in latest_identities}):
+            expected_ids = {row["id"] for row in latest_identities}
+            header_ids = {row["id"] for row in latest_headers}
+            if len(header_ids) != len(latest_headers) or not header_ids.issubset(expected_ids):
+                raise RuntimeError(f"canonical_latest_identity_coverage_invalid: series_id={series_id}")
+            if not cold_active and header_ids != expected_ids:
                 raise RuntimeError(f"canonical_latest_identity_coverage_invalid: series_id={series_id}")
             latest_by_key = {row["observation_key"]: row for row in latest_headers}
+        hot_keys = set(latest_by_key)
+        if cold_active:
+            missing = sorted({fact.observation_key for fact in rows} - latest_by_key.keys())
+            if missing:
+                cold = canonical_fact_storage_repository.cold_history(session)
+                latest_by_key.update(cold.latest_for_keys(session, series_id=series_id, keys=missing))
+            missing_ids = {row["id"] for row in latest_identities if row["observation_key"] not in hot_keys}
+            if missing_ids:
+                actual = cold.locations_by_ids(session, sorted(missing_ids), require_all=False)
+                if actual.keys() != missing_ids:
+                    raise RuntimeError(f"canonical_latest_identity_coverage_invalid: series_id={series_id}")
         # A true no-op creates no reference and must remain envelope-only,
         # including after cold movement. Acquire a deterministic manifest-lock
         # set for the genuine writes before inserting any of their payloads.
         pending_rows = []
         pending_hashes = {key: row["row_hash"] for key, row in latest_by_key.items()}
         for fact in rows:
+            if fill_missing_only and fact.observation_key in latest_by_key:
+                continue
             if pending_hashes.get(fact.observation_key) != fact.row_hash:
                 pending_rows.append(fact)
                 pending_hashes[fact.observation_key] = fact.row_hash
@@ -2712,6 +2873,14 @@ class PostgresMarketDataRepository:
                         f"another source series_id={series_id} "
                         f"observation_key={fact.observation_key}"
                     )
+                if fill_missing_only:
+                    if str(latest["material_hash"]) != fact.material_hash:
+                        raise RuntimeError(
+                            "market_data_gap_acquisition_overlap_changed: "
+                            f"series_id={series_id} observation_key={fact.observation_key}"
+                        )
+                    noop_count += 1
+                    continue
                 if str(latest["row_hash"]) == fact.row_hash:
                     noop_count += 1
                     continue
@@ -2723,6 +2892,29 @@ class PostgresMarketDataRepository:
                         f"observation_key={fact.observation_key}"
                     )
             revision = 1 if latest is None else int(latest["revision"]) + 1
+            # A key with a hot head stays transactional until that authority
+            # retires. A single request can include eligible cold and hot keys.
+            insert_cold = (
+                cold_cutoff is not None and fact.observation_time < cold_cutoff
+                and fact.observation_key not in hot_keys
+            )
+            if insert_cold:
+                commit_seq = int(session.scalar(text("SELECT nextval('market.fact_commit_seq')")))
+                record = CanonicalFactRecord(
+                    series_id=series_id, source_id=source_id, revision=revision,
+                    market_commit_seq=commit_seq, fact=fact, ingestion_run_id=run_id,
+                )
+                cold_batch.append(record_to_storage_row(record, series_dimensions=series_dimensions))
+                max_commit_seq = max(max_commit_seq, commit_seq)
+                latest_by_key[fact.observation_key] = {
+                    "source_id": source_id, "revision": revision, "row_hash": fact.row_hash,
+                    "market_commit_seq": commit_seq,
+                }
+                if latest is None:
+                    inserted_count += 1
+                else:
+                    corrected_count += 1
+                continue
             if storage_day is None:
                 # Dedupe is an envelope-only operation, including after archive
                 # reclamation. Provision placement only for a genuine new row.
@@ -2818,6 +3010,8 @@ class PostgresMarketDataRepository:
                 inserted_count += 1
             else:
                 corrected_count += 1
+        if cold_batch:
+            publish_cold_candle_rows(session, cold_batch)
         if max_commit_seq == 0:
             max_commit_seq = self._current_commit_seq_with_session(session)
         session.execute(
@@ -2924,16 +3118,19 @@ class PostgresMarketDataRepository:
         include_invalidated: bool = False,
         causal_at_interval_close: bool = False,
         batch_rows: int = 512,
+        storage_repository: PostgresCanonicalFactStorageRepository | None = None,
     ) -> Iterable[Mapping[str, Any]]:
         if type(batch_rows) is not int or not 1 <= batch_rows <= 4096:
             raise ValueError("canonical_read_batch_rows_invalid: expected 1..4096")
         execution_checkpoint()
+        storage_repository = storage_repository or canonical_fact_storage_repository
+        cold_active = cold_layout_active(session)
         selection_sql, params = PostgresMarketDataRepository._canonical_selection_sql(
             series_id=series_id, start=start, end=end,
             as_of_commit_seq=as_of_commit_seq, known_at_lte=known_at_lte,
             source_identity_keys=source_identity_keys,
-            latest_only=latest_only and not causal_at_interval_close,
-            include_invalidated=include_invalidated or causal_at_interval_close,
+            latest_only=latest_only and not causal_at_interval_close and not cold_active,
+            include_invalidated=include_invalidated or causal_at_interval_close or cold_active,
             columns=CANONICAL_ROW_COLUMNS, row_from=CANONICAL_RANGE_ROW_FROM,
         )
         with measure_execution_stage("selection"):
@@ -2952,8 +3149,8 @@ class PostgresMarketDataRepository:
                 if rows is None:
                     break
                 execution_checkpoint()
-                hydrated = canonical_fact_storage_repository.hydrate_rows(session, list(rows))
-                if not causal_at_interval_close:
+                hydrated = storage_repository.hydrate_rows(session, list(rows))
+                if not causal_at_interval_close and not cold_active:
                     yield from hydrated
                 else:
                     eligible.extend(hydrated)
@@ -2961,6 +3158,18 @@ class PostgresMarketDataRepository:
             if control is not None:
                 control.unregister(result)
             result.close()
+        if cold_active:
+            repository = storage_repository.cold_history(session)
+            page_scope = dict(series_id=series_id, start=start, end=end, as_of_commit_seq=as_of_commit_seq)
+            cold_rows = repository.iter_range(
+                session, **page_scope, known_at_lte=known_at_lte, source_identity_keys=source_identity_keys,
+            )
+            yield from select_fact_rows(
+                eligible, cold_rows, **page_scope, known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys, latest_only=latest_only,
+                include_invalidated=include_invalidated, causal_at_interval_close=causal_at_interval_close,
+            )
+            return
         if not causal_at_interval_close:
             return
         # Close-time filtering must precede latest-revision selection. A newer
@@ -2997,7 +3206,7 @@ class PostgresMarketDataRepository:
         known_at_lte: Optional[datetime] = None,
         source_identity_keys: Sequence[str] = (),
     ) -> list[CanonicalFactRecord]:
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
@@ -3021,7 +3230,7 @@ class PostgresMarketDataRepository:
     ) -> list[CanonicalFactRecord]:
         """Return all canonical revisions for causal historical selection."""
 
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
@@ -3045,7 +3254,7 @@ class PostgresMarketDataRepository:
         known_at_lte: Optional[datetime] = None,
         source_identity_keys: Sequence[str] = (),
     ) -> list[CandleRecord]:
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
@@ -3067,7 +3276,7 @@ class PostgresMarketDataRepository:
         known_at_lte: Optional[datetime] = None,
         source_identity_keys: Sequence[str] = (),
     ) -> list[OpenInterestRecord]:
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
@@ -3089,7 +3298,7 @@ class PostgresMarketDataRepository:
         known_at_lte: Optional[datetime] = None,
         source_identity_keys: Sequence[str] = (),
     ) -> list[FundingRateRecord]:
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
@@ -3111,7 +3320,7 @@ class PostgresMarketDataRepository:
         known_at_lte: Optional[datetime] = None,
         source_identity_keys: Sequence[str] = (),
     ) -> list[NumericFactRecord]:
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
@@ -3136,7 +3345,7 @@ class PostgresMarketDataRepository:
     ) -> list[NumericFactRecord]:
         """Return retained active and invalidated revisions for audit/reorg repair."""
 
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
@@ -3653,7 +3862,7 @@ class PostgresMarketDataRepository:
         and actual reads retain their full payload and archive checks.
         """
         execution_checkpoint()
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             identity = session.execute(text(
                 "SELECT fact_type,timeframe_seconds FROM market.series WHERE id=:series_id"
             ), {"series_id": int(series_id)}).mappings().one_or_none()
@@ -3661,6 +3870,13 @@ class PostgresMarketDataRepository:
                     or not identity["timeframe_seconds"] or identity["timeframe_seconds"] <= 0):
                 raise ValueError(f"candle_selection_series_invalid: series_id={series_id}")
             step = int(identity["timeframe_seconds"])
+            if cold_layout_active(session):
+                scope = dict(
+                    series_id=series_id, start=start, end=end,
+                    as_of_commit_seq=as_of_commit_seq, known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
+                )
+                return _observation_runs(self._iter_canonical_rows_with_session(session, **scope), step)
             selection_sql, params = self._canonical_selection_sql(
                 series_id=series_id, start=start, end=end,
                 as_of_commit_seq=as_of_commit_seq, known_at_lte=known_at_lte,
@@ -3820,11 +4036,6 @@ class PostgresMarketDataRepository:
                     source_identity_keys=source_identity_keys,
                 )
             )
-        if source_identity_keys:
-            raise ValueError(
-                "market_data_source_binding_unsupported: exact source filtering "
-                f"is not implemented for fact_type={fact_type}"
-            )
         if fact_type in {MARKET_TRADE_FACT_TYPE, TRADE_FLOW_FACT_TYPE}:
             from .market_structure import market_structure_repository
 
@@ -3836,6 +4047,7 @@ class PostgresMarketDataRepository:
                         end=end,
                         as_of_commit_seq=as_of_commit_seq,
                         known_at_lte=known_at_lte,
+                        source_identity_keys=source_identity_keys,
                     )
                 )
             timeframe = identity.get("timeframe_seconds")
@@ -3851,7 +4063,13 @@ class PostgresMarketDataRepository:
                     end=end,
                     as_of_commit_seq=as_of_commit_seq,
                     known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
                 )
+            )
+        if source_identity_keys:
+            raise ValueError(
+                "market_data_source_binding_unsupported: exact source filtering "
+                f"is not implemented for fact_type={fact_type}"
             )
         if fact_type in {
             "market.bbo",
@@ -3941,10 +4159,7 @@ class PostgresMarketDataRepository:
                 # A global MAX alone can admit an earlier allocated, still
                 # uncommitted row after a different series commits a larger seq.
                 # Pin this series' visible high-water mark in the same snapshot.
-                series_watermark = int(session.execute(text(
-                    "SELECT COALESCE(MAX(market_commit_seq), 0) "
-                    "FROM market.fact_versions WHERE series_id=:series_id"
-                ), {"series_id": item.series_id}).scalar_one())
+                series_watermark = self._series_commit_seq_with_session(session, item.series_id)
                 if fact_type in {
                     CANDLE_FACT_TYPE,
                     OPEN_INTEREST_FACT_TYPE,
@@ -4587,7 +4802,7 @@ class PostgresMarketDataRepository:
         source_identity_keys: Sequence[str] = (),
         causal_at_interval_close: bool = False,
     ) -> list[MarketDataRecord]:
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             entry = session.execute(
                 text(
                     """
@@ -4665,7 +4880,7 @@ class PostgresMarketDataRepository:
     ) -> list[CanonicalFactRecord]:
         """Read only revision history explicitly bound into Dataset identity."""
 
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             entry = session.execute(
                 text(
                     """

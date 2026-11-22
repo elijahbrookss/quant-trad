@@ -37,8 +37,11 @@ test('run projection keeps the exact route run id even for historical runs', () 
   assert.equal(bot.name, 'Breakout')
 })
 
-test('origin-aware close navigation permits Overview and Operations only', () => {
+test('origin-aware close navigation preserves named inventories, Study links and compatible Operations links', () => {
   assert.equal(safeRunLensOrigin('/overview'), '/overview')
+  assert.equal(safeRunLensOrigin('/studies/study?tab=evidence'), '/studies/study?tab=evidence')
+  assert.equal(safeRunLensOrigin('/bot-runs?view=history'), '/bot-runs?view=history')
+  assert.equal(safeRunLensOrigin('//outside.example'), '/operations?tab=runs')
   assert.equal(safeRunLensOrigin('/operations?tab=research'), '/operations?tab=research')
   assert.equal(safeRunLensOrigin('/studio'), '/operations?tab=runs')
   assert.equal(safeRunLensOrigin(undefined), '/operations?tab=runs')

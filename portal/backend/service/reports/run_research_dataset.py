@@ -495,14 +495,19 @@ def _strategy_config_sections(config: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _configuration_metadata(config: Mapping[str, Any]) -> Dict[str, Any]:
+def _configuration_metadata(
+    config: Mapping[str, Any],
+    *,
+    config_hash: Optional[str],
+    material_config_hash: Optional[str],
+) -> Dict[str, Any]:
     sections = _strategy_config_sections(config)
     return {
         "schema_version": "run_configuration_snapshot.v1",
         "source": "portal_bot_runs.provenance_columns",
         "available": bool(config),
-        "config_hash": _config_hash(config),
-        "material_config_hash": _material_config_hash(config),
+        "config_hash": config_hash,
+        "material_config_hash": material_config_hash,
         **sections,
     }
 
@@ -1865,7 +1870,7 @@ def _trade_turnover_notional(trade: Mapping[str, Any]) -> float:
         else trade.get("contracts")
     )
     entry_price = _safe_float(trade.get("entry_price"))
-    turnover = abs(float(quantity or 0.0) * float(entry_price or 0.0) * contract_size)
+    exited_quantity = 0.0
     exit_turnover = 0.0
     for leg in trade.get("legs") or []:
         if not isinstance(leg, Mapping):
@@ -1873,12 +1878,17 @@ def _trade_turnover_notional(trade: Mapping[str, Any]) -> float:
         leg_qty = _safe_float(leg.get("contracts") if leg.get("contracts") is not None else leg.get("quantity"))
         leg_price = _safe_float(leg.get("exit_price"))
         if leg_qty is not None and leg_price is not None:
+            exited_quantity += abs(leg_qty)
             exit_turnover += abs(leg_qty * leg_price * contract_size)
+    # Legacy closed positions can carry zero remaining quantity in the trade row.
+    if not quantity and exited_quantity:
+        quantity = exited_quantity
+    entry_turnover = abs(float(quantity or 0.0) * float(entry_price or 0.0) * contract_size)
     if exit_turnover <= 0:
         exit_price = _safe_float(trade.get("exit_price"))
         if quantity is not None and exit_price is not None:
             exit_turnover = abs(quantity * exit_price * contract_size)
-    return float(turnover + exit_turnover)
+    return float(entry_turnover + exit_turnover)
 
 
 def _cost_stress_evidence(
@@ -2846,7 +2856,7 @@ def _execution_section(
                     "event_id": row.get("event_id") or _payload(row).get("event_id"),
                     "event_name": name,
                     "event_time": _payload(row).get("event_ts"),
-                    "known_at": context.get("bar_time") or row.get("known_at"),
+                    "known_at": row.get("known_at") or context.get("known_at") or context.get("bar_time"),
                     "series_key": context.get("series_key"),
                     "instrument_id": context.get("instrument_id"),
                     "symbol": context.get("symbol"),
@@ -6537,6 +6547,7 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         or ""
     ).strip() or _material_config_hash(config)
     explicit_hash = str(run.get("config_hash") or config.get("config_hash") or "").strip() or None
+    config_hash = explicit_hash or _config_hash(config)
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     timeframes = _metadata_timeframes(run)
     datasource = str(run.get("provider") or run.get("datasource") or config.get("datasource") or "").strip() or None
@@ -6565,7 +6576,7 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         execution_mode=_execution_mode(run),
         playback_mode=_playback_mode(run),
         starting_capital=_starting_capital(config),
-        config_hash=explicit_hash or _config_hash(config),
+        config_hash=config_hash,
         material_config_hash=material_hash,
         data_snapshot_hash=str(run.get("data_snapshot_hash") or "").strip() or None,
         report_semantic_fingerprint=None,
@@ -6574,7 +6585,9 @@ def _metadata(run: Mapping[str, Any]) -> RunResearchMetadata:
         generated_at=generated_at,
         dataset_id=dataset_id,
         dataset_hash=dataset_hash,
-        configuration=_configuration_metadata(config),
+        configuration=_configuration_metadata(
+            config, config_hash=config_hash, material_config_hash=material_hash
+        ),
     )
 
 

@@ -14,6 +14,8 @@ import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
+from scripts.db.fact_header_v2_contract import SOURCE_REFERENCE_COLUMNS
+
 SOURCE = "market.fact_versions"
 SCHEMA_VERSION = "qt.fact_header_cutover_preflight.v1"
 MAX_CATALOG_ROWS = 4096
@@ -164,10 +166,7 @@ def _inspect(conn):
         WHERE c.contype='f' AND c.confrelid=to_regclass(:source)
         ORDER BY n.nspname,r.relname,c.conname LIMIT 4097
     """, {"source": SOURCE}, label="incoming_foreign_keys")
-    known_owners = {
-        "market.fact_hot_payloads", "market.fact_archive_material_aliases",
-        "market.fact_archive_canonical_dependencies",
-    }
+    known_owners = set(SOURCE_REFERENCE_COLUMNS)
     payload_children = _rows(conn, """
         SELECT format('%I.%I',n.nspname,c.relname) AS relation
         FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid

@@ -14,6 +14,7 @@ tags:
 code_paths:
   - src/engines/bot_runtime/core/execution_context.py
   - src/engines/bot_runtime/core/fees.py
+  - src/engines/bot_runtime/core/simulation_fees.py
   - src/engines/bot_runtime/core/execution_profile.py
   - src/engines/bot_runtime/core/execution_order.py
   - src/engines/bot_runtime/core/execution.py
@@ -196,6 +197,32 @@ walking and atomic per-fill entry settlement; passive queue bounds and latency
 add bounded X5 research. Remaining follow-on capabilities include empirical
 fill calibration, shadow and paper-book reconciliation, and any externally
 authorized venue execution.
+
+### Explicit backtest simulation fee scenarios
+
+A new run may supply `simulation_fee_schedules`, keyed by the exact Strategy
+instrument IDs, through the canonical start request (CLI
+`bots start --simulation-fee-schedules-json`). Supply the identical schedules to
+`data prepare-backtest-dataset --simulation-fee-schedules-json` so the frozen
+execution binding matches the start request. The schedules must cover every
+Strategy instrument and carry a version, schedule identity, decimal rates,
+quote-notional basis, currency, rounding and an explicit `simulation:` source.
+They must be configured with a positive taker rate; an omitted or malformed
+schedule must not silently become zero fees.
+
+This override is admitted only for simulated historical backtests with
+exploration or economic intent. It cannot support selection or promotion and
+must fail on paper, live or observe-only paths, including worker reconstruction.
+It overlays a copy of the run's instrument material, never the shared instrument
+repository. The normalized manifests participate in the start request identity,
+frozen execution binding, immutable run snapshot and worker reconstruction.
+The existing resolved context and per-fill fee provenance remain authoritative
+for accounting and reporting; replay rejects changes to pinned fee material.
+Runs without this field retain their existing fee-resolution behavior.
+
+These are declared simulation assumptions, not evidence of a user's actual
+account tier, historical fee schedule or venue fill quality. Reports and research
+must preserve that distinction, the exact scenario version and cost sensitivity.
 
 ## References
 

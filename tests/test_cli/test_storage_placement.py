@@ -54,41 +54,6 @@ def test_changed_image_refuses_before_mount_or_database_access(monkeypatch):
         operator._runtime(request())
 
 
-@pytest.mark.parametrize("action", ["inspect", "execute", "cancel"])
-def test_cli_defaults_to_inspection_and_never_routes_through_api(tmp_path, monkeypatch, capsys, action):
-    path = tmp_path/"request.json"
-    value = request()
-    path.write_text(json.dumps(value))
-    monkeypatch.setenv("PG_DSN", "postgresql+psycopg2://unused:unused@invalid/unused")
-    monkeypatch.setattr(operator, "_runtime", lambda _: {"worker_id": "maintenance-owned"})
-    monkeypatch.setattr(cli, "_client", lambda _: pytest.fail("physical operation reached API"))
-    import sqlalchemy
-    engine = Mock()
-    create = Mock(return_value=engine)
-    monkeypatch.setattr(sqlalchemy, "create_engine", create)
-    operations = {}
-    for name in ("inspect_retained_raw_history", "move_retained_raw_history", "cancel_retained_raw_history"):
-        operations[name] = Mock(return_value={"state": "observed", "recovery_verified": False})
-        monkeypatch.setattr(operator.placement, name, operations[name])
-    signals = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
-    args = ["--no-audit-log", "storage", "place-retained-raw", "--request-file", str(path)]
-    if action != "inspect":
-        args += ["--"+action]
-    assert cli.main(args) == 0
-    result = json.loads(capsys.readouterr().out)
-    assert result["recovery_verified"] is False and result["service_changes_performed"] is False
-    selected = {"inspect": "inspect_retained_raw_history", "execute": "move_retained_raw_history",
-                "cancel": "cancel_retained_raw_history"}[action]
-    for name, call in operations.items():
-        assert call.call_count == int(name == selected)
-    actual = operations[selected].call_args.kwargs
-    assert actual["request_id"] == value["request_id"] and actual["handoff_sha256"] == value["handoff_sha256"]
-    if action == "execute":
-        assert actual["resource_limits"] == value["resource_limits"] and not actual["cancelled"]()
-    assert {sig: signal.getsignal(sig) for sig in signals} == signals
-    engine.dispose.assert_called_once_with()
-
-
 def test_driver_error_is_redacted_and_not_retried(tmp_path, monkeypatch):
     path = tmp_path/"request.json"
     path.write_text(json.dumps(request()))
@@ -105,9 +70,10 @@ def test_driver_error_is_redacted_and_not_retried(tmp_path, monkeypatch):
     engine.dispose.assert_called_once_with()
 
 
-def test_cli_rejects_combined_actions():
+@pytest.mark.parametrize("command", ["migrate", "place-retained-raw"])
+def test_retired_storage_commands_are_not_exposed(command):
     with pytest.raises(SystemExit) as error:
-        cli.build_parser().parse_args(["storage", "place-retained-raw", "--request-file", "-", "--execute", "--cancel"])
+        cli.build_parser().parse_args(["storage", command])
     assert error.value.code == 2
 
 

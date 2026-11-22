@@ -48,7 +48,14 @@ code_paths:
 ---
 # Data Boundary
 
-## Explicit frozen candle derivation
+## Provider native candles and historical derivation compatibility
+
+For new candle evidence use provider-supplied bars at the requested timeframe,
+canonicalize and freeze them directly. Do not coarsen, split, upsample or fill
+bars from other intervals. Preserve historical derived inputs/results with
+their true lineage. The conversion operation below describes historical
+compatibility, not a new preparation recommendation.
+
 
 `qt data derive-candles` delegates to the canonical data producer described in
 [ADR 0074](../decisions/0074-derive-candles-from-frozen-source-snapshots.md).

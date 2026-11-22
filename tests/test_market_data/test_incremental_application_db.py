@@ -20,7 +20,7 @@ from core.storage_targets import StorageTarget
 from market_data.archive import FilesystemRawArchiveObjectStore
 from portal.backend.db.session import Database
 from portal.backend.service.storage.incremental_recovery import (
-    EncryptedRecoveryCopies, IncrementalRecoveryConfig,
+    CutoverCapture, EncryptedRecoveryCopies, IncrementalRecoveryConfig,
 )
 from portal.backend.service.storage.recovery_copies import _identity, _snapshot_layout
 from portal.backend.service.storage.repos import market_data, market_structure, market_lifecycle
@@ -40,7 +40,7 @@ pytestmark = [
 
 
 def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
-        storage, tmp_path, monkeypatch, *, retained_raw=False):
+        storage, tmp_path, monkeypatch, *, retained_raw=False, named_capture=False):
     assert os.getuid() == 70 and os.getenv("QT_STORAGE_DEMO") == "1"
     if retained_raw:
         from tests.test_market_data.test_incremental_raw_placement_db import (
@@ -91,7 +91,7 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
     config = IncrementalRecoveryConfig(
         Path("/usr/local/bin/pgbackrest"), Path("/usr/local/bin/restic"),
         Path("/qt-source/pgdata"), Path("/var/run/postgresql"),
-        secrets_root/"database-key", secrets_root/"archive-key", max_chain_backups=4)
+        secrets_root/"database-key", secrets_root/"archive-key", max_chain_backups=1 if named_capture else 4)
     url = make_url(storage.dsn)
     limits = dict(target=target, database_identity=identity, max_bytes=128*1024**2,
                   reserve_bytes=8*1024**2, timeout_seconds=180, max_objects=1000)
@@ -154,8 +154,25 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
     replay_service = MarketStructureService(repository=market_structure.PostgresMarketStructureRepository())
     replay = {tuple(pair):replay_service.replay_book_session(definition_id=pair[0],session_id=pair[1],
                                                            storage_root=source_root) for pair in sessions}
-    with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
-        selected = manager().create(snapshot, objects=objects, keep_copies=2)
+    with monkeypatch.context() as patch:
+        if named_capture:
+            request = CutoverCapture("copy_"+secrets.token_hex(16), baseline["name"], 8*1024**2)
+            baseline_path = manager().root/baseline["name"]/"complete.json"
+            baseline_bytes = baseline_path.read_bytes()
+            patch.setattr(EncryptedRecoveryCopies, "_prune",
+                          lambda *args: pytest.fail("named capture must preserve all existing recovery evidence"))
+        options = {"cutover_capture": request} if named_capture else {}
+        with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
+            selected = manager().create(snapshot, objects=objects, keep_copies=2, **options)
+        if named_capture:
+            native_run = EncryptedRecoveryCopies._run
+            def replay_only(worker, command, **kwargs):
+                assert "backup" not in command and "expire" not in command and "forget" not in command
+                return native_run(worker, command, **kwargs)
+            patch.setattr(EncryptedRecoveryCopies, "_run", replay_only)
+            with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
+                assert manager().create(snapshot, objects=objects, keep_copies=2, **options) == selected
+            assert baseline_path.read_bytes() == baseline_bytes
     assert baseline["database_type"] == "full" and selected["database_type"] == "incr"
     assert selected["archive_objects"] > 0
     if retained_raw:
@@ -220,7 +237,12 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
             try:
                 with probe.connect() as conn:
                     assert _identity(conn)[0] == identity
-                break
+                    if conn.scalar(text("SELECT NOT pg_is_in_recovery() "
+                                        "AND current_setting('transaction_read_only')='off'")):
+                        break
+                if monotonic() >= deadline:
+                    pytest.fail("restored database did not finish promotion within the existing deadline")
+                sleep(0.1)
             except OperationalError:
                 if monotonic() >= deadline:
                     raise
@@ -255,7 +277,13 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
                                                storage_root=source_root) == expected
         print(json.dumps({"qt_current_corrections_frozen_and_book_replay_restored":True,
                           "preserved_v1_and_v2_data_restored":True,
+                          "named_cutover_capture_restored":named_capture,
                           "packaged_retained_raw_placement_restored":retained_raw,
                           "later_source_writes_excluded":True,"production_touched":False}))
     finally:
         restored._reset_engine()
+
+
+def test_named_cutover_capture_restores_qt_cold_current_frozen_and_book_replay(storage, tmp_path, monkeypatch):
+    test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
+        storage, tmp_path, monkeypatch, named_capture=True)

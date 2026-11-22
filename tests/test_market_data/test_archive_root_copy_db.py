@@ -539,13 +539,6 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         changed = handoff.inspect_handoff_policy(conn, **inspect_options)
         assert changed["policy_activated"] and not changed["policy_current"]
         transaction.rollback()
-    # Exercise the real automatic-history runner against the operator-installed
-    # registry/policy, without seeding either through a test-only shortcut.
-    from portal.backend.service.storage.history_maintenance import run_history_maintenance
-    maintained = run_history_maintenance(storage.database,
-        pg_controldata=storage.copy_plan.pg_controldata, resource_limits=options["resource_limits"])
-    assert maintained["state"] in ("idle", "completed"), maintained
-
     # Inspection remains possible after the attempt clock expires.
     with engine.begin() as conn:
         conn.exec_driver_sql(f"UPDATE {SCHEMA}.capture SET prepared_at=clock_timestamp()-interval '25 hours'")

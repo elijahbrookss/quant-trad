@@ -1,8 +1,10 @@
 from contextlib import contextmanager
+from datetime import date
 from unittest.mock import ANY, MagicMock
 
 import pytest
 
+from portal.backend.service.storage.repos import fact_storage
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 
 
@@ -111,6 +113,34 @@ def test_empty_witness_scope_does_not_query():
     session = MagicMock()
     assert not PostgresCanonicalFactStorageRepository().material_witness_exists(session, series_ids=[], material_hash="anything")
     session.execute.assert_not_called()
+
+
+def test_cached_checkpoint_rows_recheck_current_cold_placement_and_envelope(monkeypatch):
+    storage = PostgresCanonicalFactStorageRepository()
+    day = date(2026, 9, 1)
+    header = {
+        "id": "a", "storage_day": day, "series_id": 1,
+        "payload_schema_id": "schema", "payload_contract_hash": "contract",
+        "row_hash": "a" * 64, "payload": None, "provenance": None, "quality": None,
+    }
+    archived = {**header, "payload": {"value": 1}, "provenance": {}, "quality": {}}
+    locations = MagicMock()
+    locations.mappings.return_value.all.return_value = [{"id": "a", "storage_day": day}]
+    headers = MagicMock()
+    headers.mappings.return_value.all.return_value = [header]
+    session = MagicMock()
+    session.execute.side_effect = [locations, headers]
+    contracts = MagicMock()
+    monkeypatch.setattr(fact_storage, "ensure_payload_contracts", contracts)
+
+    storage.verify_cached_rows_by_ids(session, {"a": archived})
+    assert "partition.state IN ('verified','reclaimed')" in str(session.execute.call_args_list[1].args[0])
+    contracts.assert_called_once_with(session, [("schema", "contract")])
+
+    session.execute.side_effect = [locations, headers]
+    header["payload"] = {"unexpected": "hot"}
+    with pytest.raises(RuntimeError, match="cached_placement_changed"):
+        storage.verify_cached_rows_by_ids(session, {"a": archived})
 
 
 def test_keyed_numeric_witness_keeps_legacy_fallback_and_payload_proof(monkeypatch):

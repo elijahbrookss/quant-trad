@@ -23,6 +23,7 @@ from scripts.db.fact_header_v2_capture import (
     install_identity_capture, inspect_identity_capture, migration_step,
 )
 from scripts.db.fact_header_v2_admission import assert_v1_source_admission
+from scripts.db.fact_header_v2_contract import SOURCE_REFERENCE_COLUMNS
 from scripts.db import fact_header_v2_placement as physical
 
 STATE = SCHEMA + ".copy_progress"
@@ -596,8 +597,7 @@ def verified_copy(conn, *, page_rows=128, timeout_seconds=30):
         # Close source writers before inspecting progress or taking a snapshot.
         # Lock all copied data and routing tables too: the shadow is not yet
         # protected by the runtime immutable guards.
-        owners = ("market.fact_hot_payloads", "market.fact_archive_material_aliases",
-                  "market.fact_archive_canonical_dependencies")
+        owners = tuple(SOURCE_REFERENCE_COLUMNS)
         relations = (SOURCE, *owners, *(SCHEMA+"."+name for name in TABLE_NAMES),
                      STATE, QUEUE, SCHEMA+".capture")
         conn.exec_driver_sql("LOCK TABLE "+",".join(relations)+" IN SHARE ROW EXCLUSIVE MODE NOWAIT")

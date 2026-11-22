@@ -44,6 +44,7 @@ from .book_execution import (
 from .execution_adapter import ExecutionAdapter, SpotExecutionAdapter, DerivativesExecutionAdapter
 from .execution_assumptions import (
     CONSERVATIVE_BAR_MODEL_VERSION,
+    CAUSAL_SPOT_BAR_MODEL_VERSION,
     COSTED_BAR_MODEL_VERSION,
     EXECUTION_ASSUMPTIONS_SCHEMA_VERSION,
     LEGACY_BAR_MODEL_VERSION,
@@ -211,6 +212,7 @@ __all__ = [
     "ExecutionTradePrint",
     "ExecutionTradeSourceReference",
     "CONSERVATIVE_BAR_MODEL_VERSION",
+    "CAUSAL_SPOT_BAR_MODEL_VERSION",
     "COSTED_BAR_MODEL_VERSION",
     "EXECUTION_ASSUMPTIONS_SCHEMA_VERSION",
     "LEGACY_BAR_MODEL_VERSION",

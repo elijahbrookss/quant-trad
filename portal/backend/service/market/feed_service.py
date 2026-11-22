@@ -8,8 +8,9 @@ from typing import Any, Mapping, Optional, Sequence
 
 import pandas as pd
 
+from core.execution_control import execution_checkpoint
 from core.settings import get_settings
-from data_providers.providers.factory import get_provider
+from data_providers.providers.factory import get_provider, get_provider_class
 from data_providers.utils.ohlcv import interval_to_timedelta, split_history_range
 from engines.bot_runtime.live_market import ClosedLiveCandle
 from market_data.contracts import (
@@ -130,6 +131,23 @@ class HistoricalCandleIngestor:
                 "market_data_acquisition_invalid: max_segment_points must be positive"
             )
 
+    def native_request(self, instrument: Mapping[str, Any], *, timeframe_seconds: int) -> tuple[str, SourceIdentity]:
+        """Inspect a native request without fetching or registering source facts."""
+        provider_name = str(instrument.get("datasource") or "").strip()
+        venue = str(instrument.get("exchange") or "").strip()
+        provider_class = get_provider_class(provider_name, exchange=venue or None)
+        return provider_class.native_candle_interval(timeframe_seconds), self.source_identity(instrument, provider_class)
+
+    @staticmethod
+    def source_identity(instrument: Mapping[str, Any], provider: Any) -> SourceIdentity:
+        provider_class = provider if isinstance(provider, type) else type(provider)
+        return SourceIdentity(
+            provider=str(instrument.get("datasource") or "").strip(),
+            venue=str(instrument.get("exchange") or "").strip(),
+            source_kind="historical_api",
+            adapter_version=f"{provider_class.__module__}.{provider_class.__name__}:candle.ohlcv.v1",
+        )
+
     def ingest_by_instrument(
         self,
         instrument: Mapping[str, Any],
@@ -138,6 +156,7 @@ class HistoricalCandleIngestor:
         end: Any,
         interval: str,
         source_revision: Optional[str] = None,
+        fill_missing_only: bool = False,
     ) -> HistoricalIngestionResult:
         instrument_id = str(instrument.get("id") or instrument.get("instrument_id") or "").strip()
         provider_name = str(instrument.get("datasource") or "").strip()
@@ -147,21 +166,15 @@ class HistoricalCandleIngestor:
             raise ValueError(
                 "market_data_acquisition_invalid: instrument id, datasource, and symbol are required"
             )
+        if type(fill_missing_only) is not bool or (fill_missing_only and provider_name.lower() != "coinbase"):
+            raise ValueError("market_data_acquisition_invalid: gap-only acquisition requires native Coinbase")
         start_at = _as_utc(start, field="start")
         end_at = _as_utc(end, field="end")
         if end_at <= start_at:
             raise ValueError("market_data_acquisition_invalid: end must be after start")
         timeframe_seconds = _timeframe_seconds(interval)
         provider = get_provider(provider_name, exchange=venue or None)
-        adapter_version = (
-            f"{type(provider).__module__}.{type(provider).__name__}:candle.ohlcv.v1"
-        )
-        source_identity = SourceIdentity(
-            provider=provider_name,
-            venue=venue,
-            source_kind="historical_api",
-            adapter_version=adapter_version,
-        )
+        source_identity = self.source_identity(instrument, provider)
         source_id = self.store.register_source(
             source_identity,
             lineage={
@@ -184,6 +197,7 @@ class HistoricalCandleIngestor:
         )
         frames: list[pd.DataFrame] = []
         for segment_start, segment_end in segments:
+            execution_checkpoint()
             try:
                 frame = provider.fetch_from_api(
                     symbol,
@@ -192,6 +206,7 @@ class HistoricalCandleIngestor:
                     interval,
                 )
             except Exception as exc:
+                execution_checkpoint()
                 self.store.record_gap_evidence(
                     series_id=series_id,
                     source_id=source_id,
@@ -219,6 +234,7 @@ class HistoricalCandleIngestor:
                     "ingestion failure evidence was recorded"
                 ) from exc
             if frame is None or frame.empty:
+                execution_checkpoint()
                 self.store.record_gap_evidence(
                     series_id=series_id,
                     source_id=source_id,
@@ -273,6 +289,9 @@ class HistoricalCandleIngestor:
                 if source_published_at is not None
                 else "interval_close_inferred"
             )
+            if fill_missing_only:
+                known_at = accepted_at
+                known_at_method = "platform_acceptance"
             facts.append(
                 CandleFact(
                     open_time=open_time,
@@ -292,6 +311,7 @@ class HistoricalCandleIngestor:
                     known_at_method=known_at_method,
                 )
             )
+        execution_checkpoint()
         outcome = self.store.ingest_candles(
             series_id=series_id,
             source_id=source_id,
@@ -306,8 +326,10 @@ class HistoricalCandleIngestor:
                 "interval": interval,
                 "start": start_at.isoformat(),
                 "end": end_at.isoformat(),
+                **({"fill_missing_only": True} if fill_missing_only else {}),
             },
-            source_revision=source_revision or adapter_version,
+            source_revision=source_revision or source_identity.adapter_version,
+            **({"fill_missing_only": True} if fill_missing_only else {}),
         )
         gaps = self._record_gaps(
             series_id=series_id,

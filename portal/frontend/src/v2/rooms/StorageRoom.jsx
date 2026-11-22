@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react'
 import { HardDrive, Plus, RefreshCw } from 'lucide-react'
 import { applyStorageChange, readStorage, registerStorageTarget, reviewStorageChange } from '../../adapters/storage.adapter.js'
+import { StorageTrends } from './StorageTrends.jsx'
 import './storage.css'
 
 const ROLES = [
@@ -24,6 +25,60 @@ function words(value) {
   return String(value || 'unknown').replaceAll('_', ' ')
 }
 
+function count(value) {
+  return Number.isFinite(value) ? value.toLocaleString() : 'Unknown'
+}
+
+function RetentionOverview({ retention }) {
+  if (!retention || ['unknown', 'unconfigured'].includes(retention.state)) {
+    return <section className="qt2-storage-lifecycle" aria-labelledby="storage-lifecycle-title">
+      <div className="qt2-storage-section-heading">
+        <div><span className="qt2-storage-eyebrow">Operations</span><h2 id="storage-lifecycle-title">Storage lifecycle</h2></div>
+        <span className="qt2-storage-state">{words(retention?.state)}</span>
+      </div>
+      <p>Bounded lifecycle metadata is {retention?.state === 'unconfigured' ? 'not configured' : 'unavailable'}.</p>
+    </section>
+  }
+  const current = retention.lifecycle?.current || {}
+  const progress = current.progress || {}
+  const last = retention.lifecycle?.last_durable_advancement
+  const backlog = retention.backlog || {}
+  const storage = retention.storage || {}
+  const floor = retention.recovery_floor || {}
+  const completeness = retention.completeness || {}
+  return <section className="qt2-storage-lifecycle" aria-labelledby="storage-lifecycle-title">
+    <div className="qt2-storage-section-heading">
+      <div><span className="qt2-storage-eyebrow">Operations</span><h2 id="storage-lifecycle-title">Storage lifecycle</h2></div>
+      <span className={`qt2-storage-state qt2-storage-state-${retention.state}`}>{words(retention.state)}</span>
+    </div>
+    <p className="qt2-storage-sample">Sampled {retention.sampled_at ? new Date(retention.sampled_at).toLocaleString() : 'at an unknown time'}
+      {retention.source_revision ? ` · source ${retention.source_revision.slice(0, 8)}` : ''}
+      {retention.policy?.fingerprint ? ` · policy ${retention.policy.fingerprint.slice(0, 8)}` : ''}</p>
+    <div className="qt2-storage-current">
+      <div><small>Current phase</small><strong>{words(current.name || current.state)}</strong>
+        <span>{progress.storage_day ? `Day ${progress.storage_day}` : 'No active storage day'}
+          {progress.action ? ` · ${words(progress.action)}` : ''}</span></div>
+      <div><small>Last durable advancement</small><strong>{last ? words(last.stage) : 'None observed'}</strong>
+        <span>{last?.storage_day || 'No durable day'}{last?.happened_at ? ` · ${new Date(last.happened_at).toLocaleString()}` : ''}</span></div>
+    </div>
+    <div className="qt2-storage-metrics">
+      <div><small>Physical hot</small><strong>{bytes(storage.physical_hot?.source_bytes)}</strong><span>{count(storage.physical_hot?.estimated_rows)} estimated rows</span></div>
+      <div><small>Compressed archive</small><strong>{bytes(storage.compressed_archive?.bytes)}</strong><span>{bytes(storage.compressed_archive?.verified_bytes)} verified</span></div>
+      <div><small>Eligible backlog</small><strong>{bytes(backlog.eligible_source_bytes)}</strong><span>{count(backlog.eligible_partitions)} partitions · oldest {backlog.oldest_eligible_age_days ?? 'unknown'} days</span></div>
+      <div><small>Verified, guarded</small><strong>{bytes(backlog.verified_guarded_source_bytes)}</strong><span>{count(backlog.verified_guarded_partitions)} partitions await fresh reclaim guards</span></div>
+    </div>
+    <div className="qt2-storage-facts">
+      <p><strong>Recovery floor:</strong> {floor.state === 'above_floor' || floor.state === 'below_floor'
+        ? `${bytes(floor.available_bytes)} available · ${bytes(floor.margin_bytes)} ${floor.margin_bytes >= 0 ? 'above' : 'below'} floor`
+        : words(floor.reason || floor.state)}</p>
+      <p><strong>Completeness:</strong> {completeness.complete ? 'complete within declared bounds' : 'partial'}
+        {completeness.truncated ? ' · truncated' : ''}
+        {completeness.unknowns?.length ? ` · ${completeness.unknowns.map(words).join(', ')}` : ''}</p>
+      <p className="qt2-storage-muted">Current storage and lifecycle status. Historical trends below use their own selected range.</p>
+    </div>
+  </section>
+}
+
 export function StorageRoom() {
   const [snapshot, setSnapshot] = useState(null)
   const [draft, setDraft] = useState(null)
@@ -35,24 +90,64 @@ export function StorageRoom() {
   const [notice, setNotice] = useState('')
   const dirty = useRef(false)
 
-  const refresh = useCallback(async (signal) => {
-    const next = await readStorage(signal)
-    if (signal?.aborted) return
-    setSnapshot(next)
-    if (!dirty.current) {
-      setDraft(next.policy || { ...DEFAULT_POLICY })
-      setDraftRevision(next.revision)
+  const statusRequest = useRef(null)
+  const mounted = useRef(true)
+  const refresh = useCallback(async (signal, supersede = true) => {
+    if (signal?.aborted || document.visibilityState === 'hidden') return
+    if (statusRequest.current) {
+      if (!supersede) return
+      statusRequest.current.abort()
+    }
+    const controller = new AbortController()
+    statusRequest.current = controller
+    const abort = () => {
+      controller.abort()
+      if (statusRequest.current === controller) statusRequest.current = null
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    try {
+      const next = await readStorage(controller.signal)
+      if (!mounted.current || controller.signal.aborted || statusRequest.current !== controller) return
+      setSnapshot(next)
+      if (!dirty.current) {
+        setDraft(next.policy || { ...DEFAULT_POLICY })
+        setDraftRevision(next.revision)
+      }
+    } catch (failure) {
+      if (!controller.signal.aborted) throw failure
+    } finally {
+      signal?.removeEventListener('abort', abort)
+      if (statusRequest.current === controller) statusRequest.current = null
     }
   }, [])
 
   useEffect(() => {
+    mounted.current = true
     const controller = new AbortController()
-    const load = () => refresh(controller.signal).catch((err) => {
+    let timer
+    const load = () => refresh(controller.signal, false).catch((err) => {
       if (!controller.signal.aborted) setError(err.message)
     })
-    load()
-    const timer = setInterval(load, 15_000)
-    return () => { controller.abort(); clearInterval(timer) }
+    const visibility = () => {
+      clearInterval(timer)
+      if (document.visibilityState === 'hidden') {
+        statusRequest.current?.abort()
+        statusRequest.current = null
+      } else {
+        load()
+        timer = setInterval(load, 15_000)
+      }
+    }
+    document.addEventListener('visibilitychange', visibility)
+    visibility()
+    return () => {
+      mounted.current = false
+      controller.abort()
+      statusRequest.current?.abort()
+      statusRequest.current = null
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', visibility)
+    }
   }, [refresh])
 
   function edit(key, value) {
@@ -126,10 +221,13 @@ export function StorageRoom() {
         </div>}
 
         <p className="qt2-storage-health" role="status">
-          Storage: {words(snapshot.health)} · Movement: {words(snapshot.movement?.state)} · Backup: {words(snapshot.backup?.state)}
+          Current · Storage: {words(snapshot.health)} · Movement: {words(snapshot.movement?.state)} · Backup: {words(snapshot.backup?.state)}
           {snapshot.backup?.last_completed_at && <> · Last copy: {new Date(snapshot.backup.last_completed_at).toLocaleString()}</>}
         </p>
         {active && <p role="status">Change {words(active.state)}{active.progress?.detail ? `: ${active.progress.detail}` : ''}</p>}
+
+        <RetentionOverview retention={snapshot.retention} />
+        <StorageTrends />
 
         {draft && <details className="qt2-storage-advanced">
           <summary>Advanced</summary>

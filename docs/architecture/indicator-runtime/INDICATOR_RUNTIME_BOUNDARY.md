@@ -108,12 +108,25 @@ Visual and debug surfaces leave through separate projection payloads:
 payload warnings, and source-fact diagnostics can explain expensive or invalid
 projection/output behavior, but they do not become strategy inputs.
 
+Common timings, structural sizes and execution outcomes are owned by the engine
+and existing execution-control harness, not each Indicator implementation.
+Use `runtime_diagnostics` and typed details for component-specific inspection.
+[ADR0082](../decisions/0082-separate-historical-custody-from-active-research.md#shared-execution-observability)
+defines inclusive wall-time scopes, unknown sizes and process-attribution limits.
+
 Indicators that load independent source candles publish the existing
 `indicator_source_candle_continuity.v1` diagnostic. Bot runtime composition
 collects it immediately after graph construction, adds canonical
 strategy/instrument/series identity, and stores it in series metadata before
 artifact creation. The runtime dependency is required: missing, malformed, or
 unattributed source diagnostics fail loudly rather than disappearing.
+
+Source preparation may explicitly accept a `version` keyword. The graph passes
+the same pinned manifest version used by runtime construction; older builders
+without that keyword keep their calling contract. Market Profile uses this seam
+to preserve v1/v2 replay while v3 prepares source-close availability. Whole-input
+diagnostics remain build evidence, outside v3's causal per-bar overlays. See
+[ADR 0085](../decisions/0085-version-market-profile-source-availability.md).
 
 ## Runtime Validation Surface
 
@@ -205,6 +218,8 @@ or unordered mapping iteration.
 - [Decision layer boundary](../decision-layer/DECISION_LAYER_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Market Profile timing contract](../../../src/indicators/market_profile/docs/timing_contract.md)
+- [Candle VWAP contract](CANDLE_VWAP_CONTRACT.md): native-candle HLC3 approximation,
+  UTC session readiness, volume and gap semantics, and existing Check consumption.
 
 ## Known Gaps
 

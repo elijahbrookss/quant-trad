@@ -329,17 +329,6 @@ def test_reschedule_is_separate_from_other_operations(tmp_path,option):
             **{option:30 if option=="extend_attempt_seconds" else "other.json"})
 
 
-def test_reschedule_cli_uses_local_operator_without_http(monkeypatch,tmp_path):
-    from cli import main
-    monkeypatch.setattr(main,"_client",lambda _:pytest.fail("HTTP client opened"))
-    calls=[]
-    monkeypatch.setattr(operation,"run_operation_plan",lambda path,**kw:calls.append((path,kw)) or {})
-    path,package=tmp_path/"operation.json",tmp_path/"reschedule.json"
-    for execute in (False,True):
-        args=main.build_parser().parse_args(["storage","migrate","--operation-file",str(path),
-            "--reschedule-forward-file",str(package),*(["--execute"] if execute else [])])
-        assert args.func(args)==0
-    assert calls==[(str(path),dict(execute=value,reschedule_forward_file=str(package))) for value in (False,True)]
 
 
 @pytest.mark.parametrize("rescheduling", ["package"], indirect=True)
@@ -551,3 +540,33 @@ def test_completed_forward_cannot_use_a_skeletal_final_receipt(completed_resched
     with pytest.raises(RuntimeError, match="final_receipt_invalid"):
         operation.run_operation_plan(a.completed_path, execute=True)
     assert not a.completion_reads and a.actions == a.prior_actions
+
+
+@pytest.mark.parametrize('now,expiry,expected', [
+    ('2026-11-17T23:59:16+00:00', '2026-11-19T23:55:00+00:00', '2026-11-19'),
+    ('2026-11-18T00:00:01+00:00', '2026-11-19T23:55:00+00:00', '2026-11-19'),
+    ('2026-11-17T23:50:00+00:00', '2026-11-19T00:00:10+00:00', '2026-11-18'),
+    ('2026-11-18T04:59:16+05:00', '2026-11-20T04:55:00+05:00', '2026-11-19'),
+])
+def test_fixture_reschedule_midnight_preserves_original_expiry(now, expiry, expected):
+    from scripts.ci.online_operation_fixture import _reschedule_fixture_end_day
+    assert _reschedule_fixture_end_day(datetime.fromisoformat(expiry), final_seconds=30,
+        now=datetime.fromisoformat(now)) == expected
+
+
+@pytest.mark.parametrize('now', ['2026-11-18T23:55:00+00:00', '2026-11-18T23:55:01+00:00'])
+def test_fixture_reschedule_requires_full_bounded_publication_window(now):
+    from scripts.ci.online_operation_fixture import _reschedule_fixture_end_day
+    with pytest.raises(ValueError, match='publication_window_unavailable'):
+        _reschedule_fixture_end_day(datetime.fromisoformat('2026-11-19T00:01:00+00:00'),
+            final_seconds=30, now=datetime.fromisoformat(now))
+
+
+@pytest.mark.parametrize('naive', ['now', 'expiry'])
+def test_fixture_reschedule_requires_explicit_utc_conversion(naive):
+    from scripts.ci.online_operation_fixture import _reschedule_fixture_end_day
+    clocks = dict(expiry=datetime.fromisoformat('2026-11-19T23:55:00+00:00'),
+        now=datetime.fromisoformat('2026-11-17T23:59:16+00:00'))
+    clocks[naive] = clocks[naive].replace(tzinfo=None)
+    with pytest.raises(ValueError, match='aware_clocks_required'):
+        _reschedule_fixture_end_day(final_seconds=30, **clocks)

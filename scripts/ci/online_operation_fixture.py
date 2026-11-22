@@ -1045,6 +1045,18 @@ def _rehearse_retained_successor(*, state, plan_path, manifest, terminal_file, p
         operation.inspect_prepared_operation, terminal._probe = actual_preflight, actual_probe
 
 
+def _reschedule_fixture_end_day(expiry, *, final_seconds, now):
+    """Select a UTC boundary within the already declared fixture lifetime."""
+    from datetime import timezone, timedelta
+    if expiry.utcoffset() is None or now.utcoffset() is None:
+        raise ValueError("reschedule_fixture_aware_clocks_required")
+    expiry = expiry.astimezone(timezone.utc)
+    boundary = (expiry-timedelta(seconds=final_seconds)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if not now.astimezone(timezone.utc)+timedelta(seconds=300) < boundary:
+        raise ValueError("reschedule_fixture_publication_window_unavailable")
+    return boundary.date().isoformat()
+
+
 def _rehearse_forward_reschedule(*, state, plan_path, selected, worker, version=1):
     """Actual confined SQL, uncertain reply, retained proof and worker reentry."""
     import os, time
@@ -1081,7 +1093,8 @@ def _rehearse_forward_reschedule(*, state, plan_path, selected, worker, version=
         plan_sha256=forecast["plan_sha256"],operation_sha256=selected["forward"]["operation_sha256"],
         image=plan["image"],source_revision=selected["new_request"]["source_revision"],
         source_tree_hash=selected["new_request"]["source_tree_hash"],
-        end_day=(datetime.now(timezone.utc).date()+timedelta(days=1)).isoformat(),
+        end_day=_reschedule_fixture_end_day(expiry, final_seconds=plan["limits"]["final_seconds"],
+            now=datetime.now(timezone.utc)),
         max_objects=selected["new_request"]["max_objects"]+16,descriptor_limit=plan["descriptor_limit"]+16,
         forward_plan_path=str(state/("rescheduled-operation"+suffix+".json")),capacity_file=str(capacity_file))
     if version == 2:
@@ -1089,8 +1102,7 @@ def _rehearse_forward_reschedule(*, state, plan_path, selected, worker, version=
         original[previous_path] = previous_path.read_bytes()
         package.update(schema_version="qt.storage_online_forward_reschedule_package.v2",
             previous_amendment_sha256=publication._sha(original[previous_path]), attempt_seconds=seconds,
-            raw_mapping_mode="retain_source", continue_guarded_proof=True,
-            end_day=(datetime.fromisoformat(capture["expires_at"]).date()+timedelta(days=1)).isoformat())
+            raw_mapping_mode="retain_source", continue_guarded_proof=True)
     if version == 3:
         # A distinct immutable image of the same attested source exercises the
         # real replacement path; only a disposable fixture label is added.

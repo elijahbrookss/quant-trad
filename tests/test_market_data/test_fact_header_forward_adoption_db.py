@@ -519,7 +519,9 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
         assert len(terminal["terminal"]["removed_triggers"]) == 8
         assert set(terminal["terminal"]["removed_reference_roots"]) == {
             headers.SOURCE, references.PARENT, "market.fact_archive_material_aliases",
-            "market.fact_archive_canonical_dependencies"}
+            "market.fact_archive_canonical_dependencies",
+            "market.fact_archive_prepared_material_aliases",
+            "market.fact_archive_prepared_canonical_dependencies"}
         assert not any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())
         assert all(row["oid"] == originals[row["relation"]] for row in references._incoming_references(conn)
                    if row["relation"] in originals)

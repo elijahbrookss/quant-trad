@@ -1,0 +1,64 @@
+{
+  "status": "focused_qualification_complete_combined_release_pending",
+  "base_commit": "6d1212eb0d0a5a0332554c07650e1f6c750baea9",
+  "branch": "feature/episode-distribution-pilots",
+  "worktree": "/home/elijah/dev/quant-trad-episode-research",
+  "focused_tests": {
+    "passed": 98,
+    "seconds": 6.82,
+    "files": [
+      "test_liquidity_episode.py",
+      "test_candle_distribution.py",
+      "test_raw_candle_evidence.py",
+      "test_research_check_catalog.py",
+      "test_event_fact_check.py",
+      "test_event_fact_snapshot_check.py"
+    ]
+  },
+  "documentation_checks": {
+    "passed": 10,
+    "seconds": 0.62
+  },
+  "historical_definition_hashes_unchanged": 20,
+  "historical_raw_v3_fixture_hash": "463ef8cbd4e10878c97341d5c4f083a11f21b160f3889cc372e805ca3ccb0c18",
+  "new_registered_methods": [
+    "raw_forward_outcome@6",
+    "event_fact_analysis@14"
+  ],
+  "request_files": [
+    "C-existing-frozen-request.json",
+    "A-2026-09-22-prepare-request.json",
+    "A-2026-09-23-prepare-request.json"
+  ],
+  "source_binding_read": "Four first-minute header-to-source lookups, enforced read-only transaction, 5-second statement/200ms lock timeout. No market outcomes computed.",
+  "source_identities": {
+    "trades_and_flow": "f874ce62dc830d2e3e31080c1dc11bbd81682f3e9582133922968ed69c65c3a2",
+    "bbo_and_depth": "2cddebbf40bb9befe9cc8fef8341243b8b8a7756889827bcf2ddb3062d3adcb7"
+  },
+  "local_heavy_check_running": false,
+  "server_mutations": 0,
+  "scientific_checks": 0,
+  "replays": 0,
+  "provider_calls": 0,
+  "new_freezes": 0,
+  "proposed_attempts_not_yet_allocated": {
+    "C": 1,
+    "A": 2
+  },
+  "remaining_steps": [
+    "engineering review and merge into existing parent PR256 preserving commits",
+    "fresh final-source broad/DB/CI qualification by attachment engineering",
+    "parent-coordinated combined deployment",
+    "existing QT scientific admission/allocation; serialize one heavy operation and reconcile timeouts",
+    "C complete frozen result then old totals/metrics reconciliation before interpretation",
+    "A two fixed30-minute prepares/freezes and Checks; preserve missing/no-move cases; no replacement windows"
+  ],
+  "constraints": [
+    "no sealed data",
+    "no new providers or acquisition",
+    "no concurrency changes",
+    "no cancellation attribution",
+    "B completed BTC15m formation/first passage and D identical joint cases remain separate"
+  ],
+  "parent_messaging": "Direct status send to source thread returned thread not found; turn-end handoff is required."
+}

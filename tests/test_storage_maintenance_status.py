@@ -15,7 +15,6 @@ POLICY = StoragePolicy(recent=("ssd",), history=("hdd",), archives=("hdd",), bac
 def worker(identity="worker", **outcomes):
     common = {"policy_revision": 4, "policy_hash": POLICY.fingerprint}
     defaults = {
-        "history_movement": {"state": "completed", "finished_at": (NOW-timedelta(minutes=10)).isoformat()},
         "local_recovery": {"state": "not_due", "last_completed_at": (NOW-timedelta(hours=2)).isoformat(),
                            "next_due_at": (NOW+timedelta(hours=22)).isoformat()},
     }
@@ -37,12 +36,12 @@ def status(workers, **changes):
 
 def test_current_success_and_disabled_or_missing_configuration():
     result = status([worker()])
-    assert result["movement"]["state"] == "completed"
+    assert result["movement"] == {"state":"disabled", "reason":"canonical_cold_authority", "last_completed_at":None}
     assert result["backup"]["state"] == "not_due"
     assert result["backup"]["last_completed_at"] == (NOW-timedelta(hours=2)).isoformat()
-    assert status([], policy=None)["movement"]["state"] == "unconfigured"
-    assert status([], policy=POLICY.to_dict() | {"movement_enabled": False})["movement"]["state"] == "disabled"
-    assert status([])["movement"]["state"] == "unavailable"
+    assert status([], policy=None)["backup"]["state"] == "unconfigured"
+    assert status([], policy=POLICY.to_dict() | {"backup_enabled": False})["backup"]["state"] == "disabled"
+    assert status([])["backup"]["state"] == "unavailable"
 
 
 @pytest.mark.parametrize("state", ["failed", "blocked", "busy", "cancelled"])
@@ -55,11 +54,10 @@ def test_failure_or_pending_state_cannot_be_hidden_by_old_completion(state):
 
 def test_fresh_worker_cannot_keep_an_old_maintenance_success_healthy():
     data = worker()
-    data["context"]["storage_lifecycle"]["maintenance"]["history_movement"]["checked_at"] = (
+    data["context"]["storage_lifecycle"]["maintenance"]["local_recovery"]["checked_at"] = (
         NOW-timedelta(hours=2)).isoformat()
     result = status([data])
-    assert result["movement"]["state"] == "stale"
-    assert result["backup"]["state"] == "not_due"
+    assert result["backup"]["state"] == "stale"
 
 
 @pytest.mark.parametrize("change", [
@@ -70,7 +68,7 @@ def test_fresh_worker_cannot_keep_an_old_maintenance_success_healthy():
 ])
 def test_expired_or_stopped_worker_never_reports_success(change):
     result = status([worker() | change])
-    assert result["movement"]["state"] == result["backup"]["state"] == "stale"
+    assert result["backup"]["state"] == "stale"
 
 
 def test_no_merging_freshness_with_another_workers_success():
@@ -81,7 +79,7 @@ def test_no_merging_freshness_with_another_workers_success():
 
 
 def test_revision_and_content_must_both_match_current_policy():
-    assert status([worker()], revision=5)["movement"]["reason"] == "maintenance_policy_changed"
+    assert status([worker()], revision=5)["backup"]["reason"] == "maintenance_policy_changed"
     result = status([worker()], policy=POLICY.to_dict() | {"recent_days": 31})
     assert result["backup"]["reason"] == "maintenance_policy_changed"
 
@@ -95,17 +93,17 @@ def test_revision_and_content_must_both_match_current_policy():
 ])
 def test_invalid_or_unconfirmed_observations_are_unknown(change):
     data = worker()
-    data["context"]["storage_lifecycle"]["maintenance"]["history_movement"].update(change)
-    assert status([data])["movement"]["state"] == "unknown"
+    data["context"]["storage_lifecycle"]["maintenance"]["local_recovery"].update(change)
+    assert status([data])["backup"]["state"] == "unknown"
 
 
 def test_running_report_never_reuses_previous_success():
     data = worker()
-    data["context"]["storage_lifecycle"]["maintenance"]["history_movement"] = {
+    data["context"]["storage_lifecycle"]["maintenance"]["local_recovery"] = {
         "configured": True, "state": "running", "started_at": NOW.isoformat()}
     result = status([data])
-    assert result["movement"]["state"] == "running"
-    assert result["movement"]["last_completed_at"] is None
+    assert result["backup"]["state"] == "running"
+    assert result["backup"]["last_completed_at"] is None
 
 
 def test_backups_become_due_then_overdue_without_fresh_completion():
@@ -125,4 +123,4 @@ def test_disabled_or_old_runner_and_malformed_loop_are_not_success():
     data = worker()
     data["context"]["storage_lifecycle"]["policy"] = []
     assert status([data])["backup"]["state"] == "unknown"
-    assert status([deepcopy(worker(str(i))) for i in range(101)])["movement"]["state"] == "unknown"
+    assert status([deepcopy(worker(str(i))) for i in range(101)])["backup"]["state"] == "unknown"

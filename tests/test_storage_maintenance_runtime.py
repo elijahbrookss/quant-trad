@@ -2,10 +2,127 @@
 from dataclasses import replace
 import json
 from types import SimpleNamespace
+from contextlib import contextmanager, nullcontext
+from datetime import UTC, datetime
 
 import pytest
 
 from portal.backend.service.storage import maintenance_runtime as runtime
+
+
+@pytest.fixture
+def cutover_maintenance(tmp_path, monkeypatch):
+    from core.storage_targets import StoragePolicy
+    from portal.backend.service.storage import incremental_recovery, recovery_maintenance as maintenance
+    now = datetime.now(UTC)
+    policy = StoragePolicy(recent=("ssd",), history=("hdd",), archives=("hdd",), backups=("hdd",),
+                           backup_enabled=True)
+    source, history = tmp_path/"source", tmp_path/"history"
+    source.mkdir()
+    (history/"objects").mkdir(parents=True)
+    stats = {"ssd": SimpleNamespace(total_bytes=1000, available_bytes=200, device_id="ssd", path=str(source)),
+             "hdd": SimpleNamespace(total_bytes=10000, available_bytes=9000, device_id="hdd", path=str(history))}
+    targets = {key: SimpleNamespace(target_id=key, medium=key, root=str(path), roles=("recent","history","archives","backups"),
+                                   state="active", filesystem_uuid="uuid-"+key,
+                                   inspect=lambda require_writable=True, key=key: stats[key])
+               for key, path in (("ssd", source), ("hdd", history))}
+    records = [SimpleNamespace(id=key, reserved_bytes=reserved, auxiliary_reserved_bytes=aux)
+               for key, reserved, aux in (("ssd", 11, 13), ("hdd", 19, 23))]
+    layout = {"layout_version": "market.fact_storage_tiers.v2", "certificate_sha256": "a"*64}
+    config = SimpleNamespace(revision=7, policy=policy.to_dict())
+    class Owner:
+        bind = SimpleNamespace(engine=SimpleNamespace(url=SimpleNamespace()))
+        def connection(self):
+            return SimpleNamespace(get_isolation_level=lambda: "READ COMMITTED")
+        def get(self, *args):
+            return config
+        def scalar(self, statement):
+            query = str(statement)
+            if "SHOW statement_timeout" in query:
+                return "0"
+            if "setting::bigint" in query:
+                return 0
+            if "clock_timestamp" in query:
+                return now
+            return True
+        def execute(self, *args):
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(one=lambda: {
+                "mode": "on", "command": "trusted-archive-push", "last_failed_time": None,
+                "last_archived_time": None}))
+    @contextmanager
+    def session(**kwargs):
+        yield Owner()
+    database = SimpleNamespace(session=session, locked_snapshot_session=session)
+    monkeypatch.setattr(maintenance, "registered_header_targets", lambda owner: records)
+    monkeypatch.setattr(maintenance, "_target", lambda record: targets[record.id])
+    monkeypatch.setattr(maintenance, "_identity", lambda owner: ("123/456", "fixture"))
+    monkeypatch.setattr(maintenance, "_snapshot_layout", lambda owner: layout)
+    monkeypatch.setattr(maintenance, "observe_header_resources", lambda *a, **kw: SimpleNamespace(
+        database_identity="123/456", bindings=[{"role": "database", "target_id": "ssd", "directory": str(source)}]))
+    previous = {"name": "copy_"+"1"*32, "completed_at": now.isoformat(), "storage_layout": layout}
+    state = SimpleNamespace(calls=[], prune=[], completed=[(now, None, previous)], during=None)
+    class Copies:
+        def __init__(self, **kwargs):
+            state.options = kwargs
+            self.resources = kwargs["check_resources"]
+        def lock(self):
+            return nullcontext()
+        def _prune(self, keep):
+            state.prune.append(keep)
+            self.resources()
+        def completed(self):
+            return state.completed
+        def create(self, snapshot, **kwargs):
+            state.calls.append(kwargs)
+            if state.during:
+                state.during()
+            self.resources()
+            return previous | {"name": kwargs["cutover_capture"].generation}
+    monkeypatch.setattr(incremental_recovery, "EncryptedRecoveryCopies", Copies)
+    request = incremental_recovery.CutoverCapture("copy_"+"2"*32, previous["name"], 100)
+    arguments = dict(storage_root=history, pg_dump=tmp_path/"pg_dump", pg_controldata=tmp_path/"pg_controldata",
+                     max_bytes=500, timeout_seconds=30, headroom_bytes={"ssd":17,"hdd":29},
+                     incremental=SimpleNamespace(pg_path=source), max_objects=10)
+    return SimpleNamespace(run=lambda **kw: maintenance.run_due_local_recovery(database, **(arguments|kw)),
+                           state=state, stats=stats, request=request, config=config)
+
+
+def test_named_capture_replaces_only_source_percentage_and_skips_due_pruning(cutover_maintenance):
+    f = cutover_maintenance
+    assert f.run(cutover_capture=f.request)["state"] == "completed"
+    assert len(f.state.calls) == 1 and not f.state.prune
+    assert f.state.options["reserve_bytes"] == 2071
+    assert f.config.policy.get("cutover_capture") is None
+    f.stats["ssd"].available_bytes = 140  # 100 + 11 reserved + 13 auxiliary + 17 headroom = 141.
+    with pytest.raises(RuntimeError, match="capacity_or_filesystem_changed"):
+        f.run(cutover_capture=f.request)
+
+
+def test_named_capture_retains_runtime_abort_and_full_hdd_admission(cutover_maintenance):
+    f = cutover_maintenance
+    assert f.run(cutover_capture=f.request, max_bytes=8000) == {
+        "state": "blocked", "reason": "recovery_creation_capacity"}
+    assert not f.state.calls
+    f.state.during = lambda: setattr(f.stats["ssd"], "available_bytes", 140)
+    with pytest.raises(RuntimeError, match="capacity_or_filesystem_changed"):
+        f.run(cutover_capture=f.request)
+
+
+def test_completed_named_request_does_not_reserve_another_full_allocation(cutover_maintenance):
+    f = cutover_maintenance
+    f.state.completed.append((f.state.completed[0][0], None,
+                              f.state.completed[0][2] | {"name": f.request.generation}))
+    assert f.run(cutover_capture=f.request, max_bytes=8000)["state"] == "completed"
+    assert not f.state.prune
+
+
+def test_standard_maintenance_keeps_percentage_floor_and_not_due(cutover_maintenance):
+    f = cutover_maintenance
+    with pytest.raises(RuntimeError, match="capacity_or_filesystem_changed"):
+        f.run()
+    f.stats["ssd"].available_bytes = 241
+    assert f.run()["state"] == "not_due"
+    assert not f.state.calls and len(f.state.prune) == 2
 
 
 def configuration():
@@ -34,7 +151,6 @@ def test_configured_runners_share_database_limits_and_cancellation(tmp_path, mon
     def capture(database, **kwargs):
         seen.append((database, kwargs))
         return {"state": "disabled"}
-    monkeypatch.setattr(runtime, "run_history_maintenance", capture)
     monkeypatch.setattr(runtime, "run_due_local_recovery", capture)
     database = object()
     root = tmp_path/"archive"
@@ -43,14 +159,13 @@ def test_configured_runners_share_database_limits_and_cancellation(tmp_path, mon
     cancelled = lambda: True
     assert runners["service"].use_saved_history_policy
     assert runners["service"].canonical_repository.database is database
-    for key in ("history_runner", "recovery_runner"):
-        assert runners[key](cancelled=cancelled) == {"state": "disabled"}
+    assert set(runners) == {"service", "recovery_runner"}
+    assert runners["recovery_runner"](cancelled=cancelled) == {"state": "disabled"}
     assert all(item[0] is database and item[1]["cancelled"] is cancelled for item in seen)
-    assert seen[0][1]["resource_limits"] == config["history"]
-    assert seen[1][1]["storage_root"] == root
-    assert seen[1][1]["max_bytes"] == config["recovery"]["max_bytes"]
-    assert seen[1][1]["max_objects"] == 10_000_000
-    assert str(seen[1][1]["pg_dump"]) == "/usr/lib/postgresql/15/bin/pg_dump"
+    assert seen[0][1]["storage_root"] == root
+    assert seen[0][1]["max_bytes"] == config["recovery"]["max_bytes"]
+    assert seen[0][1]["max_objects"] == 10_000_000
+    assert str(seen[0][1]["pg_dump"]) == "/usr/lib/postgresql/15/bin/pg_dump"
 
 
 @pytest.mark.parametrize("change", [
@@ -90,8 +205,7 @@ def test_collector_entrypoint_supplies_runners_to_existing_supervisor(tmp_path, 
     from portal.backend.workers import market_data_collector as entry
     path = tmp_path/"limits.json"
     calls = []
-    runners = {"history_runner": lambda **kw: {"state": "disabled"},
-               "recovery_runner": lambda **kw: {"state": "disabled"}}
+    runners = {"recovery_runner": lambda **kw: {"state": "disabled"}}
     def compose(database, **kwargs):
         assert database is entry.db
         assert kwargs == {"storage_root": entry.DEFAULT_STORAGE_ROOT, "limits_path": str(path)}
@@ -99,7 +213,7 @@ def test_collector_entrypoint_supplies_runners_to_existing_supervisor(tmp_path, 
         return runners
     class Supervisor:
         def __init__(self, **kwargs):
-            assert kwargs["history_runner"] is runners["history_runner"]
+            assert "history_runner" not in kwargs
             assert kwargs["recovery_runner"] is runners["recovery_runner"]
             assert kwargs["storage_root"] == entry.DEFAULT_STORAGE_ROOT
         def start(self): calls.append("started")

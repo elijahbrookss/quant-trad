@@ -171,7 +171,7 @@ def test_check_plan_exposes_transitive_inputs_warmup_staleness_sources_and_quali
         {
             "mode": "evidence",
             "title": "Indicator evidence",
-            "check_family": "signal_audit",
+            "check_family": "event_fact_analysis",
             "dataset_id": "mds_" + "a" * 32,
             "scope": {
                 "indicator_id": "indicator-1",
@@ -180,16 +180,9 @@ def test_check_plan_exposes_transitive_inputs_warmup_staleness_sources_and_quali
                 "start": "2026-01-01T00:00:00Z",
                 "end": "2026-02-01T00:00:00Z",
             },
-            "detector": {
-                "type": "signal_audit",
-                "source_output": "state",
-                "source_field": "state_key",
-                "from": "inside",
-                "to": "outside",
-                "signal_output": "breakout",
-                "event_key": "breakout",
-            },
-            "outcomes": {"forward_bars": [2, 6, 12]},
+            "detector": {"type":"indicator_event","output_name":"breakout",
+                "event_keys":[{"key":"breakout","direction":"long"}]},
+            "outcomes": {"horizons": [2, 6, 12]},
             "gap_policy": "reset_rewarm",
         },
         mode="evidence",
@@ -230,29 +223,13 @@ def test_check_plan_exposes_transitive_inputs_warmup_staleness_sources_and_quali
 
 
 def test_evidence_requires_explicit_gap_policy() -> None:
-    import pytest
-
-    with pytest.raises(ValueError, match="gap_policy_required"):
-        normalize_check_request(
-            {
-                "title": "Evidence",
-                "check_family": "raw_forward_outcome",
-                "dataset_id": "mds_" + "a" * 32,
-                "scope": {
-                    "instrument_id": "instrument-1",
-                    "timeframe": "30m",
-                    "start": "2026-01-01T00:00:00Z",
-                    "end": "2026-02-01T00:00:00Z",
-                },
-                "detector": {
-                    "type": "raw_condition",
-                    "field": "close",
-                    "operator": "gt",
-                    "value": 1,
-                },
-            },
-            mode="evidence",
-        )
+    from copy import deepcopy
+    from portal.backend.service.research.catalog import get_check_definition
+    payload=deepcopy(get_check_definition('raw_forward_outcome','3')['examples'][0]['request'])
+    payload.update(mode='evidence',dataset_id='mds_'+'a'*32)
+    payload.pop('gap_policy',None)
+    with pytest.raises(ValueError,match='gap_policy_required'):
+        normalize_check_request(payload,mode='evidence')
 
 
 def test_sparse_numeric_fact_does_not_prove_full_source_coverage() -> None:
@@ -529,3 +506,53 @@ def test_candle_header_projection_failure_never_falls_back_to_payloads():
             "required_start": datetime(2026, 1, 1, tzinfo=UTC),
             "required_end": datetime(2026, 1, 2, tzinfo=UTC), "source_policy": {"mode": "current"},
         }, store=BrokenStore(), as_of_commit_seq=77)
+
+
+@pytest.mark.parametrize("status,policy,missing", [
+    ("partial", None, True), ("partial", "recorded_partial", False),
+    ("failed", "recorded_partial", True),
+])
+def test_planning_partial_custody_policy_retains_source_uncertainty(status, policy, missing):
+    store = _Store()
+    original = store.list_source_acquisition_coverage
+    def coverage(**kwargs):
+        rows = original(**kwargs)
+        for row in rows:
+            row["status"] = status
+            material = {k: row[k] for k in ("schema_version", "series_id", "source_id",
+                "binding_id", "manifest_hash", "interface_version", "confirmation_depth",
+                "range_start", "range_end", "source_positions", "status", "evidence")}
+            row["identity_key"] = semantic_hash(material)
+        return rows
+    store.list_source_acquisition_coverage = coverage
+    req = {"alias": "reference", "instrument_id": "instrument-1",
+        "fact_type": "market.reference_price", "contract_version": "market.reference_price.v1",
+        "timeframe_seconds": None, "dimensions": {"quote_currency": "USD"},
+        "alignment": "latest_known", "source_policy": {"mode": "exact", "source_identity_key": "source-a"},
+        "required_start": "2026-01-01T00:00:00Z", "required_end": "2026-02-01T00:00:00Z"}
+    if policy:
+        req["coverage_policy"] = policy
+    gaps, quality = _coverage_for_requirement(req, store=store, as_of_commit_seq=77)
+    assert any(row["reason"] == "source_acquisition_coverage_missing" for row in gaps) is missing
+    assert quality[0]["coverage"]["status"] == status
+
+
+
+def test_indicator_planner_receives_actual_instrument_and_exact_clock_context():
+    from copy import deepcopy
+    from portal.backend.service.research.catalog import get_check_definition
+    payload=deepcopy(get_check_definition('raw_forward_outcome','3')['examples'][0]['request'])
+    payload['scope']['instrument_id']='canonical-contract-id'
+    definition,request=normalize_check_request(payload)
+    observed={}
+    def planner(indicator_ids,**kwargs):
+        observed.update(kwargs)
+        return {'indicators':[],'requirements':[],'warmup_bars':0}
+    plan_research_check(definition,request,inspect_coverage=False,indicator_planner=planner,
+        instrument_loader=lambda key:{'id':key,'symbol':'EXACT-CONTRACT','datasource':'actual-provider','exchange':'actual-venue'})
+    context=observed['execution_context']
+    assert context.instrument_id=='canonical-contract-id'
+    assert context.symbol=='EXACT-CONTRACT'
+    assert context.datasource=='actual-provider' and context.exchange=='actual-venue'
+    assert context.start==observed['start'] and context.end==observed['end']
+    assert context.interval==observed['timeframe']

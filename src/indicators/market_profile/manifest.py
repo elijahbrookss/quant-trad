@@ -300,3 +300,10 @@ FIRST_RETURN_MANIFEST = replace(
                         state_keys=("observed",), fields=("origins", "active_profile_key", "prior_atr", "prior_atr_ready", "prior_atr_known_at", "lifetime_bars")),
     ),
 )
+
+# Timing correction is explicit so frozen v1/v2 graphs retain their replay meaning.
+CAUSAL_MANIFEST = replace(
+    FIRST_RETURN_MANIFEST,
+    version="v3",
+    description="Daily native 30m profiles admitted at source availability and completed chart-bar availability, with original-range first returns.",
+)

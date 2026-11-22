@@ -145,6 +145,13 @@ Validation checks the exact frozen quality document once. Re-appending its
 already-recorded typed quality notes caused false hash disagreements; the
 validator no longer regenerates or duplicates them.
 
+Candle gap disclosure requires continuous coverage by the union of eligible
+pinned receipt intervals. Adjacent and overlapping receipts may jointly cover
+a missing interval, regardless of receipt order; partial coverage or any hole
+still fails. Freeze may preserve any recorded gap classification, while backtest
+admission retains its existing closure-classification filter. This coverage
+check does not rewrite receipts, provenance, quality hashes, or consumer readiness.
+
 The existing dataset endpoint accepts either a legacy candle selector
 (`instrument_id` plus `timeframe`) or an exact typed `series_id`; mixing both is
 rejected. This preserves old callers while making the same frozen-data boundary

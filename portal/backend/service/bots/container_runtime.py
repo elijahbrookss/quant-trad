@@ -593,6 +593,17 @@ def _load_runtime_bot_snapshot(bot_id: str, run_id: str) -> tuple[Dict[str, Any]
         ):
             if field in config_snapshot:
                 value = config_snapshot.get(field)
+                # Older startup envelopes serialize an absent optional book as
+                # {}, while the authoritative bot snapshot omits it. Preserve
+                # that admitted presence/absence identity before the strict
+                # execution-config hash check; never discard a supplied book.
+                if (
+                    field == "execution_book_tape_bundle"
+                    and str(bot.get("run_type") or "backtest").strip().lower() == "backtest"
+                    and field not in bot
+                    and (value is None or (isinstance(value, Mapping) and not value))
+                ):
+                    continue
                 bot[field] = dict(value) if isinstance(value, Mapping) else value
         return bot, dict(run)
     bot = next((b for b in load_bots() if b.get("id") == bot_id), None)

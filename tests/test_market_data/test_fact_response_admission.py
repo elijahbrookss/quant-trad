@@ -103,9 +103,15 @@ def test_canonical_window_retains_all_revisions_and_rechecks_bounds(monkeypatch,
     sources = {item["id"]: item for item in (row, changed)}
     monkeypatch.setattr(fact_dependencies, "read_canonical_dependency_rows", lambda *args, **kwargs: {} if damage == "missing" else sources)
     def execute(statement, params):
-        assert "source.market_commit_seq<=requested.root_commit" in str(statement)
-        assert "source.known_at<=requested.known_at" in str(statement) and "source.state=" not in str(statement)
-        return SimpleNamespace(all=lambda: [("root", identity) for identity in sources])
+        sql = str(statement)
+        assert "market.read_fact_headers_in_range" in sql
+        assert "source.market_commit_seq<=resolved.root_commit" in sql
+        assert "source.known_at<=resolved.known_at" in sql and "source.state=" not in sql
+        assert "interval '1 microsecond'" in sql and "LIMIT :routing_limit" in sql
+        rows = [("root", identity, False, 1, 20, source["observation_key"], source["revision"])
+                for identity, source in sources.items()]
+        rows.append((None, None, True, 1, None, None, None))
+        return SimpleNamespace(all=lambda: rows)
     kwargs = dict(requests=[request], reader=None, max_rows=1 if damage == "budget" else 10, max_logical_bytes=1024**2)
     if damage is None:
         found, selected = fact_dependencies.resolve_causal_window_revisions(SimpleNamespace(execute=execute), **kwargs)
@@ -122,18 +128,43 @@ def test_window_batches_and_edge_limit_include_repeated_sources(monkeypatch):
     # ranges must not. The shared SQL and post-hydration check agree.
     requests = [dict(root_id=str(index), instrument_id="instrument", fact_type="market.trade", series_id=None, source_id=None,
         root_commit=2, known_at=BASE + timedelta(seconds=2), range_start=BASE, range_end=row["observation_time"], include_end=True)
-        for index in range(129)]
+        for index in range(fact_dependencies._CAUSAL_WINDOW_REQUEST_BATCH_ROWS + 1)]
     batches = []
     def execute(statement, params):
         batch = json.loads(params["requests"])
         batches.append(len(batch))
-        return SimpleNamespace(all=lambda: [(item["root_id"], row["id"]) for item in batch])
+        assert params["routing_limit"] == len(requests) + 1
+        found = [(item["root_id"], row["id"], False, len(batch), 20,
+                  row["observation_key"], row["revision"]) for item in batch]
+        found.append((None, None, True, len(batch), None, None, None))
+        return SimpleNamespace(all=lambda: found)
     monkeypatch.setattr(fact_dependencies, "read_canonical_dependency_rows", lambda *args, **kwargs: {row["id"]: row})
     found, selections = fact_dependencies.resolve_causal_window_revisions(SimpleNamespace(execute=execute), requests=requests,
-        reader=None, max_rows=129, max_logical_bytes=1024**2)
-    assert batches == [128, 1] and found == {row["id"]: row} and len(selections) == 129
+        reader=None, max_rows=len(requests), max_logical_bytes=1024**2)
+    assert batches == [fact_dependencies._CAUSAL_WINDOW_REQUEST_BATCH_ROWS, 1]
+    assert found == {row["id"]: row} and len(selections) == len(requests)
     with pytest.raises(RuntimeError, match="request_budget"):
-        fact_dependencies.resolve_causal_window_revisions(None, requests=requests, reader=None, max_rows=128, max_logical_bytes=1024**2)
+        fact_dependencies.resolve_causal_window_revisions(
+            None, requests=requests, reader=None,
+            max_rows=fact_dependencies._CAUSAL_WINDOW_REQUEST_BATCH_ROWS, max_logical_bytes=1024**2,
+        )
+
+
+def test_window_routing_expansion_is_bounded_before_header_read(monkeypatch):
+    request = dict(root_id="root", instrument_id="instrument", fact_type="market.trade",
+        series_id=None, source_id=None, root_commit=2, known_at=BASE,
+        range_start=BASE, range_end=BASE, include_end=True)
+    def execute(statement, params):
+        assert "routing.resolved_count<=:max_routing" in str(statement)
+        return SimpleNamespace(all=lambda: [(None, None, True, params["max_routing"] + 1,
+                                             None, None, None)])
+    monkeypatch.setattr(fact_dependencies, "read_canonical_dependency_rows",
+                        lambda *args, **kwargs: pytest.fail("routing overflow hydrated sources"))
+    with pytest.raises(RuntimeError, match="canonical_window_routing_budget_exceeded"):
+        fact_dependencies.resolve_causal_window_revisions(
+            SimpleNamespace(execute=execute), requests=[request], reader=None,
+            max_rows=2, max_logical_bytes=1024,
+        )
 
 
 @pytest.mark.parametrize("conflict", [False, True])

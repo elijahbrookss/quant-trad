@@ -161,11 +161,16 @@ def test_in_progress_phase_is_visible_before_it_finishes():
         during = worker.snapshot()
         assert during["maintenance"]["history_movement"]["state"] == "running"
         assert during["maintenance"]["history_movement"]["started_at"]
+        assert during["current_phase"]["name"] == "history_movement"
+        assert during["current_phase"]["state"] == "running"
         assert not during["maintenance"]["local_recovery"]["configured"]
     finally:
         release.set()
         worker.stop(timeout_seconds=2)
     final = worker.snapshot()["maintenance"]["history_movement"]
     assert final["state"] == "idle" and final["checked_at"]
+    assert final["duration_seconds"] >= 0
     assert final["outcome"]["policy_revision"] == 4
+    assert worker.snapshot()["current_phase"] is None
+    assert worker.snapshot()["last_run"]["phase_durations_seconds"]["history_movement"] >= 0
     assert during["maintenance"]["history_movement"]["state"] == "running"

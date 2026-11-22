@@ -13,6 +13,39 @@ def observe(root, **overrides):
                                            "check": lambda: None} | overrides))
 
 
+@pytest.mark.parametrize("fill_missing_only", [None, False, True])
+def test_v1_ingestion_accepts_the_current_default_and_refuses_cold_gap_only(monkeypatch, fill_missing_only):
+    from contextlib import contextmanager
+    from types import FunctionType, SimpleNamespace
+
+    from portal.backend.service.storage.repos import market_data
+    from tests.test_market_data.tiered_v1_ingestion import SourceV1Ingestion
+
+    calls = []
+
+    class Session:
+        def execute(self, statement, params):
+            calls.append((str(statement), params))
+            raise RuntimeError("fixture_reached_original_v1_series_lock")
+
+    @contextmanager
+    def session():
+        yield Session()
+
+    frozen = SourceV1Ingestion._ingest_canonical_rows_with_session
+    ingest = FunctionType(frozen.__code__, vars(market_data), argdefs=frozen.__defaults__)
+    ingest.__kwdefaults__ = frozen.__kwdefaults__
+    monkeypatch.setattr(market_data, "db", SimpleNamespace(session=session))
+    monkeypatch.setattr(market_data.PostgresMarketDataRepository, "_ingest_canonical_rows_with_session", ingest)
+    options = {} if fill_missing_only is None else {"fill_missing_only": fill_missing_only}
+    expected = ("market_data_gap_acquisition_requires_canonical_cold_coinbase" if fill_missing_only else
+                "fixture_reached_original_v1_series_lock")
+    with pytest.raises(RuntimeError, match=expected):
+        market_data.PostgresMarketDataRepository()._ingest_canonical_rows(
+            run_id="fixture", series_id=17, rows=[], allow_corrections=True, **options)
+    assert calls == ([] if fill_missing_only else [("SELECT pg_advisory_xact_lock(:series_id)", {"series_id": 17})])
+
+
 def test_absent_and_acknowledged_spool_are_observations_only(tmp_path):
     assert observe(tmp_path)["spool_empty_at_observation"]
     spool = tmp_path/"spool"/"definition"/"session"/"epoch=0"

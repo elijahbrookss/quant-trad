@@ -11,6 +11,7 @@ from market_data.fact_archive import FactArchiveLimits
 from market_data.market_state import derive_book_features, MarketStateValuationContract
 from portal.backend.service.market.market_structure_service import MarketStructureService
 from portal.backend.service.storage.repos import fact_archival, fact_reclamation, market_data, market_structure
+from portal.backend.service.storage.repos.fact_archive_generation import canonical_dependency_projection
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture, _publish_book_result
@@ -169,9 +170,9 @@ def _cold_book_handoff(storage, tmp_path, monkeypatch, split_sources):
         source_path.write_bytes(source_bytes)
         assert reclaimer.reclaim_partition(feature_day, eligible_before=storage.today, execute=True)["status"] == "partition_reclaimed"
     with storage.database.session() as session:
-        edges = session.execute(text("""
+        edges = session.execute(text(f"""
             SELECT dependency.fact_version_id,dependency.row_hash,source.row_hash AS source_hash
-            FROM market.fact_archive_canonical_dependencies AS dependency
+            FROM {canonical_dependency_projection("dependency")}
             JOIN market.fact_versions AS source ON source.id=dependency.fact_version_id
         """)).mappings().all()
         if paged:

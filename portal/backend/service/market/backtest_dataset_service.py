@@ -865,6 +865,9 @@ def _gap_is_disclosed(
     *,
     allow_any_classification: bool = False,
 ) -> bool:
+    """Require continuous coverage by the eligible pinned receipt intervals."""
+
+    intervals: list[tuple[datetime, datetime]] = []
     for row in quality:
         classification = str(row.get("classification") or "").strip().lower()
         if (
@@ -874,7 +877,17 @@ def _gap_is_disclosed(
             continue
         evidence_start = _utc(row.get("start"), field="gap.start")
         evidence_end = _utc(row.get("end"), field="gap.end")
-        if evidence_start <= start and evidence_end >= end:
+        if evidence_end > evidence_start:
+            intervals.append((evidence_start, evidence_end))
+
+    covered_until = start
+    for evidence_start, evidence_end in sorted(intervals):
+        if evidence_end <= covered_until:
+            continue
+        if evidence_start > covered_until:
+            return False
+        covered_until = evidence_end
+        if covered_until >= end:
             return True
     return False
 

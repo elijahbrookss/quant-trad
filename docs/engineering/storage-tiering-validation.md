@@ -1318,7 +1318,112 @@ including historical tables/indexes and unchanged frozen rows, exact archive
 hashes, exclusion of later database writes, rejection of incorrect keys and
 preservation of complete backups after forced database and archive backup-process
 crashes, and recovery after native baseline/dependency-chain expiration and
-archive pruning. This proves native tool behavior; QT publication and retention
-coordination still require implementation and application-level acceptance.
-Small-fixture duration and compressed-byte ratios must not be extrapolated to
-the growing production database.
+archive pruning. The chosen endpoint is restored from copies of both encrypted
+repositories with the original database, archive, repository and credential
+paths unavailable. The runner remaps the restored tablespaces and checks every
+recovered archive against the database at that endpoint. The copies and restore
+use the same disposable host. A production off-host handoff still needs the
+designated independent target, transfer integrity, separately retrievable keys,
+measured capacity and full QT application validation. The fixture timings and
+compression ratios apply to the fixture data.
+
+## Earlier recovery formats and provider spool replay
+
+The encrypted pair is identified by `qt.encrypted_recovery_pair.v1`. Use
+`verify_canonical_recovery_archive.py --receipt <complete.json> --restore-target <restic-restore-root>`
+after restoring the named snapshot. The named database backup and its immediate
+consistent endpoint require a separate physical restore. The legacy logical
+copy is identified by `qt.local_recovery_copy.v1`. Use
+`verify_canonical_recovery_archive.py --logical-copy <generation-directory>`
+to verify its matching owner and completion records, custom-format dump,
+inventory digest, and archive files before the isolated SQL restore. The copy
+checker verifies supplied bytes against their receipt. Use independently
+retained receipt hashes to establish which recovery generation was intended.
+
+The native logical-copy fixture uses a real pre-intake QT dump and a blank
+TimescaleDB restore target. It retains the provider spool before the original
+collector acknowledges and discards it. The restored collector ingests the
+copied spool through its normal recovery path even with a later database's
+acknowledgement sidecar present. The restored raw record, mapping, manifest,
+archive object hash and provider payload match, and replaying the same spool
+again leaves them unchanged. The restored canonical fact has new
+`accepted_at` and `known_at` timestamps. Exact rollback after acknowledged
+writes therefore needs a separately retained and tested delta that preserves
+the accepted fact versions, commit order, lineage, and required derived and
+operational state. Normal raw spool retention alone ends at acknowledgement.
+This fixture uses a scripted trade and the v2 database layout. It verifies
+native replay and custody for that trade.
+
+## Exact recovery after an acknowledged cold-layout write
+
+The disposable paired-recovery rehearsal activates the cold canonical layout,
+admits a provider trade through the collector, freezes that accepted version,
+and takes a native encrypted physical database backup paired with a Restic
+archive inventory. It restores that exact endpoint into empty PostgreSQL data
+and archive roots and then starts the candidate schema. The checks compare
+canonical IDs, commit sequences, accepted and known-at times, latest and frozen
+reads, and the raw record, mapping, manifest, archive bytes and cold-page
+inventory. A later accepted trade is excluded by the selected endpoint.
+
+This recovers the cold layout at the tested post-write point. Restoring the
+original layout at a post-write point requires a different recovery path.
+Physical WAL spans both the cutover DDL and later DML, so replaying the same
+timeline through the later commit recreates the cold catalog. An isolated
+logical projection into a restored earlier layout could preserve the original
+catalog without applying that DDL. It would need to apply exact accepted rows
+and supporting catalogs in dependency order, including identities and commit
+sequence, source and raw custody, pinned lineage, session and coverage state,
+and any intervening non-collector writes. The provider-spool rehearsal above
+shows why ordinary provider replay does not supply those original clocks.
+An exact backward projection and a representative off-host restore remain
+unqualified.
+
+### Recover the original layout at the last accepted write
+
+The named-anchor rehearsal starts with an earlier native pair, admits and
+freezes a trade on the old layout, and closes application database logins and
+stops its qualified TimescaleDB jobs. With the original database connection
+still held, the control database writes a unique restore point and switches
+WAL. The fixture copies the encrypted repository, retrieves the anchor WAL
+segment, and restores to that named point on the exact original timeline. The
+isolated postmaster reads the copied WAL repository with separately supplied
+keys. The restored application database rejects login until the isolated
+control connection reopens it. The old layout and legacy partition, canonical
+ID and clocks, frozen read, and the exact raw record match. The selected
+endpoint excludes an additional trade written and archived after the anchor.
+
+The baseline contains one raw object. The encrypted suffix contains the
+newly needed object and a hash-bound file inventory. The fixture restores
+copies of both repositories and verifies that each object named by the
+catalog at the restored WAL point is reachable with its original size and
+digest. It rejects a different suffix snapshot, a missing or corrupt object,
+and a suffix larger than the configured budget. It reads both raw objects
+through the recovered catalog.
+
+Use the [archive suffix primitives](../../scripts/db/canonical_cold_recovery_suffix.py)
+to verify the copied baseline's paired receipt and Restic bytes before the
+writer fence. Under the live fence, enumerate the final archive descriptors
+and copy only the difference into a private stage. Encrypt the returned
+NUL-delimited file list into a separately managed Restic repository. Routine
+QT recovery pruning owns its original repository, including snapshot tags.
+Pin the exact suffix snapshot ID with the archive evidence. After restoring
+the named WAL endpoint and decrypting both archive snapshots into isolated
+directories, verify the final catalog against their combined inventory.
+Retained baseline objects no longer referenced by the final catalog are
+permitted. A reused object key must keep its exact bytes, and the suffix must
+contain exactly the objects needed beyond the baseline.
+
+This rehearsal measures a fixture and assumes quiescent isolated restore
+directories. Production still needs measured traversal and transfer of the
+full catalog, a complete off-host WAL chain, and provider spool coverage at
+the same boundary. It also needs a second, tested capacity domain for restore.
+
+The named restore also passed startup and frozen-read parity using the
+exact `afafda39` Python source from a Git archive mounted read-only. The
+source check compares the extracted runtime tree with the Git revision and
+then runs the old application's database startup and ordinary frozen reader
+in that tree. The reconstructed original layout kept the additive cold page
+tables. The old application accepted those tables alongside its unchanged
+v2 certificate, views, references and legacy partition. This covered the old
+Python source and matching dependency lock. A full deployment rehearsal
+still needs to qualify the exact old image and service startup.

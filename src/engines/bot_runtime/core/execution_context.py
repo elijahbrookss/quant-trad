@@ -14,7 +14,11 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from .amount_constraints import AmountConstraints, normalize_qty_with_constraints
-from .execution_assumptions import ResolvedExecutionAssumptions
+from .execution_assumptions import (
+    TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION,
+    ResolvedExecutionAssumptions,
+    align_order_price,
+)
 from .fees import FEE_SCHEDULE_SCHEMA_VERSION, FeeSchedule
 
 
@@ -696,10 +700,16 @@ class ResolvedExecutionContext:
         normalized_price = order_price
         if normalized_type in {"limit_aggressive", "limit_maker", "limit_resting", "stop_market"}:
             ticks = order_price / self.instrument.tick_size
-            if self.venue.price_increment_policy == "reject" and not math.isclose(
-                ticks, round(ticks), rel_tol=0.0, abs_tol=1e-9
-            ):
-                return OrderConformance(False, "PRICE_INCREMENT_MISMATCH", expected_role, normalized_qty, metadata)
+            if self.venue.price_increment_policy == "reject":
+                # Compare on the price grid so a large tick count cannot inflate
+                # the floating-point error on prices already aligned by v2.
+                on_grid = (
+                    order_price == align_order_price(order_price, self.instrument.tick_size, round_up=False)
+                    if self.model.version == TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION
+                    else math.isclose(ticks, round(ticks), rel_tol=0.0, abs_tol=1e-9)
+                )
+                if not on_grid:
+                    return OrderConformance(False, "PRICE_INCREMENT_MISMATCH", expected_role, normalized_qty, metadata)
             if self.venue.price_increment_policy == "round_down":
                 normalized_price = (
                     math.floor(ticks + 1e-12) * self.instrument.tick_size
@@ -1050,7 +1060,11 @@ def execution_model_artifact_from_assumptions(
     assumptions: ResolvedExecutionAssumptions,
 ) -> ExecutionModelArtifact:
     return ExecutionModelArtifact(
-        schema_version=EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION,
+        schema_version=(
+            EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION_V2
+            if assumptions.uses_causal_bar_clock or assumptions.uses_tick_aligned_protection
+            else EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION
+        ),
         artifact_id="deterministic_bar_execution",
         version=assumptions.model_version,
         assumption_manifest_hash=assumptions.manifest_hash,
@@ -1061,7 +1075,21 @@ def execution_model_artifact_from_assumptions(
         supports_latency=False,
         calibration_artifact_hash=None,
         source="execution_assumptions_manifest",
-        parameters={},
+        parameters=({
+            "eligibility": "whole_bar_open_strictly_after_decision_availability",
+            "execution_availability": "interval_close_only_delayed_receipt_unsupported",
+            "fill_clock": "eligible_completed_bar_availability_not_observed_intrabar_time",
+            "excursion_measurement": "coarse_bar_bounds_not_realized_path",
+            "entry_bar_favorable_range_excluded": True,
+            **({"trailing_stop_rounding": "long_floor_short_ceiling_to_instrument_tick_then_monotonic_clamp"}
+               if assumptions.uses_tick_aligned_trailing else {}),
+            **({"target_finalization": "same_execution_bar_as_last_target_fill"}
+               if assumptions.finalizes_last_target_at_fill else {}),
+        } if assumptions.uses_causal_bar_clock else {
+            "stop_rounding": "long_floor_short_ceiling_to_instrument_tick",
+            "target_rounding": "long_ceiling_short_floor_to_instrument_tick",
+            "decision_fill_clock": "legacy_same_bar_close",
+        } if assumptions.uses_tick_aligned_protection else {}),
         artifact_hash="",
     )
 

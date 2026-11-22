@@ -12,7 +12,9 @@ from market_data.fact_archive import FactArchiveLimits
 from portal.backend.db.fact_storage_schema import fact_partition_name
 from portal.backend.service.storage.repos import market_data, fact_reclamation
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
-from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
+from portal.backend.service.storage.repos.fact_reclamation import (
+    FactReclamationLimits, PostgresCanonicalFactReclamationRepository,
+)
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement, _ingest, _read
 
@@ -107,7 +109,136 @@ def test_actual_reclamation_keeps_pinned_history_and_returns_space(storage, tmp_
     assert any(record.revision == 3 for record in _read(storage))
 
 
-def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_counts(storage, tmp_path, monkeypatch):
+def test_cold_daily_retirement_publishes_and_prunes_exactly(storage, tmp_path, monkeypatch):
+    from portal.backend.db.cold_history_models import (
+        Base, COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES,
+    )
+    from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bindings
+    from portal.backend.service.storage.repos.cold_retirement import prune_oldest_retired_identities
+    from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog
+
+    day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
+    request = DatasetSeriesRequest(storage.series_id, BASE - timedelta(days=1), BASE + timedelta(days=1))
+    frozen = storage.repo.freeze_dataset([request])
+    before = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id)
+    identities = [record.fact_version_id for record in before]
+    with storage.database.session() as session:
+        for table in Base.metadata.sorted_tables:
+            if table.schema != "market" or table.name not in COLD_TABLE_NAMES:
+                continue
+            table.create(session.connection(), checkfirst=True)
+        database_identity = session.scalar(text("""
+            SELECT c.system_identifier::text || '/' || d.oid::text
+            FROM pg_control_system() AS c CROSS JOIN pg_database AS d WHERE d.datname=current_database()
+        """))
+        _configure_fixture_catalog(session.connection(), database_identity, tmp_path)
+        prepare_cold_dependency_bindings(session.connection())
+        session.execute(text("UPDATE market.fact_storage_state SET layout_version=:layout"),
+                        {"layout": COLD_HISTORY_LAYOUT_VERSION})
+    cold_storage = market_data.canonical_fact_storage_repository
+    with storage.database.session() as session:
+        session.execute(text("UPDATE public.portal_storage_targets SET roles='[]' WHERE id='activation-fixture'"))
+    with pytest.raises(RuntimeError, match="cold_fact_locator_history_tablespace_required"):
+        reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    with storage.database.session() as session:
+        assert session.scalar(text("SELECT count(*) FROM market.cold_fact_pages")) == 0
+        session.execute(text("UPDATE public.portal_storage_targets SET roles='[\"history\"]' WHERE id='activation-fixture'"))
+    assert reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)["status"] == "cold_page_admitted"
+    with storage.database.session() as session:
+        assert not cold_storage.cold_history(session).read_by_ids(session, identities, require_all=False)
+    original_drop = fact_reclamation.drop_verified_header
+
+    def interrupt_after_drop(executor, **scope):
+        original_drop(executor, **scope)
+        raise RuntimeError("test interrupted retirement")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fact_reclamation, "drop_verified_header", interrupt_after_drop)
+        with pytest.raises(RuntimeError, match="test interrupted retirement"):
+            reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert _physical(storage, day)["header_rows"] == len(identities)
+    assert _physical(storage, day)["hot_rows"] == len(identities)
+    assert archive.inspect_partition(day)["state"] == "verified"
+    original_placement = fact_reclamation.guard_cold_runtime_placement
+    placements = 0
+
+    def drift_before_handoff(session, **scope):
+        nonlocal placements
+        placements += 1
+        if placements == 2:
+            session.execute(text("UPDATE public.portal_storage_targets SET state='disabled' WHERE id='activation-fixture'"))
+        original_placement(session, **scope)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fact_reclamation, "guard_cold_runtime_placement", drift_before_handoff)
+        with pytest.raises(RuntimeError, match="cold_fact_locator_history_tablespace_required"):
+            reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert placements == 2 and _physical(storage, day)["header_rows"] == len(identities)
+    result = reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert result["status"] == "partition_reclaimed" and result["reclaimed_header_bytes"] > 0
+    assert _physical(storage, day)["header_rows"] == 0
+    assert _physical(storage, day)["hot_rows"] == 0
+    with storage.database.session() as session:
+        assert cold_storage.cold_history(session).read_by_ids(session, identities).keys() == set(identities)
+    repeated = reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert repeated["status"] == "already_reclaimed"
+    assert repeated["protected_dataset_ranges"] == result["protected_dataset_ranges"] == 1
+    _placement(monkeypatch, storage.today)
+    same = next(record.fact for record in before if record.fact.observation_key == "reclaim-0" and record.revision == 2)
+    assert _ingest(storage, same).noop_count == 1
+    _ingest(storage, replace(same, known_at=BASE + timedelta(seconds=2), accepted_at=BASE + timedelta(seconds=2),
+                             payload={**same.payload, "rate": "0.3", "raw_rate": "0.3"}))
+    cleanup = prune_oldest_retired_identities(storage.database, deadline=lambda: None)
+    assert cleanup["day_complete"] and cleanup["rows_removed"] == len(identities)
+    assert prune_oldest_retired_identities(storage.database, deadline=lambda: None) is None
+    assert any(record.revision == 3 for record in _read(storage))
+    assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
+
+
+def test_daily_reclaim_recounts_under_the_count_only_allowance(storage, tmp_path, monkeypatch):
+    day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
+    engine = storage.database._engine
+    count_timeouts = []
+    drop_timeouts = []
+    wrong_count = False
+
+    def slower_count(_conn, cursor, sql, params, *_):
+        if sql.startswith("SELECT count(*) FROM market.fact_versions WHERE storage_day="):
+            cursor.execute("SHOW statement_timeout")
+            count_timeouts.append(cursor.fetchone()[0])
+            count = "count(*) + (SELECT 0 FROM pg_sleep(1.1))"
+            if wrong_count and len(count_timeouts) == 4:
+                count += " + 1"
+            sql = sql.replace("count(*)", count, 1)
+        if sql.startswith('DROP TABLE market."fact_hot_payloads_'):
+            cursor.execute("SHOW statement_timeout")
+            drop_timeouts.append(cursor.fetchone()[0])
+        return sql, params
+
+    event.listen(engine, "before_cursor_execute", slower_count, retval=True)
+    try:
+        with pytest.raises(DBAPIError) as too_short:
+            reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+        assert too_short.value.orig.pgcode == "57014"
+        assert archive.verify_partition(day, count_statement_timeout_ms=3000,
+                                        remaining_run_seconds=lambda: 10)["row_count"] == 3
+        reclaimer.limits = replace(reclaimer.limits, count_statement_timeout_ms=3000)
+        reclaimer.remaining_run_seconds = lambda: 20
+        wrong_count = True
+        with pytest.raises(RuntimeError, match="canonical_archive_source_coverage_mismatch"):
+            reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+        assert archive.inspect_partition(day)["state"] == "verified"
+        wrong_count = False
+        report = reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+        assert report["status"] == "partition_reclaimed"
+    finally:
+        event.remove(engine, "before_cursor_execute", slower_count)
+    assert count_timeouts == ["1s", "3s", "3s", "3s", "3s", "3s"]
+    assert drop_timeouts == ["1s"]
+
+
+@pytest.mark.parametrize("page_rows", [1, 16])
+def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_counts(storage, tmp_path, monkeypatch, page_rows):
     day = storage.today - timedelta(days=2)
     assert day != BASE.date(), "placement day is not observation time"
 
@@ -131,16 +262,27 @@ def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_coun
         _ingest(storage, replace(storage.fact, observation_key=f"audit-{seconds}",
             observation_time=observed, accepted_at=observed, known_at=observed,
             received_at=observed, source_published_at=observed))
-    freeze(BASE - timedelta(seconds=1), BASE + timedelta(seconds=11))
+    first = freeze(BASE - timedelta(seconds=1), BASE + timedelta(seconds=11))
     freeze(BASE - timedelta(seconds=2), BASE + timedelta(seconds=12))
     freeze(BASE + timedelta(seconds=10), BASE + timedelta(seconds=11))
     freeze(BASE + timedelta(seconds=4), BASE + timedelta(seconds=6))  # Catalog range contains a hole.
     freeze(BASE - timedelta(seconds=1), BASE)  # End is exclusive.
     freeze(BASE + timedelta(seconds=12), BASE + timedelta(seconds=14))
 
+    # Add a second Dataset with an identical target window AND cutoff; its
+    # extra binding is valid only in the other placement day. Grouping without
+    # dataset_id would incorrectly collapse these two protected target pins.
+    second = storage.repo.freeze_dataset([
+        DatasetSeriesRequest(storage.series_id, BASE - timedelta(seconds=1), BASE + timedelta(seconds=11)),
+        DatasetSeriesRequest(storage.series_id, BASE + timedelta(seconds=12), BASE + timedelta(seconds=14)),
+    ])
+    assert second.dataset_id != first.dataset_id
+    assert second.max_commit_seq == first.max_commit_seq
+
     archive = PostgresCanonicalFactArchiveRepository(database=storage.database,
         object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
-        temporary_directory=tmp_path / "staging")
+        temporary_directory=tmp_path / "staging",
+        limits=FactArchiveLimits(max_rows=page_rows, row_group_size=page_rows))
     archive.seal_partition(day)
     while archive.stage_next_page(day)["status"] != "source_exhausted":
         pass
@@ -154,8 +296,33 @@ def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_coun
                   AND versions.series_id=pins.series_id AND versions.observation_time>=pins.range_start
                   AND versions.observation_time<pins.range_end AND versions.market_commit_seq<=pins.max_commit_seq)
         """), {"day": day}).scalar_one()
-        assert expected == 3
-        assert PostgresCanonicalFactReclamationRepository._pinned_ranges(session, day) == expected
+        assert expected == 4
+        reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive)
+        assert reclaimer._pinned_ranges(session, day) == (expected, 1000)
+
+
+def test_pinned_range_timeout_is_enforced_by_postgres_without_mutation(storage, tmp_path, monkeypatch):
+    day, archive, _ = _prepare(storage, tmp_path, monkeypatch)
+    reclaimer = PostgresCanonicalFactReclamationRepository(
+        archive_repository=archive,
+        limits=FactReclamationLimits(statement_timeout_ms=5000,
+                                     pinned_ranges_statement_timeout_ms=10),
+    )
+
+    def delay_pinned_query(_conn, _cursor, statement, parameters, context, executemany):
+        if "canonical_reclaim_pinned_ranges" in statement:
+            return "SELECT pg_sleep(0.1)", parameters
+        return statement, parameters
+
+    event.listen(storage.database._engine, "before_cursor_execute", delay_pinned_query, retval=True)
+    try:
+        with storage.database.session() as session:
+            with pytest.raises(DBAPIError, match="statement timeout"):
+                reclaimer._pinned_ranges(session, day)
+    finally:
+        event.remove(storage.database._engine, "before_cursor_execute", delay_pinned_query)
+    assert archive.inspect_partition(day)["state"] == "verified"
+    assert _physical(storage, day)["hot_rows"] == 3
 
 
 def test_reclamation_failures_leave_hot_partition_and_progress_intact(storage, tmp_path, monkeypatch):
@@ -198,15 +365,23 @@ def test_reclamation_failures_leave_hot_partition_and_progress_intact(storage, t
         actual_timeouts(session)
         calls += 1
         if calls == 2:
+            session.execute(text(
+                "ALTER TABLE market.fact_archive_verification_generations DISABLE TRIGGER "
+                "trg_reject_mutation_fact_archive_verification_generations"
+            ))
             session.execute(text("""
-                INSERT INTO market.fact_archive_material_aliases
-                    (manifest_id, fact_version_id, series_id, evidence_key, material_hash)
-                SELECT id, first_id, :series, 'injected-alias', :hash
-                FROM market.fact_archive_manifests WHERE storage_day=:day
-            """), {"day": day, "series": storage.series_id, "hash": "a" * 64})
+                DELETE FROM market.fact_archive_verification_generations
+                WHERE manifest_id IN (
+                    SELECT id FROM market.fact_archive_manifests WHERE storage_day=:day
+                )
+            """), {"day": day})
+            session.execute(text(
+                "ALTER TABLE market.fact_archive_verification_generations ENABLE ALWAYS TRIGGER "
+                "trg_reject_mutation_fact_archive_verification_generations"
+            ))
     with monkeypatch.context() as patch:
         patch.setattr(reclaimer, "_timeouts", changed_catalog)
-        with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        with pytest.raises(RuntimeError, match="verification_generation_changed"):
             reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
     assert calls == 2
     assert archive.inspect_partition(day) == initial
@@ -296,3 +471,33 @@ def test_reclamation_handoff_fences_readers_and_never_waits_for_parent_read_lock
         finally:
             release.set()
         assert future.result(timeout=30)["status"] == "partition_reclaimed"
+
+
+@pytest.mark.parametrize("action", ["verify", "reclaim"])
+def test_distinct_proof_exit_fence_refuses_changed_bytes_before_admission(storage, tmp_path, monkeypatch, action):
+    day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
+    initial = archive.inspect_partition(day)
+    with storage.database.session() as session:
+        key = session.execute(text("SELECT object_key FROM market.fact_archive_manifests WHERE storage_day=:day"),
+                              {"day": day}).scalar_one()
+    path = archive.object_store.local_path(key)
+    original = path.read_bytes()
+    original_evidence = archive._partition_evidence
+
+    def changed_after_evidence(*args, **kwargs):
+        evidence = original_evidence(*args, **kwargs)
+        if kwargs.get("objects") is not None:
+            path.write_bytes(b"x" * len(original))
+        return evidence
+
+    monkeypatch.setattr(archive, "_partition_evidence", changed_after_evidence)
+    try:
+        with pytest.raises(RuntimeError, match="object_changed"):
+            if action == "verify":
+                archive.verify_partition(day)
+            else:
+                reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    finally:
+        path.write_bytes(original)
+    assert archive.inspect_partition(day) == initial
+    assert _physical(storage, day)["hot_rows"] == 3

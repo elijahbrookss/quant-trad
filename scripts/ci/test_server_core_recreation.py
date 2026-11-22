@@ -151,7 +151,6 @@ def main():
                 code = (
                     "import os, hashlib; from pathlib import Path; "
                     "from market_data.archive import FilesystemRawArchiveObjectStore; "
-                    "from scripts.db.fact_header_v2_handoff import commit_handoff, activate_handoff_policy; "
                     "assert os.getuid()==1000; "
                     "root=Path('/app/logs/market-structure'); "
                     "assert (root/'legacy-spool-proof').read_text()=='retained-spool'; "
@@ -187,7 +186,7 @@ def main():
                 "    observed=observe_header_resources(session.connection(),targets,pg_controldata=Path('/usr/lib/postgresql/15/bin/pg_controldata'))",
                 "    assert len({v.device_id for v in observed.capacity.values()})==2",
                 "runners=storage_maintenance_runners(db,storage_root=Path('/qt-history/archives'),limits_path='/run/quanttrad/storage-maintenance.json')",
-                "assert set(runners)=={'service','history_runner','recovery_runner'}",
+                "assert set(runners)=={'service','recovery_runner'}",
                 "print('postgres_namespace_and_maintenance_wiring_verified')",
             ])
             assert 'postgres_namespace_and_maintenance_wiring_verified' in run(

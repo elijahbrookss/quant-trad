@@ -38,7 +38,7 @@ def validate_recovery_maintenance_limits(*, max_bytes, timeout_seconds, headroom
 
 def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
                            max_bytes, timeout_seconds, headroom_bytes,
-                           max_objects=1000000, cancelled=None, incremental=None):
+                           max_objects=1000000, cancelled=None, incremental=None, cutover_capture=None):
     """Use the saved backup interval/count and explicit measured capacity limits.
 
     Holds the existing management lock for the copy, excluding movement and new
@@ -48,6 +48,10 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
     """
     validate_recovery_maintenance_limits(max_bytes=max_bytes, timeout_seconds=timeout_seconds,
         headroom_bytes=headroom_bytes, max_objects=max_objects)
+    if cutover_capture is not None:
+        from .incremental_recovery import CutoverCapture
+        if not isinstance(cutover_capture, CutoverCapture) or incremental is None:
+            raise ValueError("incremental_cutover_request_invalid")
     deadline=monotonic()+timeout_seconds
     with database.session() as owner:
         if owner.connection().get_isolation_level()!="READ COMMITTED":
@@ -85,6 +89,10 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
         floors={key:((value.total_bytes*policy.reserve_percent+99)//100
                      +registered[key].reserved_bytes+registered[key].auxiliary_reserved_bytes
                      +headroom_bytes[key]) for key,value in observed.items()}
+        if cutover_capture is not None:
+            key = recent.target_id
+            floors[key] = (cutover_capture.source_reserve_bytes + registered[key].reserved_bytes
+                           + registered[key].auxiliary_reserved_bytes + headroom_bytes[key])
 
         def resources():
             if cancelled is not None and cancelled():
@@ -140,7 +148,7 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
                          or archiver["last_failed_time"] > archiver["last_archived_time"])):
                 raise RuntimeError("incremental_wal_archiving_failed")
         with copies.lock():
-            if incremental is not None:
+            if incremental is not None and cutover_capture is None:
                 # Finish an interrupted retirement before reporting not_due.
                 # This touches only the prepared encrypted repositories.
                 copies._prune(policy.backup_copies)
@@ -152,13 +160,17 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
             if last>now:
                 raise RuntimeError("recovery_completion_clock_ahead")
             next_due=last+timedelta(hours=policy.backup_interval_hours)
-            if now<next_due and completed[-1][2].get("storage_layout")==current_layout:
+            if (cutover_capture is None and now<next_due
+                    and completed[-1][2].get("storage_layout")==current_layout):
                 return {"state":"not_due","policy_revision":config.revision,
                         "generation":completed[-1][2]["name"],"storage_layout":current_layout,
                         "policy_hash":policy.fingerprint,"last_completed_at":last.isoformat(),
                         "next_due_at":next_due.isoformat(),"completed_copies":len(completed)}
         resources()
-        if history.inspect(require_writable=True).available_bytes<floors[history.target_id]+max_bytes:
+        replay_candidate = cutover_capture is not None and any(
+            receipt["name"] == cutover_capture.generation for _, _, receipt in completed)
+        if history.inspect(require_writable=True).available_bytes < floors[history.target_id] + (
+                0 if replay_candidate else max_bytes):
             return {"state":"blocked","reason":"recovery_creation_capacity"}
         # Reuse the serving-PostgreSQL namespace and WAL/temp verifier.
         proof=observe_header_resources(owner.connection(),(recent,history),
@@ -182,7 +194,8 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
             with database.locked_snapshot_session(shared_lock_name=_LIFECYCLE_LOCK_NAME,
                                                   wait_for_lock=False) as snapshot:
                 receipt=copies.create(snapshot,objects=objects,pg_dump=Path(pg_dump),
-                                      keep_copies=policy.backup_copies)
+                                      keep_copies=policy.backup_copies,
+                                      **({"cutover_capture": cutover_capture} if cutover_capture is not None else {}))
         except DatabaseSnapshotBusyError:
             return {"state":"busy","reason":"archive_lifecycle_running"}
         resources()

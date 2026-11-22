@@ -638,3 +638,29 @@ def test_indicator_runtime_input_plan_failure_is_not_skipped() -> None:
             start_iso="2026-01-01T00:00:00Z",
             end_iso="2026-01-01T01:00:00Z",
         )
+
+
+def test_simulation_fees_reach_series_context_without_mutating_instrument(monkeypatch):
+    from engines.bot_runtime.core.fees import FeeSchedule
+    schedule = FeeSchedule(maker_rate=.005, taker_rate=.009, source='simulation:test',
+        version='test.v1', schedule_id='test', venue_profile_id='canonical_bar_simulation', fee_currency='USD').to_dict()
+    instrument = dict(id='btc', symbol='BTC-USD', instrument_type='spot', tick_size=.01,
+        contract_size=1., tick_value=.01, base_currency='BTC', quote_currency='USD',
+        min_order_size=.001, qty_step=.001)
+    link = StrategyInstrumentLink(id='link', strategy_id='s', instrument_id='btc', instrument_snapshot=instrument)
+    strategy = Strategy(id='s', name='test', timeframe='1h', datasource='fixture', exchange='fixture',
+        atm_template_id=None, atm_template={}, risk_config={}, indicator_links=[], instrument_links=[link])
+    config = dict(execution_semantics='spot', execution_behavior='simulated', economic_claim_intent='exploration',
+        backtest_start='2026-01-01T00:00:00Z', backtest_end='2026-01-02T00:00:00Z',
+        simulation_fee_schedules={'btc': schedule})
+    builder = SeriesBuilder(bot_id='test', config=config, run_type='backtest', deps=_builder_deps())
+    monkeypatch.setattr(builder, '_build_backtest_candles_with_warmup',
+        lambda **kwargs: ([_candle_at(datetime(2026, 1, 1, tzinfo=timezone.utc))], 0,
+            config['backtest_start'], None, None))
+    series = builder._build_single_series(strategy, link)
+    assert series.execution_context.fee_schedule.schedule_hash == schedule['schedule_hash']
+    assert series.execution_profile.fees.taker_fee_rate == .009
+    assert 'fee_schedule' not in instrument
+    builder.run_type = 'paper'
+    with pytest.raises(ValueError, match='simulated backtest'):
+        builder._build_single_series(strategy, link)

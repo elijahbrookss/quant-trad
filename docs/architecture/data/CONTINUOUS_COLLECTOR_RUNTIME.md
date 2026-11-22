@@ -192,6 +192,24 @@ is nonterminal. Its closing evidence records `projection_invalidated`; it does
 not invent a transport-disconnect event. The epoch state stays until its terminal
 segment, so a later valid batch cannot erase the earlier invalidation.
 
+Coinbase may also publish a schema-valid Level 2 `snapshot` whose `updates`
+array is empty. The runtime archives that frame and records an exact
+`book_invalid` quality boundary at the provider message clock, but it does not
+create a snapshot Fact, BBO, depth, response feature, checkpoint, or valid
+coverage. The reconstructed book remains unavailable until a later complete
+snapshot opens a new validity interval. Retained-spool recovery applies the
+same deterministic rule, so the empty frame cannot permanently block reconnect.
+Malformed Level 2 update arrays and empty update events remain explicit
+`decode_error` evidence rather than being silently reinterpreted as snapshots
+or no-ops.
+
+Operator telemetry joins each Level 2 definition to its disposable current
+reconstruction lifecycle. Fresh provider heartbeats therefore cannot make an
+invalid book projection appear healthy: the individual feed remains delayed
+until a complete snapshot restores `valid`. Container liveness remains a
+separate process/supervisor signal so one delayed feed does not restart healthy
+sibling collectors.
+
 After a terminal segment is archived, mapped, canonicalized, and its terminal
 coverage revision is committed, the finalizer retires that connection epoch's
 projection state. Memory is therefore bounded by active/finalizing epochs, not
@@ -281,6 +299,13 @@ pre-tail reducer against a watermark that can already include that same tail.
 When the immutable book Fact already exists, recovery reuses its persisted
 acceptance clock; an interrupted post-book feature stage can therefore be
 repaired without manufacturing a correction to the canonical source Fact.
+When the first complete snapshot follows a long stretch of invalid book or
+control frames, its raw dependency starts at the beginning of that connection.
+The collector verifies the raw prefix in small committed intervals using the
+same archive receipts as retention. Each retry starts after the last verified
+receive ordinal for that definition, session, connection epoch and product. Publication
+still checks the direct raw references and every uncovered position before it
+acknowledges the local spool.
 This rule belongs to the L2 projection adapter; lease, WAL, queue, lifecycle,
 and restart orchestration remain provider- and projection-neutral.
 

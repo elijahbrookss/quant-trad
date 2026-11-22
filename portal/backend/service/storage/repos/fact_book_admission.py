@@ -18,7 +18,7 @@ from market_data.order_book import BOOK_RECONSTRUCTION_VERSION, L2ProductContrac
 
 from .fact_lineage import _witness, BOOK_SCOPE_FIELDS
 from .fact_storage import PostgresCanonicalFactStorageRepository
-from .fact_dependencies import read_canonical_dependency_rows
+from .fact_dependencies import _cold_enabled, read_canonical_dependency_rows, read_checkpoint_dependency_rows
 
 
 BOOK_FACT_TYPES = frozenset({"market.l2_book", "market.bbo", "market.depth_observation"})
@@ -94,13 +94,37 @@ def resolve_book_position_revisions(session, *, requests, object_store, max_rows
             raise RuntimeError("canonical_book_source_budget_exceeded: reduce archive page size")
         for root, identity in found:
             selections[root].append(identity)
-    identities = sorted({identity for ids in selections.values() for identity in ids})
     reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
         limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
                                 max_file_bytes=max_file_bytes))
+    candidates = defaultdict(set)
+    if _cold_enabled(session):
+        cold = reader.cold_history(session)
+        for root, item in indexed.items():
+            for identity in cold.key_candidate_ids(
+                session, series_id=item["series_id"], key=item["observation_key"], max_candidates=max_rows - count,
+            ):
+                if identity not in selections[root]:
+                    candidates[root].add(identity)
+                    count += 1
+                    if count > max_rows:
+                        raise RuntimeError("canonical_book_source_budget_exceeded: reduce archive page size")
+    identities = sorted({identity for ids in selections.values() for identity in ids}
+                        | {identity for ids in candidates.values() for identity in ids})
     sources = read_canonical_dependency_rows(session, identities,
         reader=reader, max_logical_bytes=max_logical_bytes, check_budget=check_budget)
-    if set(sources) != set(identities) or set(selections) != set(indexed):
+    if set(sources) != set(identities):
+        raise RuntimeError("canonical_book_source_missing")
+    for root, ids in candidates.items():
+        request = indexed[root]
+        for identity in sorted(ids, key=lambda value: (sources[value]["market_commit_seq"], value)):
+            row = sources[identity]
+            if (row["series_id"] != request["series_id"] or row["observation_key"] != request["observation_key"]
+                    or row["fact_type"] != "market.l2_book"):
+                raise RuntimeError(f"canonical_book_source_scope_mismatch: fact_version_id={root} source_id={identity}")
+            if row["market_commit_seq"] <= request["commit_seq"] and row["known_at"] <= request["known_at"]:
+                selections[root].append(identity)
+    if any(not selections[root] for root in indexed):
         raise RuntimeError("canonical_book_source_missing")
     for source in sources.values():
         if check_budget is not None:
@@ -128,13 +152,15 @@ def resolve_book_position_revisions(session, *, requests, object_store, max_rows
             raise RuntimeError(f"canonical_book_source_missing: fact_version_id={request['root_id']}")
     # Conservatively retain other causal revisions at the same declared
     # position too. They are evidence, not alternative current-state inputs.
-    return sources, dict(selections)
+    retained = {identity for ids in selections.values() for identity in ids}
+    return {identity: sources[identity] for identity in sorted(retained)}, dict(selections)
 
 
 def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_verifier,
                                          max_objects, max_rows=50_000, max_logical_bytes=64 * 1024**2,
                                          max_file_bytes=128 * 1024**2,
-                                         bound_checkpoint_ids=None, check_budget=None):
+                                         bound_checkpoint_ids=None, check_budget=None,
+                                         source_evidence_cache=None):
     """Validate immutable L2 product/validity scope and existing checkpoints.
 
     Checkpoints are optional acceleration artifacts; a session with no saved
@@ -164,6 +190,11 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
     dependencies = {}
     checkpoint_contexts = []
     source_selections = {}
+    cold_candidates = {}
+    reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
+        limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
+                                max_file_bytes=max_file_bytes))
+    cold = reader.cold_history(session) if _cold_enabled(session) else None
     source_count = 0
     wanted = None if bound_checkpoint_ids is None else set(bound_checkpoint_ids)
     for (series_id, interval_id, product_id), (row, position) in scopes.items():
@@ -200,7 +231,7 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
               AND checkpoints.product_definition_version_id=:product
               AND checkpoints.session_id=:session AND checkpoints.connection_epoch=:epoch
               AND (checkpoints.receive_ordinal,checkpoints.event_ordinal)<=(:ordinal,:event)
-              {bound} AND NOT EXISTS (
+              AND checkpoints.known_at<=:root_known_at {bound} AND NOT EXISTS (
                 SELECT 1 FROM market.storage_lifecycle_events AS expired
                 WHERE expired.action='archive_expire' AND expired.event_type='completed'
                   AND expired.target_kind='book_checkpoint' AND expired.target_id=checkpoints.id)
@@ -208,6 +239,7 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
         """), {"series": series_id, "interval": interval_id, "product": product_id,
                "session": position["session_id"], "epoch": position["connection_epoch"],
                "ordinal": position["receive_ordinal"], "event": position["event_ordinal"],
+               "root_known_at": row["known_at"],
                "bound_ids": sorted(wanted or ()), "limit": max_objects - len(checkpoint_contexts) + 1}).mappings().all()
         if len(checkpoint_contexts) + len(checkpoints) > max_objects:
             raise RuntimeError("canonical_book_checkpoint_budget_exceeded: reduce archive page size")
@@ -238,43 +270,78 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
                 raise RuntimeError(f"canonical_book_checkpoint_source_mapping_missing: checkpoint_id={checkpoint['id']}")
             source_key = ":".join(str(value) for value in (position["definition_id"], checkpoint["session_id"],
                 checkpoint["connection_epoch"], checkpoint["receive_ordinal"], checkpoint["event_ordinal"]))
+            # The producer saves its raw-backed checkpoint before the matching
+            # canonical book Fact can commit. Both clocks are bounded by the
+            # page root. Exact position and state checks below keep proof of the
+            # checkpoint itself independent of the later canonical acceptance.
             source_ids = session.execute(text("""
                 SELECT id FROM market.fact_versions
                 WHERE series_id=:series AND fact_type='market.l2_book' AND observation_key=:key
                   AND market_commit_seq<=:seq AND known_at<=:known_at
                 ORDER BY market_commit_seq,id LIMIT :limit
             """), {"series": series_id, "key": source_key, "seq": row["market_commit_seq"],
-                   "known_at": checkpoint["known_at"], "limit": max_rows - source_count + 1}).scalars().all()
+                   "known_at": row["known_at"], "limit": max_rows - source_count + 1}).scalars().all()
             source_count += len(source_ids)
+            if cold is not None:
+                candidates = set(cold.key_candidate_ids(
+                    session, series_id=series_id, key=source_key, max_candidates=max_rows - source_count,
+                )) - set(source_ids)
+                cold_candidates[checkpoint["id"]] = (
+                    candidates, row["market_commit_seq"], row["known_at"], series_id, source_key,
+                )
+                source_count += len(candidates)
             if source_count > max_rows:
                 raise RuntimeError("canonical_book_checkpoint_source_budget_exceeded: reduce archive page size")
             source_selections[checkpoint["id"]] = source_ids
             checkpoint_contexts.append((checkpoint, opening, position, contract))
     sources = {row["id"]: row for row in rows}
-    requested = {identity for ids in source_selections.values() for identity in ids}
-    reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
-        limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
-                                max_file_bytes=max_file_bytes))
-    additional = read_canonical_dependency_rows(session, sorted(requested - sources.keys()), reader=reader,
-        max_logical_bytes=max_logical_bytes, check_budget=check_budget)
+    requested = ({identity for ids in source_selections.values() for identity in ids}
+                 | {identity for ids, *_ in cold_candidates.values() for identity in ids})
+    additional = read_checkpoint_dependency_rows(session, sorted(requested - sources.keys()), reader=reader,
+        byte_verifier=byte_verifier, max_logical_bytes=max_logical_bytes,
+        max_objects=max_objects, check_budget=check_budget,
+        evidence_cache=source_evidence_cache)
     for source in additional.values():
         record_from_storage_row(source)
     sources.update(additional)
+    for checkpoint_id, (candidates, commit, known_at, series_id, source_key) in cold_candidates.items():
+        for identity in sorted(candidates):
+            row = sources[identity]
+            if (row["series_id"] != series_id or row["observation_key"] != source_key
+                    or row["fact_type"] != "market.l2_book"):
+                raise RuntimeError(f"canonical_book_checkpoint_source_scope_mismatch: checkpoint_id={checkpoint_id}")
+            if row["market_commit_seq"] <= commit and row["known_at"] <= known_at:
+                source_selections[checkpoint_id].append(identity)
+    retained = set()
     for checkpoint, opening, position, contract in checkpoint_contexts:
-        matched = False
+        earlier = []
+        matching_later = []
+        earlier_match = False
         for identity in source_selections[checkpoint["id"]]:
             source = sources[identity]
+            at_checkpoint = source["known_at"] <= checkpoint["known_at"]
             _, witness = _witness(source)
             if (any(witness.get(name) != position.get(name) for name in BOOK_SCOPE_FIELDS)
                     or any(witness.get(name) != checkpoint[name] for name in
                            ("receive_ordinal", "event_ordinal", "provider_sequence_num"))):
-                raise RuntimeError(f"canonical_book_checkpoint_source_scope_mismatch: checkpoint_id={checkpoint['id']}")
-            if (source["payload"]["after_state_hash"] == checkpoint["state_hash"]
-                    and source["payload"]["validity_interval_id"] == checkpoint["validity_interval_id"]
-                    and source["payload"]["product_definition_version_id"] == checkpoint["product_definition_version_id"]):
-                matched = True
-        if not matched:
+                if at_checkpoint:
+                    raise RuntimeError(f"canonical_book_checkpoint_source_scope_mismatch: checkpoint_id={checkpoint['id']}")
+                continue
+            matches_state = (source["payload"]["after_state_hash"] == checkpoint["state_hash"]
+                             and source["payload"]["validity_interval_id"] == checkpoint["validity_interval_id"]
+                             and source["payload"]["product_definition_version_id"] == checkpoint["product_definition_version_id"])
+            if at_checkpoint:
+                earlier.append(identity)
+                earlier_match |= matches_state
+            elif matches_state:
+                matching_later.append(identity)
+        if not earlier_match and not matching_later:
             raise RuntimeError(f"canonical_book_checkpoint_source_state_missing: checkpoint_id={checkpoint['id']}")
+        # Existing proofs retain their former source set. Add a later exact
+        # witness only when earlier canonical state could not prove this checkpoint.
+        retained.update(earlier)
+        if not earlier_match:
+            retained.update(matching_later)
         if check_budget is not None:
             check_budget()
         byte_verifier.verify(checkpoint["object_key"], checkpoint["object_sha256"], expected_bytes=checkpoint["byte_count"])
@@ -285,4 +352,4 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
     if wanted is not None and set(dependencies) != wanted:
         raise RuntimeError("canonical_book_checkpoint_bound_coverage_missing")
     return ([dependencies[identity] for identity in sorted(dependencies)],
-            [sources[identity] for identity in sorted(requested)])
+            [sources[identity] for identity in sorted(retained)])

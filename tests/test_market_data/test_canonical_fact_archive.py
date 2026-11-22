@@ -16,7 +16,8 @@ from market_data.canonical import CanonicalFact, CanonicalFactRecord
 from market_data.canonical_storage import record_from_storage_row, record_to_storage_row
 from market_data.contracts import SourceIdentity
 from market_data.fact_archive import (
-    FACT_ARCHIVE_RECORD_SELECTION, FactArchiveLimits, FactArchiveManifest,
+    FACT_ARCHIVE_RECORD_SELECTION, CanonicalArchiveReadPage,
+    FactArchiveLimits, FactArchiveManifest,
     encode_canonical_fact_archive, publish_canonical_fact_archive, read_canonical_fact_archive,
     verify_canonical_fact_archive_rows,
 )
@@ -79,12 +80,79 @@ def test_every_revision_round_trips_with_exact_clocks_payloads_and_lineage(tmp_p
     assert pq.ParquetFile(encoded.path).metadata.row_group(0).column(0).compression == "ZSTD"
 
 
+
+def test_archive_phase_observer_reports_nested_io_boundaries_and_failures(tmp_path, history):
+    events = []
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    manifest = publish_canonical_fact_archive(
+        history, object_store=store, temporary_directory=tmp_path / "staging",
+        phase_observer=lambda phase, seconds, outcome: events.append((phase, seconds, outcome)),
+    )
+    assert read_canonical_fact_archive(store.local_path(manifest.object_key), expected=manifest) == tuple(history)
+    assert [event[0] for event in events] == [
+        "archive_encode_compress", "archive_staging_fsync_hash", "archive_staging_readback",
+        "archive_object_publish", "archive_publish_readback",
+    ]
+    assert all(seconds >= 0 and outcome == "completed" for _, seconds, outcome in events)
+
+    class FailingStore:
+        def put_verified(self, **_kwargs):
+            raise RuntimeError("injected publish failure")
+
+    events.clear()
+    with pytest.raises(RuntimeError, match="injected publish failure"):
+        publish_canonical_fact_archive(
+            history, object_store=FailingStore(), temporary_directory=tmp_path / "failed",
+            phase_observer=lambda phase, seconds, outcome: events.append((phase, seconds, outcome)),
+        )
+    assert events[-1][0] == "archive_object_publish" and events[-1][2] == "failed"
+    assert not (tmp_path / "failed").exists() or not any((tmp_path / "failed").iterdir())
+
 def test_source_page_verification_requires_every_exact_revision(tmp_path, history):
     encoded = encode_canonical_fact_archive(history, temporary_directory=tmp_path)
     verify_canonical_fact_archive_rows(iter(history), expected=encoded.manifest)
     for incomplete in (history[:-1], history[1:], history[::2]):
         with pytest.raises(RuntimeError, match="canonical_archive_source_mismatch"):
             verify_canonical_fact_archive_rows(incomplete, expected=encoded.manifest)
+
+
+def test_source_page_verification_accepts_only_exact_verified_decoded_rows(tmp_path, history):
+    encoded = encode_canonical_fact_archive(history, temporary_directory=tmp_path)
+    archived = read_canonical_fact_archive(encoded.path, expected=encoded.manifest)
+    verify_canonical_fact_archive_rows(
+        iter(history), expected=encoded.manifest, archived_rows=archived,
+    )
+    changed = copy.deepcopy(history)
+    changed[1]["payload"]["rate"] = "0.999"
+    for source, observed in ((changed, archived), (history[:-1], archived), (history, archived[:-1])):
+        with pytest.raises(RuntimeError, match="canonical_archive_source_mismatch"):
+            verify_canonical_fact_archive_rows(
+                source, expected=encoded.manifest, archived_rows=observed,
+            )
+
+
+def test_publish_decoded_evidence_is_defensive_and_rehashes_current_bytes(tmp_path, history):
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    decoded_page = CanonicalArchiveReadPage()
+    manifest = publish_canonical_fact_archive(
+        history, object_store=store, temporary_directory=tmp_path / "staging",
+        decoded_page=decoded_page,
+    )
+    path = store.local_path(manifest.object_key)
+    first = read_canonical_fact_archive(path, expected=manifest, decoded_page=decoded_page)
+    first[0]["payload"]["rate"] = "0.999"
+    assert read_canonical_fact_archive(
+        path, expected=manifest, decoded_page=decoded_page,
+    ) == tuple(history)
+
+    original = path.read_bytes()
+    path.write_bytes(b"x" * len(original))
+    try:
+        with pytest.raises(RuntimeError, match="canonical_archive_checksum_mismatch"):
+            read_canonical_fact_archive(path, expected=manifest, decoded_page=decoded_page)
+    finally:
+        path.write_bytes(original)
+        decoded_page.clear()
 
 
 def test_read_only_store_never_creates_publishes_or_deletes(tmp_path, history):

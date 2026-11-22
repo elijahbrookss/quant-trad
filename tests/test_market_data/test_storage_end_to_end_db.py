@@ -42,7 +42,9 @@ from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalF
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement, BASE
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_trade_fixture, _canonical_trade
 from tests.test_market_data.test_market_structure_archive import _record
-from tests.test_market_data.storage_metadata_fixture import prepare_metadata_candidate, observe_metadata
+from tests.test_market_data.storage_metadata_fixture import (
+    POPULATED_TABLES, prepare_metadata_candidate, observe_metadata,
+)
 from portal.backend.service.storage.repos.fact_references import lock_canonical_raw_references
 
 pytestmark = [
@@ -349,7 +351,7 @@ def test_cold_book_metadata_and_frozen_features_on_history(storage, monkeypatch)
     test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay(
         storage,history_root / "book-family",monkeypatch,split_sources=False)
     after = observe_metadata(engine,source_root)
-    assert all(entry["rows"] > 0 for entry in after.values()), after
+    assert all(after[name]["rows"] > 0 for name in POPULATED_TABLES), after
     assert all(f["device"] == history_root.stat().st_dev for entry in after.values() for f in entry["files"])
     print("QT_STORAGE_COLD_METADATA_REPORT="+json.dumps({
         "schema_version":"qt.storage_cold_metadata_demo.v1",

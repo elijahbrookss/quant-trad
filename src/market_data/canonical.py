@@ -461,6 +461,7 @@ class CanonicalFact:
         if self.payload_schema_id in {
             "market.reference_price.v1",
             "market.reserve_balance.v1",
+            "derivatives.liquidation_volume.v1",
         }:
             evidence = self.provenance.get("_qt_numeric_evidence")
             if not isinstance(evidence, Mapping):

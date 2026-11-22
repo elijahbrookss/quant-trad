@@ -144,6 +144,7 @@ class MarketDataStore(Protocol):
         source_revision: Optional[str] = None,
         ingestion_run_id: Optional[str] = None,
         allow_corrections: bool = True,
+        fill_missing_only: bool = False,
     ) -> IngestionOutcome:
         ...
 

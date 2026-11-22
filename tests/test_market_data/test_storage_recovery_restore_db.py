@@ -29,7 +29,9 @@ from tests.test_market_data.test_fact_storage_tiers_db import storage,BASE,_plac
 from tests.test_market_data.test_fact_book_retention_db import (
     test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay as _cold_book,
 )
-from tests.test_market_data.storage_metadata_fixture import prepare_metadata_candidate,observe_metadata
+from tests.test_market_data.storage_metadata_fixture import (
+    POPULATED_TABLES, prepare_metadata_candidate, observe_metadata,
+)
 from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture,stage_shadow_handoff_fixture
 from tests.test_market_data.test_fact_header_copy_placement_db import _configure_placement,_assert_disk
 from tests.test_market_data.test_fact_header_copy_db import _finish as finish_headers
@@ -158,7 +160,7 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
         prepare_metadata_candidate(engine,Path("/qt-source/pgdata"),history_root,
                                    tablespace_name="qt_demo_history_cold")
     metadata=observe_metadata(engine,Path("/qt-source/pgdata"))
-    assert all(item["rows"]>0 for item in metadata.values())
+    assert all(metadata[name]["rows"]>0 for name in POPULATED_TABLES)
     with engine.connect() as conn:
         ranges=conn.execute(text("""
             SELECT series_id,min(observation_time),max(observation_time)

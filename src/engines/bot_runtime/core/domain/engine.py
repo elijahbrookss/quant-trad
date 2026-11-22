@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import math
 import uuid
 from dataclasses import asdict, dataclass
@@ -17,7 +18,9 @@ from ..amount_constraints import normalize_qty_with_constraints
 from ..entry_execution import EntryExecutionCoordinator, PendingEntry
 from ..entry_settlement import EntrySettlement, EntrySettlementContext, EntrySettlementService
 from ..execution_adapter import ExecutionAdapter
-from ..execution_assumptions import ResolvedExecutionAssumptions, legacy_execution_assumptions
+from ..execution_assumptions import ResolvedExecutionAssumptions, align_order_price, legacy_execution_assumptions
+from ..bar_execution_clock import execution_clock, validate_causal_execution_policy
+from .position import EntryFillFacts
 from ..execution_context import ResolvedExecutionContext, resolve_execution_context
 from ..execution_intent import ExecutionIntent, LimitParams
 from ..execution_model import ExecutionModel
@@ -96,6 +99,11 @@ class LadderRiskEngine:
         if self.execution_context.model.assumption_manifest_hash != self.execution_assumptions.manifest_hash:
             raise ValueError("execution_context_assumption_manifest_mismatch")
         self.execution_profile = self.execution_profile.bind_execution_context(self.execution_context)
+        validate_causal_execution_policy(self.execution_assumptions, self.execution_profile,
+            self.execution_plan, self.execution_context.model.input_capability)
+        self._last_causal_step_bar_time = None
+        self._last_causal_step_bar_end = None
+
         if self.execution_assumptions.requires_economic_evidence:
             schedule = self.execution_context.fee_schedule
             if not schedule.configured or schedule.source == "default_zero":
@@ -835,7 +843,7 @@ class LadderRiskEngine:
             order_intent_id=str(pending.order_intent_id),
             trade_id=str(pending.trade_id),
             candle=CandleSnapshot(
-                time=candle.time,
+                time=execution_clock(candle, self.execution_assumptions),
                 open=float(candle.open),
                 high=float(candle.high),
                 low=float(candle.low),
@@ -1380,6 +1388,19 @@ class LadderRiskEngine:
         )
         position.apply_entry_fee(fees_paid_total)
         position.wallet_fill_metadata = self.pop_wallet_fill_metadata(str(pending.trade_id))
+        if self.execution_assumptions.uses_causal_bar_clock:
+            if position.entry_fill_facts is not None:
+                raise RuntimeError("causal_entry_fill_snapshot_already_set")
+            position.entry_fill_facts = EntryFillFacts(
+                quantity=filled_qty_total, price=avg_fill_price,
+                notional=executed_notional(price=avg_fill_price, quantity=filled_qty_total, contract_size=self.contract_size),
+                fee_paid=fees_paid_total, fee_rate=float(fill.fee_rate or 0),
+                fee_type=str(fill.liquidity_role or "taker"), fee_source=str(fill.fee_source),
+                fee_version=fill.fee_version, filled_at=str(fill.fill_time),
+                wallet_metadata_json=json.dumps(position.wallet_fill_metadata or {}, sort_keys=True, default=str),
+                position_commit_seq=int(getattr(position, "position_commit_seq", 0) or 0) + 1,
+            )
+
 
         events.append(
             {
@@ -1623,9 +1644,10 @@ class LadderRiskEngine:
             raise ValueError(f"r_ticks must be > 0, got {r_ticks}")
 
         stop_distance = r_ticks * self.tick_size
-        if direction == "long":
-            return entry_price - stop_distance
-        return entry_price + stop_distance
+        price = risk_math.price_from_r(entry_price, direction, stop_distance, -1.0)
+        if self.execution_assumptions.uses_tick_aligned_protection:
+            return align_order_price(price, self.tick_size, round_up=direction == "short")
+        return price
 
     def _floor_to_step(self, qty: float, step: float) -> float:
         if step in (None, 0):
@@ -1934,6 +1956,8 @@ class LadderRiskEngine:
                 raise RuntimeError(
                     f"compiled take-profit target {order.get('id')!r} has no executable price"
                 )
+            if self.execution_assumptions.uses_tick_aligned_protection:
+                target_price = align_order_price(target_price, self.tick_size, round_up=direction == "long")
 
             leg_specs.append(
                 {
@@ -2073,6 +2097,13 @@ class LadderRiskEngine:
         *,
         same_bar_policy: SameBarResolutionPolicy | str = SameBarResolutionPolicy.PESSIMISTIC_STOP,
     ) -> List[Dict[str, Any]]:
+        causal = self.execution_assumptions.uses_causal_bar_clock
+        if causal:
+            if self._last_causal_step_bar_time is not None and candle.time <= self._last_causal_step_bar_time:
+                return []
+            if (self.active_trade is not None or self.entry_execution.has_pending) and self._last_causal_step_bar_end is not None and candle.time != self._last_causal_step_bar_end:
+                raise RuntimeError("causal_execution_data_gap")
+        entry_fill_bar = False
         touched_trade = self.active_trade
         previous_signature = self._cached_trade_material_signatures(
             (touched_trade,) if touched_trade is not None else ()
@@ -2080,6 +2111,7 @@ class LadderRiskEngine:
         if self.entry_execution.has_pending:
             new_trade = self.entry_execution.process_pending(candle)
             if new_trade:
+                entry_fill_bar = True
                 if self.active_trade is None:
                     self.active_trade = new_trade
                     self.trades.append(self.active_trade)
@@ -2087,9 +2119,21 @@ class LadderRiskEngine:
                     raise RuntimeError("pending entry fill targeted a different active trade")
                 self._pending_entry_fills.append(new_trade)
                 touched_trade = new_trade
+                if causal:
+                    # Entry and an adverse exit on this bar are distinct states.
+                    # Commit the opened state before protection can consume legs;
+                    # the existing end-of-step comparison commits any exit next.
+                    self._bump_trade_revision_if_material_changed(
+                        previous_signature, touched_trades=(new_trade,),
+                    )
+                    previous_signature = self._cached_trade_material_signatures((new_trade,))
         if self.active_trade is None:
+            if causal:
+                self._last_causal_step_bar_time = candle.time
+                self._last_causal_step_bar_end = candle.end_time
             return []
-        events = self.active_trade.apply_bar(candle, same_bar_policy=same_bar_policy)
+        events = self.active_trade.apply_bar(candle, same_bar_policy=same_bar_policy,
+            **({"entry_fill_bar": entry_fill_bar} if causal else {}))
         for lifecycle, after_seq in self.active_trade.drain_order_lifecycle_updates():
             self.record_order_lifecycle(lifecycle, after_seq=after_seq)
         if not self.active_trade.is_active():
@@ -2098,6 +2142,9 @@ class LadderRiskEngine:
             previous_signature,
             touched_trades=(touched_trade,) if touched_trade is not None else (),
         )
+        if causal:
+            self._last_causal_step_bar_time = candle.time
+            self._last_causal_step_bar_end = candle.end_time
         return events
 
     def step_intrabar_candle(

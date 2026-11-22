@@ -371,6 +371,113 @@ def test_continuous_health_uses_provider_activity_when_fact_flow_is_quiet():
     assert stream["acquisition"]["freshness_seconds"] == 1.0
 
 
+@pytest.mark.parametrize(
+    ("lifecycle", "expected_state", "expected_health", "expected_ready"),
+    [
+        ("invalid", "DEGRADED", "DELAYED", False),
+        ("valid", "HEALTHY", "HEALTHY", True),
+    ],
+)
+def test_level2_health_exposes_projection_lifecycle_per_feed(
+    lifecycle, expected_state, expected_health, expected_ready,
+) -> None:
+    class _Level2StreamRepository:
+        def list_stream_definitions(self):
+            return [
+                {
+                    "id": "coinbase-book-bip",
+                    "source_id": 3,
+                    "series_id": 31,
+                    "enabled": True,
+                    "desired_state": "running",
+                    "control_generation": 1,
+                    "provider": "COINBASE",
+                    "venue": "COINBASE_DIRECT",
+                    "source_kind": "stream",
+                    "instrument_id": "instrument-book-bip",
+                    "instrument_symbol": "BIP-20DEC30-CDE",
+                    "instrument_type": "future",
+                    "provider_product_id": "BIP-20DEC30-CDE",
+                    "channels": ("level2", "heartbeats"),
+                    "series_fact_type": "market.l2_book",
+                    "contract_version": "market.l2_book.v1",
+                    "lease_current": True,
+                    "owner_id": "worker-1:coinbase-book-bip",
+                    "lease_generation": 1,
+                    "expires_at": NOW + timedelta(seconds=30),
+                    "config": {
+                        "schema_version": "market.stream_runtime_config.v1",
+                        "product_definition_version_id": "product.v1",
+                        "bbo_series_id": 32,
+                        "depth_series_id": 33,
+                        "response_feature_series_id": 34,
+                        "trade_series_id": 35,
+                        "flow_feature_series_ids": {"1": 36, "60": 37},
+                        "output_series": [
+                            {
+                                "fact_type": "market.l2_book",
+                                "schema_version": "market.l2_book.v1",
+                                "series_id": 31,
+                            }
+                        ],
+                        "runtime_policy": {},
+                    },
+                }
+            ]
+
+    class _BookOperationsRepository(_OperationsRepository):
+        def fact_series_telemetry(self, *, series_ids):
+            assert set(series_ids) == {11, 31}
+            return {
+                11: {
+                    "last_observation_time": NOW - timedelta(seconds=12),
+                    "last_accepted_at": NOW - timedelta(seconds=10),
+                    "accepted_last_minute": 1,
+                    "accepted_last_five_minutes": 5,
+                },
+                31: {
+                    "last_observation_time": NOW - timedelta(minutes=20),
+                    "last_accepted_at": NOW - timedelta(minutes=20),
+                    "accepted_last_minute": 0,
+                    "accepted_last_five_minutes": 0,
+                },
+            }
+
+        def continuous_stream_telemetry(self, *, definition_ids):
+            assert definition_ids == ["coinbase-book-bip"]
+            return {
+                "coinbase-book-bip": {
+                    "last_provider_activity_at": NOW - timedelta(seconds=1),
+                    "projection_lifecycle": lifecycle,
+                    "projection_updated_at": NOW - timedelta(seconds=1),
+                }
+            }
+
+    service = CollectorOperationsService(
+        collection_repository=_CollectionRepository(),
+        stream_repository=_Level2StreamRepository(),
+        operations_repository=_BookOperationsRepository(),
+        stream_registry=CollectorAdapterRegistry(
+            (CoinbaseLevel2CollectorAdapter(),)
+        ),
+        clock=lambda: NOW,
+    )
+
+    book = next(
+        item
+        for item in service.fleet_snapshot()["collectors"]
+        if item["collector_id"] == "coinbase-book-bip"
+    )
+
+    assert book["actual_state"] == expected_state
+    assert book["health_status"] == expected_health
+    assert book["needs_attention"] is (not expected_ready)
+    assert book["acquisition"]["freshness_seconds"] == 1.0
+    assert book["acquisition"]["freshness_ok"] is expected_ready
+    assert book["acquisition"]["projection_lifecycle"] == lifecycle
+    assert book["acquisition"]["projection_ready"] is expected_ready
+
+
 def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
     derive = CollectorOperationsService._actual_state
 

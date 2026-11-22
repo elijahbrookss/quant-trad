@@ -402,7 +402,9 @@ def test_book_sources_replay_and_trade_flow_status_survive_cooling(storage, tmp_
                     session, series_id=bbo_series, material_hash=bbo.material_hash,
                     evidence_key="_qt_bbo_evidence",
                 )
-            return market_structure._trade_flow_status_rows(session, [flow_series])
+            rows, status = market_structure._trade_flow_archive_status(session, [flow_series])
+            assert status == {"state": "complete"}
+            return rows
 
     before = check_sources()
     assert before[0]["bucket_count"] == 1

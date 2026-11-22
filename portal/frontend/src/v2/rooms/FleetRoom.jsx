@@ -103,7 +103,7 @@ function RunsTable({ pageModel, loading, hasMore, loadingMore, onLoadMore }) {
                 <td><strong>{row.status === 'completed' ? `${formatNumber(row.netPnl)} net P&L` : formatDuration(row.durationMs)}</strong><small>{row.totalTrades !== null ? `${row.totalTrades} trades` : 'Trade count unavailable'}</small></td>
                 <td className="qt2-actions-cell">
                   {row.botLensAvailable ? (
-                    <Link className="qt2-button qt2-button-primary" to={'/operations/runs/' + row.id} state={{ run: row.run, definition: row.definition, from: '/operations?tab=runs' }}>{row.isActive ? 'Open BotLens' : 'Open replay'}</Link>
+                    <Link className="qt2-button qt2-button-primary" to={'/operations/runs/' + row.id} state={{ run: row.run, definition: row.definition, from: '/bot-runs?view=history' }}>{row.isActive ? 'Open BotLens' : 'Open replay'}</Link>
                   ) : (
                     <button type="button" className="qt2-button" disabled title={row.botLensReason || 'No persisted BotLens projection is available for this run.'}>BotLens unavailable</button>
                   )}
@@ -152,7 +152,7 @@ function CurrentRunCards({ rows, loading }) {
           ) : null}
           <div className="qt2-active-run-actions">
             {row.botLensAvailable ? (
-              <Link className="qt2-button qt2-button-primary" to={'/operations/runs/' + row.id} state={{ run: row.run, definition: row.definition, from: '/operations?tab=runs' }}>Open BotLens</Link>
+              <Link className="qt2-button qt2-button-primary" to={'/operations/runs/' + row.id} state={{ run: row.run, definition: row.definition, from: '/bot-runs' }}>Open BotLens</Link>
             ) : (
               <button type="button" className="qt2-button" disabled title={row.botLensReason}>BotLens connecting</button>
             )}
@@ -184,9 +184,9 @@ function ResearchTable({ pageModel, loading, onPageChange }) {
   )
 }
 
-export function FleetRoom() {
+export function FleetRoom({ domain = null }) {
   const [params, setParams] = useSearchParams()
-  const rawTab = params.get('tab')
+  const rawTab = domain || params.get('tab')
   const requestedTab = ['data-plane', 'collectors', 'market-data'].includes(rawTab)
     ? 'market'
     : rawTab
@@ -276,8 +276,8 @@ export function FleetRoom() {
     <div className="qt2-room">
       <div className="qt2-room-head">
         <div>
-          <h1 className="qt2-title">Operations</h1>
-          <p className="qt2-sub">Find the thing first. Open the evidence only when you need it.</p>
+          <h1 className="qt2-title">{domain === 'runs' ? 'Bot runs' : domain === 'market' ? 'Collectors' : 'Operations'}</h1>
+          <p className="qt2-sub">{domain === 'runs' ? 'Live, paper and backtest execution' : domain === 'market' ? 'Market-data acquisition' : 'Evidence inventory'}</p>
         </div>
         <div className="qt2-head-actions">
           <span className="qt2-observation-note">{tab === 'runs' ? (runView === 'current' ? (activeRunsFeed.hasReceivedSnapshot ? 'Active run stream live' : 'Active run stream connecting') : (hasReceivedSnapshot ? 'Run history ready' : 'Run history connecting')) : tab === 'market' ? 'Provider summaries live · details lazy' : 'Bounded research inventory'}</span>
@@ -285,9 +285,9 @@ export function FleetRoom() {
         </div>
       </div>
 
-      <div className="qt2-tabs" role="tablist" aria-label="Operations inventory">
+      {!domain ? <div className="qt2-tabs" role="tablist" aria-label="Operations inventory">
         {TABS.map((item) => <button type="button" role="tab" aria-selected={tab === item.id} key={item.id} className={tab === item.id ? 'is-active' : ''} onClick={() => selectTab(item.id)}>{item.label}</button>)}
-      </div>
+      </div> : null}
 
       {tab === 'runs' ? (
         <div className="qt2-run-view-switch" role="tablist" aria-label="Run inventory scope">

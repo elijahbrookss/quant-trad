@@ -57,13 +57,13 @@ the assigned window. Resolution reads frozen storage and performs no provider
 fetch.
 
 Studies using derived trade flow additionally require the
-[research replay availability boundary](RESEARCH_REPLAY_AVAILABILITY.md). Each
-The `StudyDefinition` declares raw trades, aggregate trade flow, and every
+[research replay availability boundary](RESEARCH_REPLAY_AVAILABILITY.md).
+The admitted Check definition declares raw trades, aggregate trade flow, and every
 contextual fact through `FactRequirement`; no orchestrator inserts OI or
 funding implicitly. The immutable protocol pins train, validation, and private
-holdout datasets. `ResearchRun` separately pins availability evidence and
-exact implementation bundles. Canonical `known_at` remains unchanged; the
-replay clock is admitted only after exact raw/aggregate/coverage reconciliation.
+holdout datasets. Saved Check evidence retains its exact definition, plan and
+frozen input binding. Canonical `known_at` remains unchanged; the replay clock
+is admitted only after exact raw/aggregate/coverage reconciliation.
 
 The research agent receives the public protocol. For a sealed historical
 holdout, its dataset ID, hash, and window are redacted. Trial registration
@@ -253,11 +253,11 @@ CLI log does not disable this durable authority trail.
 Scientific authority grants controlled search and evidence authority only. It grants no
 shadow, paper, live, external-order, credential, capital, or deployment access.
 
-## Study composition
+## Research composition
 
-`StudyDefinition` is provider-free and resolves only exact registered feature,
-search-space, evaluator, and availability bundles. `ResearchRun` pins its code,
-protocol, frozen dataset bindings, bundle versions, and availability evidence.
-The study boundary has no provider, credential, deployment, promotion, or
-order-submission dependency. A material change requires a new immutable study
-and run identity.
+Scientific authority governs its existing protocol/family/trial/candidate
+contracts. Runnable analysis uses explicit CheckDefinition settings and frozen
+Check evidence; Studies retain questions/findings. The unused executable
+StudyDefinition/bundle registry has been removed. Historical integrity alone
+cannot satisfy an authority operation requiring deterministic replay. See
+[ADR 0082](../decisions/0082-separate-historical-custody-from-active-research.md).

@@ -1,6 +1,6 @@
 """Exact OI/funding revision admission for the current derivative-state owner."""
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 
 from sqlalchemy import text
@@ -10,6 +10,7 @@ from market_data.canonical_storage import record_from_storage_row
 from market_data.fact_archive import FactArchiveLimits
 from market_data.market_state import DERIVATIVE_OI_INTERVAL_SECONDS, derivative_state_input_fingerprint, derive_derivative_state_features
 
+from .fact_dependencies import _cold_enabled, resolve_causal_window_revisions
 from .fact_dependencies import read_canonical_dependency_rows
 from .fact_storage import PostgresCanonicalFactStorageRepository
 
@@ -57,8 +58,21 @@ def resolve_derivative_source_revisions(session, *, rows, object_store, max_rows
                 "sample_time": (fact.oi_sample_time - timedelta(seconds=DERIVATIVE_OI_INTERVAL_SECONDS)).isoformat()})
     if len(requests) > max_rows:
         raise RuntimeError("canonical_derivative_source_budget_exceeded: reduce archive page size")
+    reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
+        limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
+                                max_file_bytes=max_file_bytes))
     selections = defaultdict(list)
     found_count = 0
+    cold_windows = []
+    if _cold_enabled(session):
+        for index, request in enumerate(requests):
+            point = datetime.fromisoformat(request["sample_time"])
+            cold_windows.append({
+                "root_id": str(index), "instrument_id": request["instrument_id"],
+                "series_id": request["series_id"], "source_id": None, "fact_type": request["fact_type"],
+                "root_commit": request["root_commit"], "known_at": datetime.fromisoformat(request["known_at"]),
+                "range_start": point, "range_end": point, "include_end": True,
+            })
     for offset in range(0, len(requests), 128):
         if check_budget is not None:
             check_budget()
@@ -82,12 +96,28 @@ def resolve_derivative_source_revisions(session, *, rows, object_store, max_rows
             raise RuntimeError("canonical_derivative_source_budget_exceeded: reduce archive page size")
         for identity, role, source_id in found:
             selections[(identity, role)].append(source_id)
-    identities = sorted({source_id for ids in selections.values() for source_id in ids})
-    reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
-        limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
-                                max_file_bytes=max_file_bytes))
-    sources = read_canonical_dependency_rows(session, identities, reader=reader,
-        max_logical_bytes=max_logical_bytes, check_budget=check_budget)
+    if cold_windows:
+        all_sources, windows = resolve_causal_window_revisions(
+            session, requests=cold_windows, reader=reader, max_rows=max_rows,
+            max_logical_bytes=max_logical_bytes, check_budget=check_budget,
+        )
+        for index, request in enumerate(requests):
+            key = (request["root_id"], request["role"])
+            selected = set(selections[key])
+            for identity in windows.get(str(index), ()):
+                row = all_sources[identity]
+                if (row["state"] == "active"
+                        and (request["commit_seq"] is None or row["market_commit_seq"] == request["commit_seq"])):
+                    selected.add(identity)
+            selections[key] = sorted(selected, key=lambda identity: (all_sources[identity]["market_commit_seq"], identity))
+        if sum(map(len, selections.values())) > max_rows:
+            raise RuntimeError("canonical_derivative_source_budget_exceeded: reduce archive page size")
+        identities = sorted({source_id for ids in selections.values() for source_id in ids})
+        sources = {identity: all_sources[identity] for identity in identities}
+    else:
+        identities = sorted({source_id for ids in selections.values() for source_id in ids})
+        sources = read_canonical_dependency_rows(session, identities, reader=reader,
+            max_logical_bytes=max_logical_bytes, check_budget=check_budget)
     if set(sources) != set(identities):
         raise RuntimeError("canonical_derivative_source_missing: selected payloads unavailable")
     decoders = {"derivatives.open_interest.v1": _canonical_to_open_interest_record,

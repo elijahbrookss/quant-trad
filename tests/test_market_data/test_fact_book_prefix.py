@@ -81,6 +81,64 @@ def test_chunk_progress_exceeds_one_mapping_budget_and_reuses_deep_proof(tmp_pat
         _resolve(session, store, [root])
 
 
+def test_three_page_prefix_fixture_reports_sql_hash_and_traversal_without_changing_proof(
+        tmp_path):
+    store, records, mappings, rows = _fixture(
+        tmp_path, tuple(range(1, 7)), requested_channel="level2",
+    )
+    session = _PrefixSession(mappings)
+    roots = [_book_root(records[index], rows[index]) for index in (1, 3, 5)]
+    for root in roots:
+        assert _prepare(session, store, root)["status"] == "book_prefix_verified"
+
+    observed = []
+    for page, root in enumerate(roots):
+        refs, bindings = _resolve(
+            session, store, [root],
+            measurement_observer=lambda page=page, **fields: observed.append(
+                {"page": page, **fields}
+            ),
+        )
+        assert set(refs) == {"raw-manifest"}
+        assert bindings == {root["id"]: {"raw-manifest"}}
+
+    assert len(observed) == 9
+    for page in range(3):
+        events = [item for item in observed if item["page"] == page]
+        assert [item["phase"] for item in events] == [
+            "prefix_catalog_sql", "prefix_object_hash", "prefix_traversal",
+        ]
+        assert all(item["scope"] == "book" for item in events)
+        assert all(item["outcome"] == "completed" for item in events)
+        assert all(item["seconds"] >= 0 for item in events)
+        counters = events[0]["counters"]
+        assert counters == events[1]["counters"] == events[2]["counters"]
+        assert counters["prefix_count"] == counters["root_count"] == 1
+        assert counters["chunk_count"] == page + 1
+        assert counters["query_count"] == page + 2
+        assert counters["object_count"] == page + 1
+        assert counters["byte_count"] > 0
+
+
+def test_prefix_measurement_failure_never_changes_verified_result(tmp_path, caplog):
+    store, records, mappings, rows = _fixture(
+        tmp_path, (1, 2), requested_channel="level2",
+    )
+    session = _PrefixSession(mappings)
+    root = _book_root(records[-1], rows[-1])
+    assert _prepare(session, store, root)
+
+    def unavailable_observer(**_fields):
+        raise RuntimeError("measurement sink unavailable")
+
+    refs, bindings = _resolve(
+        session, store, [root], measurement_observer=unavailable_observer,
+    )
+    assert set(refs) == {"raw-manifest"}
+    assert bindings == {root["id"]: {"raw-manifest"}}
+    assert caplog.text.count("canonical_archive_verification_measurement_failed") == 3
+
+
 def test_late_interval_does_not_expand_or_query_its_earlier_history(tmp_path):
     store, records, mappings, rows = _fixture(tmp_path, (100_001, 100_002), requested_channel="level2")
     session = _PrefixSession(mappings)
@@ -164,6 +222,89 @@ def _prepare_trade(session, store, prefix):
 def _resolve_trade(session, store, prefix, witnesses):
     return fact_book_prefix.resolve_verified_trade_prefixes(session, prefixes=[prefix], witnesses=witnesses,
         byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()), max_objects=100)
+
+
+@pytest.mark.parametrize("channel", ["level2", "market_trades"])
+def test_large_prefix_commits_bounded_contiguous_intervals_and_resumes(tmp_path, channel):
+    store, records, mappings, rows = _fixture(tmp_path, tuple(range(1, 9093)), requested_channel=channel)
+    session = _PrefixSession(mappings)
+    root = _book_root(records[-1], rows[-1])
+    prefix = _trade_prefix(records)
+
+    def advance():
+        kwargs = dict(object_store=store,
+            byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+            limits=RawArchiveReadLimits(), max_mapping_rows=50_000, max_objects=100)
+        if channel == "level2":
+            return fact_book_prefix.prepare_next_book_prefix(session, rows=[root], **kwargs)
+        return fact_book_prefix.prepare_next_trade_prefix(session, prefixes=[prefix], **kwargs)
+
+    for first, last in ((1, 2000), (2001, 4000), (4001, 6000), (6001, 8000), (8001, 9092)):
+        progress = advance()
+        assert (progress["first_receive_ordinal"], progress["last_receive_ordinal"]) == (first, last)
+        assert len(session.calls) == 1
+        params = session.calls[0][1]
+        assert (params["first_requested_ordinal"], params["last_requested_ordinal"]) == (first, last)
+        assert params["last_requested_ordinal"] - params["first_requested_ordinal"] < 2000
+        # A new owner resumes solely from the committed chunk/hold evidence.
+        resumed = _PrefixSession(mappings)
+        resumed.chunks, resumed.holds = deepcopy((session.chunks, session.holds))
+        session = resumed
+    assert advance() is None
+    assert len(session.chunks) == 5
+    assert all(chunk["last_receive_ordinal"] - chunk["first_receive_ordinal"] < 2000
+               for chunk in session.chunks)
+    if channel == "level2":
+        assert _resolve(session, store, [root])[1] == {root["id"]: {"raw-manifest"}}
+    else:
+        assert set(_resolve_trade(session, store, prefix, [prefix])[0]) == {"raw-manifest"}
+
+
+def test_bounded_prefix_gap_and_cancellation_keep_prior_receipts(tmp_path):
+    # The second interval must not certify a missing source ordinal.
+    ordinals = (*range(1, 2001), *range(2002, 4002))
+    store, records, mappings, _ = _fixture(tmp_path, ordinals)
+    session = _PrefixSession(mappings)
+    prefix = _trade_prefix(records)
+
+    def advance(**kwargs):
+        return fact_book_prefix.prepare_next_trade_prefix(session, prefixes=[prefix], object_store=store,
+            byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+            limits=RawArchiveReadLimits(), max_mapping_rows=50_000, max_objects=100, **kwargs)
+
+    assert advance()["last_receive_ordinal"] == 2000
+    before = deepcopy((session.chunks, session.holds))
+    with pytest.raises(RuntimeError, match="mapping_missing.*2001"):
+        advance()
+    assert (session.chunks, session.holds) == before
+    with pytest.raises(RuntimeError, match="not_ready"):
+        _resolve_trade(session, store, prefix, [prefix])
+
+    def cancelled():
+        raise RuntimeError("cancelled before prefix proof")
+
+    with pytest.raises(RuntimeError, match="cancelled before prefix proof"):
+        advance(check_budget=cancelled)
+    assert (session.chunks, session.holds) == before
+
+
+def test_existing_larger_prefix_certificate_remains_readable(tmp_path, monkeypatch):
+    store, records, mappings, _ = _fixture(tmp_path, tuple(range(1, 2502)))
+    session = _PrefixSession(mappings)
+    prefix = _trade_prefix(records)
+    kwargs = dict(prefixes=[prefix], object_store=store,
+        limits=RawArchiveReadLimits(), max_mapping_rows=50_000, max_objects=100)
+    # Model a certificate committed by the previous interval policy.
+    with monkeypatch.context() as legacy:
+        legacy.setattr(fact_book_prefix, "_MAX_PREFIX_PROOF_POSITIONS", 12_500)
+        progress = fact_book_prefix.prepare_next_trade_prefix(session,
+            byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()), **kwargs)
+    assert progress["last_receive_ordinal"] == 2501
+    before = deepcopy((session.chunks, session.holds))
+    assert fact_book_prefix.prepare_next_trade_prefix(session,
+        byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()), **kwargs) is None
+    assert set(_resolve_trade(session, store, prefix, [prefix])[0]) == {"raw-manifest"}
+    assert (session.chunks, session.holds) == before
 
 
 @pytest.mark.parametrize("progress", [0, 1, 3])

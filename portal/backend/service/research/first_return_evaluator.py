@@ -1,6 +1,8 @@
 """Check-owned original-POC outcomes for public first-return events at a fixed clock."""
 from __future__ import annotations
 
+from .event_preparation import EventCandlePreparation
+
 from core.execution_control import execution_checkpoint
 
 from collections import Counter
@@ -103,14 +105,15 @@ class FirstReturnEvaluator(EventFactEvaluator):
         outcomes = dict(inputs["outcomes"])
         config = normalize_first_return(outcomes.get("first_return"), outcomes=outcomes,
             detector=inputs["detector"], statistics=inputs["statistics"], gap_policy=plan.gap_policy)
-        result = dict(super().evaluate(plan=plan, inputs=inputs))
+        preparation = EventCandlePreparation()
+        result = dict(super()._evaluate(plan=plan, inputs=inputs, preparation=preparation))
         if result["status"] == "blocked": return result
         shift = config["sample_lag_bars"] - outcomes["entry_lag_bars"]
         shifted = {**outcomes, "entry_lag_bars": config["sample_lag_bars"],
             "horizons": [h-shift for h in outcomes["horizons"]], "primary_horizon": outcomes["primary_horizon"]-shift,
             "required_horizons": [h-shift for h in outcomes.get("required_horizons", [])]}
-        sampled = super().evaluate(plan=plan, inputs={**inputs, "outcomes": shifted})
-        candles = {_time(c["open_time"]): c for c in _candle_rows(inputs["indicator_evidence"]["candles"], field="indicator_evidence.candles")}
+        sampled = super()._evaluate(plan=plan, inputs={**inputs, "outcomes": shifted}, preparation=preparation)
+        candles = {_time(c["open_time"]): c for c in preparation.rows(inputs["indicator_evidence"]["candles"], field="indicator_evidence.candles")}
         contexts, returns = {}, {}
         for output in inputs["indicator_evidence"]["outputs"]:
             if output.get("output_name") == "first_return_state" and output.get("output_type") == "context":

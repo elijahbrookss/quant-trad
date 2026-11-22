@@ -1,0 +1,9 @@
+[Unit]
+Description=Quant-Trad read-only chrony health sample
+After=chrony.service
+
+[Service]
+Type=oneshot
+User=qtadmin
+ExecStart=/usr/bin/python3 -B /srv/quanttrad/app/scripts/reporting/server_clock_health.py --output-directory /srv/quanttrad/deploy-state/clock-health
+TimeoutStartSec=15

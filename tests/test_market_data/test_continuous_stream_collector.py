@@ -933,6 +933,243 @@ def _captured_l2_frames() -> tuple[bytes, bytes]:
     raise AssertionError("fixture does not contain two BTC-USD Level 2 frames")
 
 
+def test_continuous_level2_empty_snapshot_advances_spool_without_book_facts(
+    tmp_path: Path,
+) -> None:
+    repository = _Level2Repository()
+    collector = ContinuousMarketStructureCollector(repository=repository)
+    claim = _l2_claim(session_id="l2-empty-snapshot-session")
+    states: dict[int, _EpochProjectionState] = {}
+    counters = {
+        "manifests": 0,
+        "quality_events": 0,
+        "book_snapshots": 0,
+        "book_batches": 0,
+        "book_mutations": 0,
+        "book_checkpoints": 0,
+        "book_features": 0,
+    }
+    event_writer = _SessionEventWriter(repository, claim)
+    object_store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    segment_ordinal = 0
+
+    def finalize(
+        raw_frame: bytes,
+        *,
+        connection_epoch: int,
+        receive_ordinal: int,
+        received_at: str,
+        terminal: bool = False,
+        preserve_existing_fact_clocks: bool = False,
+    ) -> tuple[RawStreamRecord, DurableRawSpoolSegment]:
+        nonlocal segment_ordinal
+        segment = DurableRawSpoolSegment(
+            root=tmp_path / "spool",
+            definition_id=claim.definition_id,
+            session_id=claim.session_id,
+            connection_epoch=connection_epoch,
+            segment_ordinal=segment_ordinal,
+        )
+        segment_ordinal += 1
+        message = ProviderRawMessage.build(
+            provider="COINBASE",
+            venue="COINBASE_DIRECT",
+            stream_session_id=claim.session_id,
+            connection_epoch=connection_epoch,
+            receive_ordinal=receive_ordinal,
+            received_at=received_at,
+            raw_frame=raw_frame,
+        )
+        record = RawStreamRecord.from_provider_message(
+            message,
+            definition_id=claim.definition_id,
+            spool_segment_id=segment.spool_segment_id,
+            provider_product_id=claim.provider_product_id,
+            requested_channel="level2",
+            observed_channel="l2_data",
+        )
+        segment.append(record)
+        segment.seal()
+        parser = CoinbaseMessageParser()
+        analyzer = _CaptureAnalyzer(claim, primary_channel="level2")
+        analyzer.observe(
+            record,
+            parser.parse_raw(
+                record.raw_frame,
+                received_at=record.received_at.isoformat(),
+                raw_ref={"raw_record_id": record.raw_record_id},
+            ),
+        )
+        collector._finalize_level2_segment(
+            claim=claim,
+            checkpoint=_SegmentCheckpoint(
+                segment=segment,
+                analysis=analyzer.finalize(),
+                terminal=terminal,
+                terminal_reason=("provider_reconnect" if terminal else None),
+                closing_session_event_id=None,
+            ),
+            object_store=object_store,
+            temporary_root=tmp_path / "tmp",
+            event_writer=event_writer,
+            states=states,
+            counters=counters,
+            preserve_existing_fact_clocks=preserve_existing_fact_clocks,
+        )
+        return record, segment
+
+    snapshot_frame = _captured_l2_frames()[0]
+    finalize(
+        snapshot_frame,
+        connection_epoch=0,
+        receive_ordinal=1,
+        received_at="2026-10-24T11:46:24.912834Z",
+    )
+    assert states[0].book_reducer.lifecycle.value == "valid"
+    features_before_empty = repository.feature_count
+    empty_frame = json.dumps(
+        {
+            "channel": "l2_data",
+            "timestamp": "2026-10-24T11:47:22.103800729Z",
+            "sequence_num": 230,
+            "events": [
+                {
+                    "type": "snapshot",
+                    "product_id": "BTC-USD",
+                    "updates": [],
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    empty_record, empty_segment = finalize(
+        empty_frame,
+        connection_epoch=0,
+        receive_ordinal=2,
+        received_at="2026-10-24T11:47:22.263797Z",
+        terminal=True,
+        preserve_existing_fact_clocks=True,
+    )
+
+    empty_ingest = repository.book_ingests[-1]
+    assert empty_ingest["lifecycle"].value == "invalid"
+    assert empty_ingest["snapshots"] == ()
+    assert empty_ingest["batches"] == ()
+    assert empty_ingest["final_state_hash"] is None
+    assert repository.feature_count == features_before_empty
+    assert any(
+        row.status.value == "closed_invalidated"
+        for row in empty_ingest["validity_versions"]
+    )
+    empty_quality = repository.quality[-1]
+    assert empty_quality["classification"] == "book_invalid"
+    assert empty_quality["raw_record_id"] == empty_record.raw_record_id
+    assert empty_quality["detected_at"] == empty_record.received_at
+    assert empty_quality["evidence"]["cause"] == "provider_empty_l2_snapshot"
+    assert empty_quality["evidence"]["update_count"] == 0
+    assert empty_quality["evidence"]["projection_state"] == (
+        "book_unavailable_awaiting_fresh_snapshot"
+    )
+    assert 0 not in states
+    assert not empty_segment.sealed_path.exists()
+
+    finalize(
+        snapshot_frame,
+        connection_epoch=1,
+        receive_ordinal=1,
+        received_at="2026-10-24T11:48:00Z",
+    )
+    assert states[1].book_reducer.lifecycle.value == "valid"
+    assert repository.book_ingests[-1]["snapshots"]
+    assert repository.feature_count > features_before_empty
+
+
+def test_continuous_level2_malformed_frame_records_decode_error(
+    tmp_path: Path,
+) -> None:
+    repository = _Level2Repository()
+    collector = ContinuousMarketStructureCollector(repository=repository)
+    claim = _l2_claim(session_id="l2-malformed-session")
+    segment = DurableRawSpoolSegment(
+        root=tmp_path / "spool",
+        definition_id=claim.definition_id,
+        session_id=claim.session_id,
+        connection_epoch=0,
+        segment_ordinal=0,
+    )
+    raw_frame = json.dumps(
+        {
+            "channel": "l2_data",
+            "timestamp": "2026-10-24T11:47:22Z",
+            "sequence_num": 230,
+            "events": [
+                {
+                    "type": "snapshot",
+                    "product_id": "BTC-USD",
+                    "updates": {"not": "an-array"},
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    message = ProviderRawMessage.build(
+        provider="COINBASE",
+        venue="COINBASE_DIRECT",
+        stream_session_id=claim.session_id,
+        connection_epoch=0,
+        receive_ordinal=1,
+        received_at="2026-10-24T11:47:22.263797Z",
+        raw_frame=raw_frame,
+    )
+    record = RawStreamRecord.from_provider_message(
+        message,
+        definition_id=claim.definition_id,
+        spool_segment_id=segment.spool_segment_id,
+        provider_product_id=claim.provider_product_id,
+        requested_channel="level2",
+        observed_channel="l2_data",
+    )
+    segment.append(record)
+    segment.seal()
+    events = CoinbaseMessageParser().parse_raw(
+        raw_frame,
+        received_at=record.received_at.isoformat(),
+        raw_ref={"raw_record_id": record.raw_record_id},
+    )
+    analyzer = _CaptureAnalyzer(claim, primary_channel="level2")
+    analyzer.observe(record, events)
+    counters = {
+        "manifests": 0,
+        "quality_events": 0,
+        "book_snapshots": 0,
+        "book_batches": 0,
+        "book_mutations": 0,
+        "book_checkpoints": 0,
+        "book_features": 0,
+    }
+    collector._finalize_level2_segment(
+        claim=claim,
+        checkpoint=_SegmentCheckpoint(
+            segment=segment,
+            analysis=analyzer.finalize(),
+            terminal=False,
+            terminal_reason=None,
+            closing_session_event_id=None,
+        ),
+        object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
+        temporary_root=tmp_path / "tmp",
+        event_writer=_SessionEventWriter(repository, claim),
+        states={},
+        counters=counters,
+    )
+
+    assert events[0].event_kind == "provider_malformed_message"
+    assert repository.book_ingests[-1]["lifecycle"].value == "invalid"
+    assert repository.quality[-1]["classification"] == "decode_error"
+    assert repository.quality[-1]["raw_record_id"] == record.raw_record_id
+    assert not segment.sealed_path.exists()
+
+
 def test_continuous_level2_segments_preserve_state_and_close_restart_gap(
     tmp_path: Path,
 ) -> None:

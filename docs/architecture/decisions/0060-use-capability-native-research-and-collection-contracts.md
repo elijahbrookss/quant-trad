@@ -11,7 +11,6 @@ tags:
   - safety
   - autonomy
 code_paths:
-  - src/research_science/study.py
   - src/research_science/temporal.py
   - src/market_data/stream_enrollment.py
   - portal/backend/service/market/collector_safety.py
@@ -21,6 +20,11 @@ code_paths:
   - tests/contract/test_capability_nomenclature.py
 ---
 # ADR 0060: Use Capability-Native Research and Collection Contracts
+
+The executable StudyDefinition/bundle composition described here is superseded
+by [ADR 0082](0082-separate-historical-custody-from-active-research.md). Collection,
+product and scientific-authority contracts retain their separate meanings.
+
 
 ## Status
 

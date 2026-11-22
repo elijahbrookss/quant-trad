@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 
 from data_providers.utils.ohlcv import interval_to_timedelta
@@ -11,7 +12,106 @@ from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION
 from sqlalchemy import text
 
 from ._shared import _parse_optional_timestamp, db
+from .fact_dependencies import _cold_enabled
 from .fact_storage import canonical_fact_storage_repository
+
+
+_EARLIEST_MARKET_TIME = datetime(1, 1, 2, tzinfo=UTC)
+_LATEST_MARKET_TIME = datetime(9999, 12, 30, tzinfo=UTC)
+
+
+def _candle_projection(fact, **selection):
+    if fact["fact_type"] != CANDLE_FACT_TYPE:
+        raise ValueError(f"market_candle_fact_type_invalid: fact_version_id={fact['id']}")
+    return {
+        **selection, "id": fact["id"], "candle_open_time": fact["observation_time"],
+        **{name: fact["payload"][name] for name in ("open", "high", "low", "close", "volume")},
+        "revision": fact["revision"], "market_commit_seq": fact["market_commit_seq"],
+    }
+
+
+def _cold_candle_series(session, params):
+    match = session.execute(text("""
+        SELECT id FROM market.series
+        WHERE instrument_id=:instrument_id AND fact_type=:fact_type
+          AND contract_version=:contract_version AND timeframe_seconds=:timeframe_seconds
+        ORDER BY id LIMIT 2
+    """), params).scalars().all()
+    if len(match) > 1:
+        raise RuntimeError("market_candle_series_ambiguous")
+    return match[0] if match else None
+
+
+def _cold_candle_rows(session, *, series_id, start, end, commit=None):
+    from .market_data import market_data_repo
+
+    return market_data_repo._iter_canonical_rows_with_session(
+        session, series_id=series_id, start=start, end=end, as_of_commit_seq=commit,
+        known_at_lte=None, include_invalidated=True,
+    )
+
+
+def _candle_chunks(session, *, series_id, start, end, timeframe_seconds):
+    cursor = start
+    span = timedelta(seconds=512 * timeframe_seconds)
+    cold = canonical_fact_storage_repository.cold_history(session)
+    while cursor < end:
+        first = cold.candle_nearest_observation(
+            session, series_id=series_id, start=start, end=end, cursor=cursor,
+            prefer_latest=False, commit=None,
+        )
+        if first is None:
+            return
+        cursor = min(end, first + span)
+        for row in _cold_candle_rows(session, series_id=series_id, start=first, end=cursor):
+            yield _candle_projection(row)
+
+
+def _hydrated_candle_stream(session, sql, params):
+    selected = session.execute(text(sql).execution_options(stream_results=True, yield_per=1000), params).mappings()
+    try:
+        for batch in selected.partitions(1000):
+            yield from _hydrate_candles(session, batch)
+    finally:
+        selected.close()
+
+
+def _cold_candle_page(session, *, series_id, start, end, limit, timeframe_seconds, prefer_latest, commit=None):
+    """Find a bounded chart page across gaps without loading intervening history."""
+    cold = canonical_fact_storage_repository.cold_history(session)
+    results = []
+    cursor = end if prefer_latest else start
+    while len(results) < limit:
+        nearest = cold.candle_nearest_observation(
+            session, series_id=series_id, start=start, end=end, cursor=cursor,
+            prefer_latest=prefer_latest, commit=commit,
+        )
+        if nearest is None:
+            break
+        time_span = timedelta(seconds=timeframe_seconds * (limit - len(results)))
+        if prefer_latest:
+            stop = min(cursor, nearest + timedelta(microseconds=1))
+            begin = max(start, stop - time_span)
+            cursor = begin
+        else:
+            begin = max(cursor, nearest)
+            stop = min(end, begin + time_span)
+            cursor = stop
+        rows = list(_cold_candle_rows(session, series_id=series_id, start=begin, end=stop, commit=commit))
+        if prefer_latest:
+            rows.reverse()
+        results.extend(_candle_projection(row) for row in rows[:limit-len(results)])
+    return results
+
+
+def _chart_candle(row):
+    return {
+        "time": int(row["candle_open_time"].timestamp()),
+        "open": float(row["open"]), "high": float(row["high"]),
+        "low": float(row["low"]), "close": float(row["close"]),
+        "volume": float(row["volume"]) if row.get("volume") is not None else None,
+        "revision": int(row["revision"]), "market_commit_seq": int(row["market_commit_seq"]),
+    }
 
 
 def _hydrate_candles(session, selected: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -19,15 +119,7 @@ def _hydrate_candles(session, selected: Sequence[Mapping[str, Any]]) -> list[dic
     facts = canonical_fact_storage_repository.read_rows_by_ids(session, [row["id"] for row in selected])
     result = []
     for row in selected:
-        fact = facts[row["id"]]
-        if fact["fact_type"] != CANDLE_FACT_TYPE:
-            raise ValueError(f"market_candle_fact_type_invalid: fact_version_id={row['id']}")
-        payload = fact["payload"]
-        result.append({
-            **row, "candle_open_time": fact["observation_time"],
-            **{name: payload[name] for name in ("open", "high", "low", "close", "volume")},
-            "revision": fact["revision"], "market_commit_seq": fact["market_commit_seq"],
-        })
+        result.append(_candle_projection(facts[row["id"]], **row))
     return result
 
 
@@ -73,9 +165,14 @@ def get_candle_storage_summary(
         "end_at": end_at,
     }
     with db.session() as session:
-        selected = session.execute(
-            text(
-                """
+        if _cold_enabled(session):
+            series_id = _cold_candle_series(session, params)
+            candle_rows = _candle_chunks(
+                session, series_id=series_id, start=start_at, end=end_at,
+                timeframe_seconds=timeframe_seconds,
+            ) if series_id is not None else ()
+        else:
+            candle_rows = _hydrated_candle_stream(session, """
                 WITH visible AS (
                     SELECT DISTINCT ON (versions.observation_key)
                         versions.id, versions.observation_time AS candle_open_time
@@ -91,26 +188,22 @@ def get_candle_storage_summary(
                     ORDER BY versions.observation_key, versions.revision DESC
                 )
                 SELECT * FROM visible ORDER BY candle_open_time, id
-                """
-            ).execution_options(stream_results=True, yield_per=1000),
-            params,
-        ).mappings()
+                """, params)
         stats = {"candle_count": 0, "first_candle": None, "last_candle": None,
                  "missing_ohlc_count": 0, "duplicate_count": 0, "gap_count": 0, "missing_count": 0}
         previous_time = None
-        for batch in selected.partitions(1000):
-            for candle in _hydrate_candles(session, batch):
-                candle_time = candle["candle_open_time"]
-                stats["candle_count"] += 1
-                stats["first_candle"] = stats["first_candle"] or candle_time
-                stats["last_candle"] = candle_time
-                stats["missing_ohlc_count"] += any(candle[name] is None for name in ("open", "high", "low", "close"))
-                if previous_time is not None:
-                    elapsed = (candle_time - previous_time).total_seconds()
-                    stats["duplicate_count"] += candle_time == previous_time
-                    stats["gap_count"] += elapsed > timeframe_seconds
-                    stats["missing_count"] += max(int(elapsed // timeframe_seconds) - 1, 0)
-                previous_time = candle_time
+        for candle in candle_rows:
+            candle_time = candle["candle_open_time"]
+            stats["candle_count"] += 1
+            stats["first_candle"] = stats["first_candle"] or candle_time
+            stats["last_candle"] = candle_time
+            stats["missing_ohlc_count"] += any(candle[name] is None for name in ("open", "high", "low", "close"))
+            if previous_time is not None:
+                elapsed = (candle_time - previous_time).total_seconds()
+                stats["duplicate_count"] += candle_time == previous_time
+                stats["gap_count"] += elapsed > timeframe_seconds
+                stats["missing_count"] += max(int(elapsed // timeframe_seconds) - 1, 0)
+            previous_time = candle_time
         available = session.execute(
             text(
                 """
@@ -249,6 +342,16 @@ def list_candles_for_series(
         window_sql = " AND " + window_sql
     order_sql = "DESC" if prefer_latest else "ASC"
     with db.session() as session:
+        if _cold_enabled(session):
+            series_id = _cold_candle_series(session, params)
+            if series_id is None:
+                return []
+            rows = _cold_candle_page(
+                session, series_id=series_id, start=start_at or _EARLIEST_MARKET_TIME,
+                end=end_at or _LATEST_MARKET_TIME, timeframe_seconds=timeframe_seconds,
+                limit=normalized_limit, prefer_latest=prefer_latest,
+            )
+            return sorted((_chart_candle(row) for row in rows), key=lambda row: int(row["time"]))
         rows = session.execute(
             text(
                 f"""
@@ -273,19 +376,7 @@ def list_candles_for_series(
             params,
         ).mappings().all()
         rows = _hydrate_candles(session, rows)
-    normalized = [
-        {
-            "time": int(row["candle_open_time"].timestamp()),
-            "open": float(row["open"]),
-            "high": float(row["high"]),
-            "low": float(row["low"]),
-            "close": float(row["close"]),
-            "volume": float(row["volume"]) if row.get("volume") is not None else None,
-            "revision": int(row["revision"]),
-            "market_commit_seq": int(row["market_commit_seq"]),
-        }
-        for row in rows
-    ]
+    normalized = [_chart_candle(row) for row in rows]
     return sorted(normalized, key=lambda row: int(row["time"]))
 
 
@@ -334,6 +425,21 @@ def list_candles_for_series_windows(
     for offset in range(0, len(normalized_windows), batch_size):
         batch = normalized_windows[offset : offset + batch_size]
         with db.session() as session:
+            if _cold_enabled(session):
+                series_id = _cold_candle_series(session, {
+                    "instrument_id": instrument, "fact_type": CANDLE_FACT_TYPE,
+                    "contract_version": CANDLE_FACT_VERSION, "timeframe_seconds": timeframe_seconds,
+                })
+                if series_id is None:
+                    return results
+                for window in batch:
+                    rows = _cold_candle_page(
+                        session, series_id=series_id, start=datetime.fromisoformat(window["start_at"]),
+                        end=datetime.fromisoformat(window["end_at"]), limit=window["row_limit"],
+                        timeframe_seconds=timeframe_seconds, prefer_latest=False,
+                    )
+                    results[window["window_id"]].extend(_chart_candle(row) for row in rows)
+                continue
             rows = session.execute(
                 text(
                     """
@@ -382,18 +488,7 @@ def list_candles_for_series_windows(
             ).mappings().all()
             rows = _hydrate_candles(session, rows)
         for row in rows:
-            results[str(row["window_id"])].append(
-                {
-                    "time": int(row["candle_open_time"].timestamp()),
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row["volume"]) if row.get("volume") is not None else None,
-                    "revision": int(row["revision"]),
-                    "market_commit_seq": int(row["market_commit_seq"]),
-                }
-            )
+            results[str(row["window_id"])].append(_chart_candle(row))
     return results
 
 
@@ -477,34 +572,22 @@ def read_frozen_dataset_candles(
                 "range_end": frozen["range_end"],
                 "max_commit_seq": int(frozen["max_commit_seq"]),
             }
-        order_sql = "DESC" if prefer_latest else "ASC"
-        rows = session.execute(
-            text(
-                f"""
-                WITH visible AS (
-                    SELECT DISTINCT ON (observation_key)
-                        id, observation_time AS candle_open_time
-                    FROM market.fact_versions
-                    WHERE series_id = :series_id
-                      AND market_commit_seq <= :max_commit_seq
-                      AND observation_time >= :start_at
-                      AND observation_time < :end_at
-                    ORDER BY observation_key, revision DESC
-                )
-                SELECT * FROM visible
-                ORDER BY candle_open_time {order_sql}
-                LIMIT :page_limit
-                """
-            ),
-            {
-                "series_id": int(series_id),
-                "max_commit_seq": int(frozen["max_commit_seq"]),
-                "start_at": effective_start,
-                "end_at": effective_end,
-                "page_limit": normalized_limit + 1,
-            },
-        ).mappings().all()
-        rows = _hydrate_candles(session, rows)
+        if _cold_enabled(session):
+            timeframe = session.execute(text(
+                "SELECT timeframe_seconds FROM market.series WHERE id=:series_id AND fact_type=:fact_type"
+            ), {"series_id": int(series_id), "fact_type": CANDLE_FACT_TYPE}).scalar_one_or_none()
+            if timeframe is None or int(timeframe) <= 0:
+                raise ValueError(f"market_candle_series_invalid: series_id={series_id}")
+            rows = _cold_candle_page(
+                session, series_id=int(series_id), start=effective_start, end=effective_end,
+                timeframe_seconds=int(timeframe), limit=normalized_limit + 1,
+                prefer_latest=prefer_latest, commit=int(frozen["max_commit_seq"]),
+            )
+        else:
+            rows = _legacy_frozen_page(
+                session, series_id=int(series_id), start=effective_start, end=effective_end,
+                limit=normalized_limit + 1, prefer_latest=prefer_latest, commit=int(frozen["max_commit_seq"]),
+            )
 
     has_extra = len(rows) > normalized_limit
     has_more_before, has_more_after = _frozen_dataset_page_flags(
@@ -515,23 +598,7 @@ def read_frozen_dataset_candles(
         has_extra=has_extra,
         prefer_latest=prefer_latest,
     )
-    selected = rows[:normalized_limit]
-    candles = sorted(
-        [
-            {
-                "time": int(row["candle_open_time"].timestamp()),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]) if row.get("volume") is not None else None,
-                "revision": int(row["revision"]),
-                "market_commit_seq": int(row["market_commit_seq"]),
-            }
-            for row in selected
-        ],
-        key=lambda row: int(row["time"]),
-    )
+    candles = sorted((_chart_candle(row) for row in rows[:normalized_limit]), key=lambda row: int(row["time"]))
     return {
         "candles": candles,
         "has_more_before": has_more_before,
@@ -540,6 +607,24 @@ def read_frozen_dataset_candles(
         "range_end": frozen["range_end"],
         "max_commit_seq": int(frozen["max_commit_seq"]),
     }
+
+
+def _legacy_frozen_page(session, *, series_id, start, end, limit, prefer_latest, commit):
+    order_sql = "DESC" if prefer_latest else "ASC"
+    rows = session.execute(text(f"""
+        WITH visible AS (
+            SELECT DISTINCT ON (observation_key) id, observation_time AS candle_open_time
+            FROM market.fact_versions
+            WHERE series_id=:series_id AND market_commit_seq<=:max_commit_seq
+              AND observation_time>=:start_at AND observation_time<:end_at
+            ORDER BY observation_key, revision DESC
+        )
+        SELECT * FROM visible ORDER BY candle_open_time {order_sql} LIMIT :page_limit
+    """), {
+        "series_id": series_id, "max_commit_seq": commit, "start_at": start,
+        "end_at": end, "page_limit": limit,
+    }).mappings().all()
+    return _hydrate_candles(session, rows)
 
 
 __all__ = [

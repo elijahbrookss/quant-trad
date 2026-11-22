@@ -58,6 +58,48 @@ Slippage remains an explicit modeling gap until paper/live fill evidence is
 available for calibration. Runtime must not hide unvalidated slippage
 assumptions inside fee or exit summaries.
 
+Explicit per-instrument simulation fee scenarios may be pinned at backtest start
+and replayed through the resolved execution context. They must not mutate shared
+instrument metadata or apply to paper/live execution, selection or promotion.
+Their rates and provenance are simulation assumptions, not a claim of actual
+account fees. Missing configuration is not permission to assume zero costs.
+
+### Opt-in causal resting backtests
+
+`causal_spot_resting_bar.v1` is restricted to cash-spot FAST backtests with
+resting limit-maker entry, cancel fallback and full-fill assumptions. It uses
+only whole execution bars starting strictly after immutable decision
+availability; an equal-time open is ineligible and consumes no validity. This
+explicit guard interval changes the economic entry question and must be frozen
+in the research specification. It does not alter legacy defaults or paper/live.
+
+The model distinguishes source bar labels from decision and fill clocks. Range
+fills are acknowledged at the eligible bar's availability, without claiming
+sub-bar precision. The recognizing range cannot fill an order. Entry-fill-bar
+risk is adverse-only; favorable targets/trails and holding-bar count start
+later. Subsequent stop tightening applies from a later bar. Per-entry events
+use immutable fill quantity/notional/fee/wallet evidence. Future source clocks,
+pending data gaps and partial entry outcomes fail closed. Full policy and
+compatibility details are in the
+[bar-execution contract](../../architecture/execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md#opt-in-causal-cash-spot-resting-bars).
+
+For the opt-in causal policy, execution availability must equal the interval
+close. A delayed eligible fill bar is rejected before order/position mutation;
+a following normal bar cannot create an exit before a delayed entry. Missing
+intervals while pending or holding also fail closed. MFE/MAE are labeled
+`coarse_bar_bounds_not_realized_path`, not realized intra-trade excursions;
+a stop-first coarse bar does not prove the favorable range occurred while held.
+
+`causal_spot_resting_bar.v2` retains those restrictions and adds instrument-tick
+alignment of newly learned trailing stops: round long candidates down and short
+candidates up, then apply the existing monotonic clamp. The rounding policy is
+pinned in the model artifact. V2 also finalizes the position on the execution
+bar of its last settled target fill, without waiting for another bar. Both
+changes have explicit artifact parameters. It does not change v1 price/closure replay,
+default execution, paper/live behavior, or permit an invalid order or unsettled
+stop to pass. A new model identity is not evidence that report/lifecycle quality
+has been qualified.
+
 ## Execution-Quality Class Contract
 
 QT uses one execution-quality ladder: X0 through X5. No other X-class value is

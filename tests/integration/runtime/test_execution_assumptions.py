@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
+from engines.bot_runtime.adapters import BacktestAdapter
 from engines.bot_runtime.core.execution import SpotExecutionConstraints, SpotExecutionModel
+from engines.bot_runtime.core.domain import Candle, LadderRiskEngine
+from engines.bot_runtime.core.wallet_gateway import SharedWalletGateway
 from engines.bot_runtime.core.execution_assumptions import (
     CONSERVATIVE_BAR_MODEL_VERSION,
+    TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION,
     resolve_execution_assumptions,
 )
+from engines.bot_runtime.core.bar_execution_clock import validate_causal_run_mode
 from engines.bot_runtime.core.execution_intent import ExecutionIntent, LimitParams
 from engines.bot_runtime.core.execution_order import OrderType, build_fill_order
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile
@@ -16,6 +23,7 @@ from portal.backend.service.bots.runtime_control_service import (
     _apply_start_overrides,
     _start_config_hash,
 )
+from tests.helpers.builders.persisted_runtime_harness import _shared_wallet_proxy
 
 
 def _conservative_payload() -> dict:
@@ -61,6 +69,42 @@ def test_economic_manifest_is_deterministic_and_x2() -> None:
     assert left.execution_quality_ceiling == "X2"
     assert left.manifest_hash == right.manifest_hash
     assert left.to_dict()["economic_claim_intent"] == "economic"
+
+
+@pytest.mark.parametrize(("low", "high", "exit_kind"), [(95, 101, "stop"), (99, 112, "target")])
+def test_tick_aligned_market_protection_fills_on_first_eligible_bar(low, high, exit_kind):
+    payload = {**_conservative_payload(), "model_version": TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION}
+    assumptions = resolve_execution_assumptions("exploration", payload)
+    validate_causal_run_mode(assumptions, "backtest", "fast")
+    with pytest.raises(ValueError, match="exploratory fast full-fill backtest"):
+        validate_causal_run_mode(assumptions, "paper", "fast")
+
+    risk = LadderRiskEngine(
+        config={"initial_stop": {"atr_multiplier": 2}, "execution_mode": "market",
+                "take_profit_orders": [{"id": "tp", "ticks": 1000, "size_fraction": 1}]},
+        instrument={"id": "fixture", "symbol": "BTC-USD", "instrument_type": "spot",
+                    "tick_size": .01, "contract_size": 1, "tick_value": .01,
+                    "qty_step": 1, "min_order_size": 1, "base_currency": "BTC", "quote_currency": "USD",
+                    "short_requires_borrow": True},
+        risk_config={"base_risk_per_trade": 4},
+        execution_assumptions=assumptions,
+    )
+    risk.attach_wallet_gateway(SharedWalletGateway(_shared_wallet_proxy()))
+    risk.attach_execution_adapter(BacktestAdapter(
+        tick_size=.01, qty_step=1, min_qty=1, min_notional=0, contract_size=1,
+        short_requires_borrow=True, assumptions=assumptions, execution_context=risk.execution_context,
+    ))
+    start = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    entry = Candle(time=start, open=100.01, high=101, low=99, close=100.01, atr=2)
+    position = risk.maybe_enter(entry, "long")
+    assert position is not None
+    assert position.entry_price == pytest.approx(100.01 * 1.0005)
+    assert position.stop_price == pytest.approx(96.06)
+    assert position.legs[0].target_price == pytest.approx(110.07)
+
+    events = risk.step(Candle(time=start + timedelta(hours=1), open=100, high=high, low=low, close=100, atr=2))
+    assert any(event["type"] == exit_kind for event in events)
+    assert all(event["type"] != "execution_rejected" for event in events)
 
 
 @pytest.mark.parametrize(

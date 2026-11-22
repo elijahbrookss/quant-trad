@@ -183,12 +183,16 @@ def test_bounded_source_query_preserves_the_complete_causal_window(monkeypatch, 
     by_id = {row["id"]: row for row in rows}
     def execute(statement, params):
         sql = str(statement)
-        assert len(json.loads(params["requests"])) <= 128
-        assert "source.market_commit_seq<=requested.root_commit" in sql
-        assert "source.known_at<=requested.known_at" in sql
-        assert json.loads(params["requests"])[0]["known_at"] == root.fact.known_at.isoformat()
+        requests = json.loads(params["requests"])
+        assert len(requests) <= fact_dependencies._CAUSAL_WINDOW_REQUEST_BATCH_ROWS
+        assert "market.read_fact_headers_in_range" in sql
+        assert "source.market_commit_seq<=resolved.root_commit" in sql
+        assert "source.known_at<=resolved.known_at" in sql
+        assert requests[0]["known_at"] == root.fact.known_at.isoformat()
         assert "source.state" not in sql
-        found = [(root.row["id"], row["id"]) for row in rows]
+        found = [(root.row["id"], row["id"], False, 1, row["series_id"],
+                  row["observation_key"], row["revision"]) for row in rows]
+        found.append((None, None, True, 1, None, None, None))
         return SimpleNamespace(all=lambda: found)
     monkeypatch.setattr(fact_dependencies, "read_canonical_dependency_rows", lambda *args, **kwargs: {} if damage == "missing" else by_id)
     kwargs = dict(rows=[root.row], object_store=None, max_rows=1 if damage == "budget" else 10, max_logical_bytes=1024**2)

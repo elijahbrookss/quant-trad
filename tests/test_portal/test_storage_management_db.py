@@ -62,7 +62,8 @@ def test_enrollment_is_idempotent_and_plan_does_not_activate(service):
     assert service.plan(policy=policy(), base_revision=0, request_id="review-1")["id"] == plan["id"]
     assert service.snapshot()["policy"] is None
     assert service.snapshot()["health"] == "unconfigured"
-    assert service.snapshot()["movement"]["state"] == "unconfigured"
+    assert service.snapshot()["movement"]["state"] == "disabled"
+    assert service.snapshot()["movement"]["reason"] == "canonical_cold_authority"
 
 
 def test_request_id_cannot_be_reused_for_different_policy(service):
@@ -216,7 +217,9 @@ def test_dedicated_maintenance_registry_preserves_status_and_conflict_visibility
              {"storage_lifecycle": {"state": "external", "maintenance": {}}})
     snapshot = service.snapshot()
     assert snapshot["health"] == "needs_attention"
-    assert snapshot["backup"]["state"] == snapshot["movement"]["state"] == "blocked"
+    assert snapshot["backup"]["state"] == "blocked"
+    assert snapshot["movement"]["state"] == "disabled"
+    assert snapshot["movement"]["reason"] == "canonical_cold_authority"
     assert snapshot["backup"]["worker_id"] == "maintenance"
     assert snapshot["backup"]["reason"] == "fixture_preserved_failure"
     register("competing-collector", "scheduled_market_fact_collector", context)

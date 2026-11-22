@@ -135,15 +135,16 @@ def test_legacy_history_is_honest(memory):
 def test_check_hashes_reject_without_executing_replay(memory, monkeypatch):
     record, session, items = memory
     items["check"] = {"id": "check", "kind": "research_check", "payload": {}}
-    contracts = (SimpleNamespace(definition_hash="definition", definition_id="event_fact_analysis"), SimpleNamespace(request_hash="request"),
+    contracts = (SimpleNamespace(definition_hash="definition", definition_id="event_fact_analysis", definition_version="4", evaluator_id="event_fact_analysis", evaluator_version="3"), SimpleNamespace(request_hash="request"),
                  SimpleNamespace(plan_hash="plan"),
                  SimpleNamespace(evidence_hash="evidence", evidence_kind="immutable_run_report", input_binding={"run_id": "run"}, code_revision="source"),
                  SimpleNamespace(result_hash="result"))
-    monkeypatch.setattr(service, "_validate_research_check_evidence_payload", lambda _: contracts)
+    monkeypatch.setattr(service, "_validate_research_check_evidence_payload", lambda _, **kwargs: contracts)
     monkeypatch.setattr(service, "replay_research_check", lambda _: pytest.fail("publication must never replay"))
     from portal.backend.service.reports import contract as reports_contract
+    from portal.backend.service.research import execution
     monkeypatch.setattr(reports_contract, "get_run_research_dataset", lambda _: {"retained": True})
-    monkeypatch.setattr(service, "_immutable_run_binding", lambda _: {"run_id": "run"})
+    monkeypatch.setattr(execution, "_immutable_run_binding", lambda _: {"run_id": "run"})
     raw = {"item_id": "check", "kind": "research_check", "role": "contradicts", "result_hash": "result", "evidence_hash": "evidence"}
     resolved = publication.resolve_reference(raw, session)
     assert resolved["result_hash"] == "result"
@@ -151,7 +152,7 @@ def test_check_hashes_reject_without_executing_replay(memory, monkeypatch):
     assert "snapshot" not in resolved
     with pytest.raises(ValueError, match="hash_mismatch"):
         publication.resolve_reference(raw | {"evidence_hash": "wrong"}, session)
-    monkeypatch.setattr(service, "_immutable_run_binding", lambda _: {"run_id": "different"})
+    monkeypatch.setattr(execution, "_immutable_run_binding", lambda _: {"run_id": "different"})
     with pytest.raises(ValueError, match="retained run"):
         publication.resolve_reference(raw, session)
 
@@ -218,11 +219,11 @@ def test_frozen_reference_requires_retained_material_without_replay(memory, monk
     dataset = SimpleNamespace(dataset_id="dataset", dataset_hash=dataset_hash, series=[entry])
     evidence = SimpleNamespace(evidence_hash="evidence", evidence_kind="frozen_market_data",
         input_binding={"dataset_id": "dataset", "dataset_hash": dataset_hash}, code_revision="source")
-    contracts = (SimpleNamespace(definition_hash="definition", definition_id="event_fact_analysis"),
+    contracts = (SimpleNamespace(definition_hash="definition", definition_id="event_fact_analysis", definition_version="4", evaluator_id="event_fact_analysis", evaluator_version="3"),
         SimpleNamespace(request_hash="request"), SimpleNamespace(plan_hash="plan"), evidence,
         SimpleNamespace(result_hash="result"))
     items["check"] = {"id": "check", "kind": "research_check", "payload": {}}
-    monkeypatch.setattr(service, "_validate_research_check_evidence_payload", lambda _: contracts)
+    monkeypatch.setattr(service, "_validate_research_check_evidence_payload", lambda _, **kwargs: contracts)
     monkeypatch.setattr(service, "replay_research_check", lambda _: pytest.fail("publication must not replay"))
     monkeypatch.setattr(market_data_repo, "get_dataset", lambda _: dataset)
     calls = []
