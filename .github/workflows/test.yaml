@@ -718,7 +718,7 @@ jobs:
           baseline_image="qt-archive-generation-baseline:$QT_ARCHIVE_GENERATION_BASELINE_REVISION"
           mkdir "$baseline_root"
           git archive "$QT_ARCHIVE_GENERATION_BASELINE_REVISION" | tar -x -C "$baseline_root"
-          baseline_tree="$(python scripts/provenance/source_tree_hash.py --root "$baseline_root")"
+          baseline_tree="$(python "$baseline_root/scripts/provenance/source_tree_hash.py" --root "$baseline_root")"
           docker build --file "$baseline_root/portal/backend/Dockerfile" --target production \
             --build-arg QT_SOURCE_REVISION="$QT_ARCHIVE_GENERATION_BASELINE_REVISION" \
             --build-arg QT_SOURCE_TREE_HASH="$baseline_tree" \
