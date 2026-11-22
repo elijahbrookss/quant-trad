@@ -531,7 +531,7 @@ os.chown(root,70,70)
        "SELECT coalesce(jsonb_agg(context->'storage_lifecycle'),'[]'::jsonb)::text FROM market.collector_worker_state WHERE worker_role='market_storage_maintenance'"))
      assert len(lifecycle)==1
      maintenance=lifecycle[0].get('maintenance') or {}
-     if 'history_movement' not in maintenance:
+     if (maintenance.get('history_movement') or {}).get('configured') is not True:
       # This old held-v2 operator must stay refused by the final runtime.
       # Qualify the real recovery pair without inventing its retired worker.
       assert not canonical and observed['reason']=='maintenance_starting', observed
