@@ -624,12 +624,11 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         assert host_boundary.load_receipt(state/host_boundary.HOLD)==saved['receipt']
         assert (state/'release.env').read_text()==saved['prior_release']
         recovery_probe=r'''
-import time
+import json,time
 from pathlib import Path
 from portal.backend.db.session import db
 from portal.backend.workers.market_data_collector_health import live_worker_for_host
 from portal.backend.service.storage.recovery_copies import _identity,_snapshot_layout
-from scripts.automation.verify_canonical_recovery_archive import verify_logical_copy
 deadline=time.monotonic()+120
 while True:
     worker=live_worker_for_host()
@@ -646,13 +645,24 @@ with db.session() as session:
     identity,namespace=_identity(session)
     assert recovery['storage_layout']==_snapshot_layout(session)
 root=Path('/qt-history/recovery')/namespace/recovery['generation']
-report=verify_logical_copy(root)
-assert report['database_identity']==identity
-assert report['database_dump_bytes']>0 and report['verified_archive_objects']>0
-print('current_runtime_recovery_and_legacy_refusal_verified')
+print(json.dumps({'database_identity':identity,'generation':recovery['generation'],'root':str(root)}))
 '''
-        assert 'current_runtime_recovery_and_legacy_refusal_verified' in host_boundary.docker(
-            'exec',rows['market-data-collector']['id'],'python','-c',recovery_probe,timeout=150)
+        recovery=json.loads(host_boundary.docker('exec',rows['market-data-collector']['id'],
+            'python','-c',recovery_probe,timeout=150).strip().splitlines()[-1])
+        assert recovery['database_identity']==options['request']['database_identity']
+        # image is the supplied storage-test operator runtime. Verification runs
+        # separately with only its read-only owned-history mount and no network.
+        verified=run(['docker','run','--rm','--pull','never','--network','none','--read-only',
+            '--user','70:70','--cap-drop','ALL','--security-opt','no-new-privileges',
+            '--memory','256m','--memory-swap','256m','--cpus','1','--pids-limit','32',
+            '--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16m',
+            '--mount','type=bind,source='+str(history_root)+',target=/qt-history,readonly',
+            '--entrypoint','/usr/bin/timeout',image,'--signal=TERM','--kill-after=5','60',
+            'python','-B','/app/scripts/automation/verify_canonical_recovery_archive.py',
+            '--logical-copy',recovery['root']],env=env,timeout=90)
+        checked=json.loads(verified.stdout.strip().splitlines()[-1])
+        assert checked['database_identity']==recovery['database_identity']
+        assert checked['database_dump_bytes']>0 and checked['verified_archive_objects']>0
         print(application(_VERIFY,saved['binding']['database_id']).stdout[-400:],flush=True)
         print('PASS: real API, initializer, collector and both portals healthy; current-layout recovery copy verified; retired v2 activation remains refused with unchanged candidate containers, release and durable hold; database and frozen/recent reads preserved',flush=True)
     except Exception:
