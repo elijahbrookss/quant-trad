@@ -7,6 +7,7 @@ import logging
 import socket
 import threading
 from collections import defaultdict
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -57,7 +58,7 @@ def _file_sha256(path: Path) -> str:
 
 
 class MarketStorageLifecycleService:
-    """Plan first, then execute bounded lifecycle work under one global fence."""
+    """Plan bounded raw and canonical work under each owner's existing fence."""
 
     def __init__(
         self,
@@ -102,17 +103,18 @@ class MarketStorageLifecycleService:
         )
         return self._assemble_plan(policy=policy, observed_at=observed_at, canonical=canonical)
 
-    def _assemble_plan(self, *, policy, observed_at, canonical, defer_witness_limits=False):
+    def _assemble_plan(self, *, policy, observed_at, canonical, defer_witness_limits=False,
+                       raw_admitted=True):
         compactions = (
             self._plan_compactions(policy=policy, now=observed_at)
-            if policy.archive_compaction_enabled
+            if raw_admitted and policy.archive_compaction_enabled
             else []
         )
         planning_failures = []
         try:
             archive_expirations = (
                 self._plan_archive_expirations(policy=policy, now=observed_at)
-                if policy.archive_expiration_enabled
+                if raw_admitted and policy.archive_expiration_enabled
                 else []
             )
         except MarketArchiveWitnessLimitExceeded as exc:
@@ -205,31 +207,47 @@ class MarketStorageLifecycleService:
             policy=policy.canonical_retention, storage_root=storage_root,
             after_storage_day=canonical_after_storage_day,
         )
-        with self.lifecycle_repository.lifecycle_lock(owner_id=owner):
-            plan = self._assemble_plan(
-                policy=policy, observed_at=_utc(now or datetime.now(UTC)),
-                canonical=canonical, defer_witness_limits=True,
-            )
-            outcomes.extend(plan["planning_failures"])
-            store = None
-            if any(item["eligible"] for item in [*plan["archive_compactions"], *plan["archive_expirations"]]):
-                store = FilesystemRawArchiveObjectStore(Path(storage_root).expanduser().resolve() / "objects")
-            for item in plan["archive_compactions"]:
-                if item["eligible"]:
-                    outcomes.append(
-                        self._execute_compaction(item=item, store=store)
-                    )
-            for item in plan["archive_expirations"]:
-                if item["eligible"]:
-                    outcomes.append(
-                        self._execute_archive_expiration(item=item, store=store)
-                    )
-            for item in plan["chunk_compressions"]:
-                if item["eligible"]:
-                    outcomes.append(self._execute_chunk_compression(item=item))
-            for item in plan["chunk_expirations"]:
-                if item["eligible"]:
-                    outcomes.append(self._execute_chunk_expiration(item=item))
+        raw_admitted = False
+        with ExitStack() as raw_phase:
+            try:
+                raw_phase.enter_context(self.lifecycle_repository.lifecycle_lock(owner_id=owner))
+            except MarketStorageLifecycleBusyError:
+                # Only refused admission can defer the raw phase. Errors after
+                # entry, including after a mutation or during unlock, still fail.
+                plan = self._assemble_plan(
+                    policy=policy, observed_at=_utc(now or datetime.now(UTC)),
+                    canonical=canonical, raw_admitted=False,
+                )
+                plan["raw_phase"] = {"status": "deferred", "reason": "lifecycle_busy",
+                                     "applied_action_count": 0}
+                outcomes.append({"action": "raw_lifecycle_admission", "status": "deferred",
+                                 "reason": "lifecycle_busy"})
+            else:
+                raw_admitted = True
+                plan = self._assemble_plan(
+                    policy=policy, observed_at=_utc(now or datetime.now(UTC)),
+                    canonical=canonical, defer_witness_limits=True,
+                )
+                outcomes.extend(plan["planning_failures"])
+                store = None
+                if any(item["eligible"] for item in [*plan["archive_compactions"], *plan["archive_expirations"]]):
+                    store = FilesystemRawArchiveObjectStore(Path(storage_root).expanduser().resolve() / "objects")
+                for item in plan["archive_compactions"]:
+                    if item["eligible"]:
+                        outcomes.append(
+                            self._execute_compaction(item=item, store=store)
+                        )
+                for item in plan["archive_expirations"]:
+                    if item["eligible"]:
+                        outcomes.append(
+                            self._execute_archive_expiration(item=item, store=store)
+                        )
+                for item in plan["chunk_compressions"]:
+                    if item["eligible"]:
+                        outcomes.append(self._execute_chunk_compression(item=item))
+                for item in plan["chunk_expirations"]:
+                    if item["eligible"]:
+                        outcomes.append(self._execute_chunk_expiration(item=item))
         # The archive owner takes a SHARED raw-evidence fence and the reclaimer
         # later tries an EXCLUSIVE handoff. Never invoke either while the raw
         # lifecycle connection above still owns its exclusive session lock.
@@ -242,7 +260,7 @@ class MarketStorageLifecycleService:
             )
             outcomes.extend(canonical_run["outcomes"])
         failures = [item for item in outcomes if item.get("status") == "failed"]
-        status = "degraded" if failures else "completed"
+        status = "degraded" if failures else "completed" if raw_admitted else "deferred"
         logger.log(
             logging.ERROR if failures else logging.INFO,
             "market_storage_lifecycle_run_finished | owner_id=%s status=%s "

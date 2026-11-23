@@ -17,6 +17,58 @@ from tests.test_market_data.test_fact_reclamation_db import _prepare
 pytestmark = pytest.mark.db
 
 
+@pytest.mark.parametrize("kind", ["canonical", "legacy", "numeric"])
+def test_verified_cold_material_witness_ignores_locked_legacy_aliases(storage, tmp_path, monkeypatch, kind):
+    from market_data.archive import FilesystemRawArchiveObjectStore
+    from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
+    from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bindings
+    from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
+    from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
+    from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+    from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog
+    from tests.test_market_data.test_fact_derived_retention_db import _archive_day
+
+    day = storage.today - timedelta(days=2)
+    _placement(monkeypatch, day)
+    fact = replace(storage.fact, provenance={
+        "custom_old_key": {"legacy_material_hash": "b" * 64},
+        "numeric_old_key": {"legacy_material_hash": int("7" * 64)},
+    })
+    _ingest(storage, fact)
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    reader = PostgresCanonicalFactStorageRepository(
+        object_store_factory=lambda: store, read_cache_factory=lambda: None,
+    )
+    monkeypatch.setattr(market_data, "canonical_fact_storage_repository", reader)
+    archive = PostgresCanonicalFactArchiveRepository(database=storage.database,
+        object_store=store, temporary_directory=tmp_path / "staging")
+    _archive_day(archive, day)
+    with storage.database.session() as session:
+        identity = session.scalar(text("""
+            SELECT control.system_identifier::text || '/' || db.oid::text
+            FROM pg_control_system() AS control CROSS JOIN pg_database AS db
+            WHERE db.datname=current_database()
+        """))
+        _configure_fixture_catalog(session.connection(), identity, store.root)
+        prepare_cold_dependency_bindings(session.connection())
+        session.execute(text("UPDATE market.fact_storage_state SET layout_version=:layout"),
+                        {"layout": COLD_HISTORY_LAYOUT_VERSION})
+    reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    assert reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)["status"] == "cold_page_admitted"
+    assert reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)["status"] == "partition_reclaimed"
+    material, key = {
+        "canonical": (fact.material_hash, None),
+        "legacy": ("b" * 64, "custom_old_key"),
+        "numeric": ("7" * 64, "numeric_old_key"),
+    }[kind]
+    with storage.database._engine.begin() as blocker:
+        blocker.exec_driver_sql("LOCK TABLE market.fact_archive_material_aliases IN ACCESS EXCLUSIVE MODE")
+        with storage.database.session() as session:
+            session.execute(text("SET LOCAL lock_timeout = '250ms'"))
+            assert reader.material_witness_exists(session, series_ids=[storage.series_id],
+                material_hash=material, evidence_key=key, include_canonical=kind == "canonical")
+
+
 def test_collector_recent_facts_survive_physical_reclamation(storage, tmp_path, monkeypatch):
     monkeypatch.setattr(collector_operations, "db", storage.database)
     day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
