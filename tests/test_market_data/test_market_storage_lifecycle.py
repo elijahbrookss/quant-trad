@@ -311,6 +311,183 @@ def test_canonical_execution_runs_after_raw_exclusive_fence_is_released(tmp_path
     assert observed[0]["execute"] is True and result["outcomes"][0]["reclaimed_bytes"] == 4096
 
 
+@pytest.mark.parametrize("canonical_failed", [False, True])
+def test_raw_admission_busy_defers_without_planning_or_mutation_and_runs_canonical(
+    tmp_path, monkeypatch, canonical_failed,
+):
+    from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+    from portal.backend.service.market import market_storage_lifecycle as module
+    from portal.backend.service.storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
+
+    repository = _LifecycleRepository()
+    service = _service(repository)
+
+    @contextmanager
+    def busy(**_kwargs):
+        raise MarketStorageLifecycleBusyError("raw admission busy")
+        yield
+
+    def raw_forbidden(*_args, **_kwargs):
+        pytest.fail("Raw planning, object admission and mutation require the exclusive fence")
+
+    repository.lifecycle_lock = busy
+    repository.list_compaction_manifests = raw_forbidden
+    repository.list_archive_expiration_candidates = raw_forbidden
+    monkeypatch.setattr(module, "FilesystemRawArchiveObjectStore", raw_forbidden)
+    for name in ("_execute_compaction", "_execute_archive_expiration",
+                 "_execute_chunk_compression", "_execute_chunk_expiration"):
+        monkeypatch.setattr(service, name, raw_forbidden)
+    calls = []
+    canonical_outcome = {"action": "stage_page", "status": "failed" if canonical_failed else "page_acknowledged"}
+
+    def canonical(**kwargs):
+        assert not repository.lock_entered
+        calls.append(kwargs)
+        return {"status": "degraded" if canonical_failed else "completed",
+                "outcomes": [canonical_outcome], "failure_count": int(canonical_failed)}
+
+    service.canonical_executor = SimpleNamespace(run=canonical)
+    policy = MarketStorageLifecyclePolicy(execution_enabled=True,
+        canonical_retention=CanonicalFactRetentionPolicy(execution_enabled=True))
+    result = service.run(policy=policy, execute=True, storage_root=tmp_path)
+    assert len(calls) == 1 and calls[0]["policy"] is policy.canonical_retention
+    assert calls[0]["execute"] is True and calls[0]["storage_root"] == tmp_path
+    assert result["status"] == ("degraded" if canonical_failed else "deferred")
+    assert result["failure_count"] == int(canonical_failed)
+    assert result["plan"]["policy"] == policy.to_dict()
+    assert result["plan"]["raw_phase"] == {
+        "status": "deferred", "reason": "lifecycle_busy", "applied_action_count": 0,
+    }
+    assert result["plan"]["archive_compactions"] == result["plan"]["archive_expirations"] == []
+    assert result["outcomes"] == [
+        {"action": "raw_lifecycle_admission", "status": "deferred", "reason": "lifecycle_busy"},
+        canonical_outcome,
+    ]
+
+
+def test_raw_admission_busy_keeps_disabled_canonical_executor_disabled(tmp_path):
+    from portal.backend.service.storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
+
+    repository = _LifecycleRepository()
+    service = _service(repository)
+
+    @contextmanager
+    def busy(**_kwargs):
+        raise MarketStorageLifecycleBusyError("raw admission busy")
+        yield
+
+    repository.lifecycle_lock = busy
+    service.canonical_executor = SimpleNamespace(run=lambda **_: pytest.fail("Canonical execution is disabled"))
+    result = service.run(policy=MarketStorageLifecyclePolicy(execution_enabled=True), execute=True, storage_root=tmp_path)
+    assert result["status"] == "deferred" and result["failure_count"] == 0
+    assert result["canonical_retention"]["status"] == "disabled"
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, ValueError])
+def test_raw_admission_unrelated_errors_still_propagate(tmp_path, failure_type):
+    repository = _LifecycleRepository()
+    service = _service(repository)
+    failure = failure_type("admission failed")
+
+    @contextmanager
+    def broken(**_kwargs):
+        raise failure
+        yield
+
+    repository.lifecycle_lock = broken
+    service.canonical_executor = SimpleNamespace(run=lambda **_: pytest.fail("Admission failed"))
+    with pytest.raises(failure_type) as caught:
+        service.run(policy=MarketStorageLifecyclePolicy(execution_enabled=True), execute=True, storage_root=tmp_path)
+    assert caught.value is failure
+
+
+@pytest.mark.parametrize("failure_stage", ["planning", "second_action", "unlock"])
+def test_raw_busy_after_admission_still_propagates_even_after_an_applied_action(
+    tmp_path, monkeypatch, failure_stage,
+):
+    from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+    from portal.backend.service.market import market_storage_lifecycle as module
+    from portal.backend.service.storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
+
+    repository = _LifecycleRepository()
+    service = _service(repository)
+    failure = MarketStorageLifecycleBusyError("busy after admission")
+
+    @contextmanager
+    def lock(**_kwargs):
+        repository.lock_entered = True
+        try:
+            yield
+        finally:
+            repository.lock_entered = False
+            if failure_stage == "unlock":
+                raise failure
+
+    repository.lifecycle_lock = lock
+    applied = []
+
+    def plan(**_kwargs):
+        assert repository.lock_entered
+        if failure_stage == "planning":
+            raise failure
+        return {"planning_failures": [], "archive_compactions":
+                [{"eligible": True, "ordinal": n} for n in (1, 2)] if failure_stage == "second_action" else [],
+                "archive_expirations": [], "chunk_compressions": [], "chunk_expirations": []}
+
+    def compaction(*, item, store):
+        assert repository.lock_entered
+        if item["ordinal"] == 2:
+            raise failure
+        applied.append(item["ordinal"])
+        return {"status": "completed"}
+
+    service._assemble_plan = plan
+    service._execute_compaction = compaction
+    monkeypatch.setattr(module, "FilesystemRawArchiveObjectStore", lambda _: object())
+    service.canonical_executor = SimpleNamespace(run=lambda **_: pytest.fail("Raw phase failed"))
+    policy = MarketStorageLifecyclePolicy(execution_enabled=True,
+        canonical_retention=CanonicalFactRetentionPolicy(execution_enabled=True))
+    with pytest.raises(MarketStorageLifecycleBusyError) as caught:
+        service.run(policy=policy, execute=True, storage_root=tmp_path)
+    assert caught.value is failure and not repository.lock_entered
+    assert applied == ([1] if failure_stage == "second_action" else [])
+
+
+@pytest.mark.parametrize("raw_busy", [False, True])
+def test_canonical_busy_is_not_treated_as_raw_admission_busy(tmp_path, raw_busy):
+    from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+    from portal.backend.service.storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
+
+    repository = _LifecycleRepository()
+    service = _service(repository)
+    repository.list_compaction_manifests = lambda **_: []
+    repository.list_archive_expiration_candidates = lambda **_: []
+
+    @contextmanager
+    def lock(**_kwargs):
+        if raw_busy:
+            raise MarketStorageLifecycleBusyError("raw admission busy")
+        repository.lock_entered = True
+        try:
+            yield
+        finally:
+            repository.lock_entered = False
+
+    failure = MarketStorageLifecycleBusyError("canonical busy")
+
+    def canonical(**_kwargs):
+        assert not repository.lock_entered
+        raise failure
+
+    repository.lifecycle_lock = lock
+    service.canonical_executor = SimpleNamespace(run=canonical)
+    policy = MarketStorageLifecyclePolicy(execution_enabled=True,
+        canonical_retention=CanonicalFactRetentionPolicy(execution_enabled=True))
+    with pytest.raises(MarketStorageLifecycleBusyError) as caught:
+        service.run(policy=policy, execute=True, storage_root=tmp_path)
+    assert caught.value is failure
+
+
 def test_exact_canonical_action_invokes_only_selected_canonical_executor(tmp_path):
     from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
 
