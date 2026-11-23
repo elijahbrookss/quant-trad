@@ -4,7 +4,7 @@ from unittest.mock import ANY, MagicMock
 
 import pytest
 
-from portal.backend.service.storage.repos import fact_storage
+from portal.backend.service.storage.repos import cold_history, fact_storage
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 
 
@@ -64,6 +64,7 @@ def test_duplicate_identity_batch_fails_and_closes(monkeypatch):
 
 
 def _witness_fixture(monkeypatch, *, candidate="a", provenance=None, series_id=1):
+    monkeypatch.setattr(cold_history, "cold_layout_active", lambda _session: False)
     storage = PostgresCanonicalFactStorageRepository()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = candidate
@@ -151,3 +152,67 @@ def test_keyed_numeric_witness_keeps_legacy_fallback_and_payload_proof(monkeypat
         material_hash="777", evidence_key="old_key", include_canonical=False)
     assert session.execute.call_count == 2
     read.assert_called_once_with(session, ["a"])
+
+
+@pytest.mark.parametrize(("material", "key", "canonical", "provenance"), [
+    ("canonical", None, True, {}),
+    ("legacy", "custom_old_key", False, {"custom_old_key": {"legacy_material_hash": "legacy"}}),
+    ("777", "numeric_old_key", False, {"numeric_old_key": {"legacy_material_hash": 777}}),
+])
+def test_verified_cold_witness_precedes_exhaustive_legacy_query(monkeypatch, material, key, canonical, provenance):
+    storage, session, row, hot_read = _witness_fixture(monkeypatch, candidate=None, provenance=provenance)
+    monkeypatch.setattr(cold_history, "cold_layout_active", lambda _session: True)
+    cold = MagicMock()
+    cold.material_candidates.return_value = (("a", material),)
+    cold.read_by_ids.return_value = {"a": row}
+    monkeypatch.setattr(storage, "cold_history", lambda _session: cold)
+
+    assert storage.material_witness_exists(session, series_ids=[1], material_hash=material,
+        evidence_key=key, include_canonical=canonical)
+    assert session.execute.call_count == int(key is not None)
+    cold.read_by_ids.assert_called_once_with(session, ["a"])
+    hot_read.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["scope", "material", "checksum"])
+def test_early_cold_hint_still_requires_selected_payload_verification(monkeypatch, failure):
+    storage, session, row, _ = _witness_fixture(monkeypatch, candidate=None)
+    monkeypatch.setattr(cold_history, "cold_layout_active", lambda _session: True)
+    cold = MagicMock()
+    cold.material_candidates.return_value = (("a", "canonical"),)
+    cold.read_by_ids.return_value = {"a": row}
+    if failure == "scope":
+        row["series_id"] = 2
+    elif failure == "material":
+        row["material_hash"] = "other"
+    else:
+        cold.read_by_ids.side_effect = RuntimeError("canonical_archive_checksum_mismatch")
+    monkeypatch.setattr(storage, "cold_history", lambda _session: cold)
+    with pytest.raises(RuntimeError, match={"scope": "scope_mismatch", "material": "locator_mismatch", "checksum": "checksum_mismatch"}[failure]):
+        storage.material_witness_exists(session, series_ids=[1], material_hash="canonical")
+    session.execute.assert_not_called()
+
+
+def test_selected_hot_hint_is_verified_before_cold_lookup(monkeypatch):
+    storage, session, row, _ = _witness_fixture(monkeypatch, provenance={})
+    monkeypatch.setattr(cold_history, "cold_layout_active", lambda _session: True)
+    cold = MagicMock()
+    monkeypatch.setattr(storage, "cold_history", cold)
+    with pytest.raises(RuntimeError, match="alias_mismatch"):
+        storage.material_witness_exists(session, series_ids=[1], material_hash="missing",
+            evidence_key="old_key", include_canonical=False)
+    cold.assert_not_called()
+
+
+@pytest.mark.parametrize("arrives", [False, True])
+def test_negative_legacy_fallback_rechecks_cold_witness(monkeypatch, arrives):
+    storage, session, row, _ = _witness_fixture(monkeypatch, candidate=None)
+    monkeypatch.setattr(cold_history, "cold_layout_active", lambda _session: True)
+    cold = MagicMock()
+    cold.material_candidates.side_effect = [(), (("a", "canonical"),) if arrives else ()]
+    cold.read_by_ids.return_value = {"a": row}
+    monkeypatch.setattr(storage, "cold_history", lambda _session: cold)
+    assert storage.material_witness_exists(session, series_ids=[1], material_hash="canonical") is arrives
+    assert cold.material_candidates.call_count == 2
+    assert session.execute.call_count == 1
+    assert "aliases" in str(session.execute.call_args.args[0])

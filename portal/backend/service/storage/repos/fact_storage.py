@@ -213,6 +213,39 @@ class PostgresCanonicalFactStorageRepository:
             WHERE series_id=ANY(:series_ids) AND material_hash=:material_hash
             UNION ALL
         """ if include_canonical else ""
+
+        def matches(row):
+            if int(row["series_id"]) not in ids:
+                raise RuntimeError(f"canonical_material_source_scope_mismatch: fact_version_id={row['id']}")
+            if include_canonical and row["material_hash"] == material_hash:
+                return True
+            for key, value in row["provenance"].items():
+                if (evidence_key is not None and key != evidence_key) or not isinstance(value, Mapping):
+                    continue
+                legacy_hash = value.get("legacy_material_hash")
+                # PostgreSQL ->> also accepts a numeric JSON legacy witness.
+                # A digits-only SHA can have been retained as an integer; do
+                # not change that historical admission predicate after cooling.
+                if type(legacy_hash) in (str, int) and str(legacy_hash) == material_hash:
+                    return True
+            return False
+
+        def cold_witness_exists():
+            repository = self.cold_history(session)
+            candidates = repository.material_candidates(
+                session, series_ids=ids, material_hashes=[material_hash],
+                evidence_key=evidence_key, include_canonical=include_canonical,
+            )
+            fact_ids = sorted({fact_id for fact_id, _ in candidates})
+            for offset in range(0, len(fact_ids), 128):
+                for fact_id, row in repository.read_by_ids(session, fact_ids[offset:offset + 128]).items():
+                    if not matches(row):
+                        raise RuntimeError(f"cold_fact_material_locator_mismatch: fact_version_id={fact_id}")
+                    return True
+            return False
+
+        from .cold_history import cold_layout_active
+
         # The keyed hot case can use the existing provenance GIN index. Keep
         # the legacy scan below for numeric witnesses, arbitrary keys, and cold
         # aliases; candidate selection still requires payload verification.
@@ -232,6 +265,10 @@ class PostgresCanonicalFactStorageRepository:
                   AND hot.provenance->:evidence_key->>'legacy_material_hash'=:material_hash
                 ORDER BY versions.id LIMIT 1
             """), params).scalar_one_or_none()
+        # An indexed cold witness is sufficient only after its payload verifies.
+        # Check it before the exhaustive legacy query can touch unrelated aliases.
+        if selected is None and cold_layout_active(session) and cold_witness_exists():
+            return True
         if selected is None:
             selected = session.execute(text(f"""
                 SELECT DISTINCT id FROM (
@@ -256,42 +293,15 @@ class PostgresCanonicalFactStorageRepository:
                 ) AS candidates ORDER BY id LIMIT 1
             """), params).scalar_one_or_none()
 
-        def matches(row):
-            if int(row["series_id"]) not in ids:
-                raise RuntimeError(f"canonical_material_source_scope_mismatch: fact_version_id={row['id']}")
-            if include_canonical and row["material_hash"] == material_hash:
-                return True
-            for key, value in row["provenance"].items():
-                if (evidence_key is not None and key != evidence_key) or not isinstance(value, Mapping):
-                    continue
-                legacy_hash = value.get("legacy_material_hash")
-                # PostgreSQL ->> also accepts a numeric JSON legacy witness.
-                # A digits-only SHA can have been retained as an integer; do
-                # not change that historical admission predicate after cooling.
-                if type(legacy_hash) in (str, int) and str(legacy_hash) == material_hash:
-                    return True
-            return False
-
         if selected is not None:
             row = self.read_rows_by_ids(session, [selected])[selected]
             if not matches(row):
                 raise RuntimeError(f"canonical_material_alias_mismatch: fact_version_id={selected} material_hash={material_hash}")
             return True
-        from .cold_history import cold_layout_active
-
+        # READ COMMITTED may observe a hot-to-cold handoff after the first miss.
+        # Requery cold storage after the legacy fallback instead of caching absence.
         if cold_layout_active(session):
-            repository = self.cold_history(session)
-            candidates = repository.material_candidates(
-                session, series_ids=ids, material_hashes=[material_hash],
-                evidence_key=evidence_key, include_canonical=include_canonical,
-            )
-            fact_ids = sorted({fact_id for fact_id, _ in candidates})
-            for offset in range(0, len(fact_ids), 128):
-                for fact_id, row in repository.read_by_ids(session, fact_ids[offset:offset + 128]).items():
-                    if not matches(row):
-                        raise RuntimeError(f"cold_fact_material_locator_mismatch: fact_version_id={fact_id}")
-                    return True
-            return False
+            return cold_witness_exists()
         # Old source admission accepted any object-valued legacy witness, not
         # only the standard per-family key indexed by archive admission. Keep
         # that meaning without a new ingestion policy or an unbounded list.
