@@ -66,6 +66,39 @@ def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-l
                            store=store, raws=raws, manifests=manifests, structures=structures, claim=claim)
 
 
+def test_unbound_record_membership_keeps_all_unexpired_placements_in_order(storage, tmp_path, monkeypatch):
+    from portal.backend.service.storage.repos.fact_lineage import raw_archive_mapping_lookup_statement
+
+    fixture = _raw_trade_fixture(storage, tmp_path, monkeypatch, ordinals=(1, 2, 3))
+    encoded = encode_raw_records_to_parquet(fixture.raws, archive_segment_id="membership-compacted",
+                                           temporary_directory=tmp_path / "compact")
+    ack = fixture.store.put_verified(object_key="membership-compacted.parquet", source_path=encoded.path,
+                                     expected_sha256=encoded.sha256)
+    compacted = fixture.structures.commit_compacted_archive(definition_id=fixture.claim.definition_id,
+        encoded=encoded, acknowledgement=ack, records=fixture.raws, source_manifest_ids=fixture.manifests)
+    first, _, last = fixture.raws
+    expected = {(first.raw_record_id, compacted.manifest_id),
+                (last.raw_record_id, fixture.manifests[-1]), (last.raw_record_id, compacted.manifest_id)}
+    with storage.database.session() as session:
+        market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
+        for target, event_type in ((fixture.manifests[0], "completed"), (fixture.manifests[-1], "planned")):
+            market_storage_lifecycle_repository._append_event_with_session(session,
+                operation_id=f"membership-expiry-{target}", action="archive_expire", event_type=event_type,
+                target_kind="raw_manifest", target_id=target, evidence={"fixture": "record-membership"})
+        statement = raw_archive_mapping_lookup_statement(mode="record", bound=False)
+        params = {"ids": [last.raw_record_id, first.raw_record_id, last.raw_record_id, None, "missing-record"],
+                  "limit": 50_001}
+        rows = session.execute(statement, params).mappings().all()
+        assert {(row["raw_record_id"], row["id"]) for row in rows} == expected
+        assert len(rows) == len(expected), "duplicate requested IDs must not multiply any placement"
+        keys = [(row["raw_record_id"], row["byte_count"], row["id"]) for row in rows]
+        assert keys == sorted(keys)
+        limited = session.execute(statement, {**params, "limit": 2}).mappings().all()
+        assert limited == rows[:2], "the global overflow witness must retain the same ordered prefix"
+        for ids in ([], [None], None):
+            assert session.execute(statement, {"ids": ids, "limit": 50_001}).all() == []
+
+
 def test_trade_prefix_progress_holds_raw_evidence_and_resumes_after_interruption(storage, tmp_path, monkeypatch):
     from market_data.archive import RawArchiveReadLimits
     from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
@@ -511,7 +544,8 @@ def test_raw_position_batch_preserves_exact_scopes_and_bound_placements(storage,
             resolve([changed, *rows[1:]])
 
 
-def test_mixed_raw_witness_queries_keep_book_placement_bounds(storage, tmp_path, monkeypatch):
+@pytest.mark.parametrize("book_witness", ["position", "record"])
+def test_mixed_raw_witness_queries_keep_book_placement_bounds(storage, tmp_path, monkeypatch, book_witness):
     from market_data.archive import encode_raw_records_to_parquet
     from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
     from portal.backend.service.storage.repos import fact_lineage
@@ -534,18 +568,27 @@ def test_mixed_raw_witness_queries_keep_book_placement_bounds(storage, tmp_path,
     book_row = {"id": "mixed-book", "fact_type": "market.bbo", "provenance": {
         "_qt_bbo_evidence": {"source_position": {
             name: getattr(raw_book, name) for name in (*fact_lineage.BOOK_SCOPE_FIELDS, "receive_ordinal")}}}}
+    if book_witness == "record":
+        book_row = {"id": "mixed-book", "fact_type": "market.l2_book",
+            "source_provider": raw_book.provider, "source_venue": raw_book.venue, "received_at": raw_book.received_at,
+            "provenance": {"_qt_l2_evidence": {name: getattr(raw_book, name) for name in
+                ("raw_record_id", *fact_lineage.BOOK_SCOPE_FIELDS, "receive_ordinal")}}}
     bindings = {book_row["id"]: {book.manifests[-1]}}
 
-    def resolve(witnesses, **kwargs):
+    def resolve(witnesses, *, max_mapping_rows=None, **kwargs):
         with storage.database.session() as session:
             market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
             return fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[trade_row, book_row],
                 object_store=trade.store,
                 byte_verifier=ArchiveVerificationBatch(trade.store, limits=ArchiveVerificationLimits()),
-                max_mapping_rows=2, witness_manifest_ids=witnesses, **kwargs)
+                max_mapping_rows=max_mapping_rows or (2 if book_witness == "position" else 3),
+                witness_manifest_ids=witnesses, **kwargs)
 
     with pytest.raises(RuntimeError, match="mapping_budget_exceeded"):
-        resolve(None)
+        resolve(None, max_mapping_rows=2)
+    if book_witness == "record":
+        with pytest.raises(RuntimeError, match="mapping_budget_exceeded"):
+            resolve(bindings, max_mapping_rows=2)
     expected = {trade.manifests[0], book.manifests[-1]}
     assert set(resolve(bindings)) == expected
     assert set(resolve(bindings, bound_manifest_ids=iter(expected))) == expected

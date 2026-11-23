@@ -483,9 +483,8 @@ def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_pa
         (sql, params) for sql, params in session.calls if "positions" in params
     )
     assert "bound_ids" not in record_params, "the trade witness must remain unrestricted"
-    assert "WITH requested_records AS MATERIALIZED" in record_sql
-    assert "JOIN requested_records AS records" in record_sql
-    assert "mappings.raw_record_id = ANY" not in record_sql
+    assert "requested_records" not in record_sql
+    assert "mappings.raw_record_id = ANY(CAST(:ids AS text[]))" in record_sql
     assert position_params["bound_ids"] == ["raw-manifest"]
     assert "WITH requested_positions AS MATERIALIZED" in position_sql
     assert "JOIN requested_positions AS positions" in position_sql

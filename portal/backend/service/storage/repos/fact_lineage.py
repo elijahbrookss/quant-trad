@@ -170,11 +170,11 @@ def raw_archive_mapping_lookup_statement(*, mode: str, bound: bool,
     record_join = ""
     position_join = ""
     if mode == "record":
-        manifest_cte = """WITH requested_records AS MATERIALIZED (
+        if bound:
+            manifest_cte = """WITH requested_records AS MATERIALIZED (
             SELECT DISTINCT requested.raw_record_id
             FROM unnest(CAST(:ids AS text[])) AS requested(raw_record_id)
         )"""
-        if bound:
             # A broad admitted manifest set can contain many unrelated raw
             # records. Seek the leading key of the native (raw_record_id,
             # manifest_id) primary index before intersecting placements. The
@@ -194,10 +194,11 @@ def raw_archive_mapping_lookup_statement(*, mode: str, bound: bool,
             mapping_table = "matched_records"
             manifest_table = "candidate_manifests"
             bound_predicate = ""
+            predicate = "TRUE"
         else:
-            record_join = """JOIN requested_records AS records
-                ON records.raw_record_id=mappings.raw_record_id"""
-        predicate = "TRUE"
+            # Preserve membership without hiding the requested array size
+            # behind DISTINCT estimates; PostgreSQL may batch heap reads.
+            predicate = "mappings.raw_record_id = ANY(CAST(:ids AS text[]))"
     elif mode == "position":
         manifest_cte = f"""WITH requested_positions AS MATERIALIZED (
             SELECT DISTINCT * FROM jsonb_to_recordset(CAST(:positions AS jsonb))
