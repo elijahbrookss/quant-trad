@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import re
 import socket
 import threading
 from collections import defaultdict
@@ -228,6 +230,7 @@ class MarketStorageLifecycleService:
                     policy=policy, observed_at=_utc(now or datetime.now(UTC)),
                     canonical=canonical, defer_witness_limits=True,
                 )
+                plan["raw_phase"] = {"status": "admitted"}
                 outcomes.extend(plan["planning_failures"])
                 store = None
                 if any(item["eligible"] for item in [*plan["archive_compactions"], *plan["archive_expirations"]]):
@@ -844,6 +847,7 @@ class MarketStorageLifecycleSupervisor:
             "state": "disabled" if not self._enabled else "starting",
             "policy": policy.to_dict(),
             "last_run": None,
+            "last_canonical_run": None,
             "last_error": None,
             "current_phase": None,
             "maintenance": {
@@ -934,6 +938,19 @@ class MarketStorageLifecycleSupervisor:
                       "status": "degraded", "plan": {"summary": {}},
                       "outcomes": [], "failure_count": 1, "error": failure}
         phase_durations["canonical_retention"] = max(0.0, monotonic() - retention_started)
+        raw_phase = result.get("plan", {}).get("raw_phase", {})
+        canonical_result = result.get("canonical_retention", {})
+        canonical_summary = self._phase_completed(
+            "canonical_retention", result, phase_durations["canonical_retention"],
+            raw_phase_status=raw_phase.get("status", "not_reported"),
+            raw_phase_reason=raw_phase.get("reason"),
+            canonical_status=canonical_result.get("status", "not_reported"),
+            canonical_stop_reason=canonical_result.get("stop_reason"),
+        )
+        # A due recovery can take hours. Preserve the completed canonical phase
+        # now; last_run continues to mean the whole supervisor pass completed.
+        with self._snapshot_lock:
+            self._snapshot["last_canonical_run"] = canonical_summary
         for key,name,runner,states,cancellation in (
             ("history_movement","history",self.history_runner,
              {"disabled","unconfigured","busy","idle","blocked","completed","cancelled"},
@@ -975,6 +992,7 @@ class MarketStorageLifecycleSupervisor:
                     detail = outcome.get("error") or outcome.get("reason") or outcome["state"]
                     failure = f"{failure}; {name}: {detail}" if failure else f"{name}: {detail}"
             phase_durations[key] = max(0.0, monotonic() - phase_started)
+            self._phase_completed(key, outcome, phase_durations[key])
             phase_results[key] = outcome
             result[key] = outcome
             with self._snapshot_lock:
@@ -1002,10 +1020,33 @@ class MarketStorageLifecycleSupervisor:
                     **phase_results,
                 },
                 "last_error": failure,
+                "last_canonical_run": self._snapshot.get("last_canonical_run"),
                 "current_phase": None,
                 "maintenance": self._snapshot["maintenance"],
             }
         return result
+
+    @staticmethod
+    def _phase_completed(phase, result, seconds, **fields):
+        now = datetime.now(UTC)
+        reason = result.get("reason")
+        if reason is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", str(reason)):
+            reason = "details_withheld"
+        for key in ("raw_phase_reason", "canonical_stop_reason"):
+            if fields.get(key) is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", str(fields[key])):
+                fields[key] = "details_withheld"
+        value = {
+            "schema_version": "qt.storage_maintenance_phase.v1", "phase": phase,
+            "status": result.get("status", result.get("state", "unknown")),
+            "reason": reason, "duration_seconds": seconds,
+            "failure_count": int(result.get("failure_count", 0))
+                + int(result.get("state") in {"failed", "blocked"}),
+            "finished_at": now.isoformat(), "finished_unixtime": now.timestamp(),
+            **fields,
+        }
+        logger.info("storage_maintenance_phase_completed | %s",
+                    json.dumps(value, sort_keys=True, allow_nan=False))
+        return value
 
     def _run(self) -> None:
         with self._snapshot_lock:

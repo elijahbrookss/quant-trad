@@ -23,6 +23,7 @@ from portal.backend.db.cold_history_models import (
     ColdFactPageRecord, ColdFactPageSeriesRecord,
     ColdNormalizationSpecReferenceRecord, cold_page_is_visible, guard_cold_runtime_placement,
 )
+from ..canonical_read_metrics import observe_read, observe_read_iterator
 
 _pages = ColdFactPageRecord.__table__
 _page_series = ColdFactPageSeriesRecord.__table__
@@ -268,6 +269,7 @@ class PostgresColdHistory:
         finally:
             result.close()
 
+    @observe_read_iterator(tier="cold", operation="range")
     def iter_range(self, session, *, series_id, start, end, as_of_commit_seq=None,
                    known_at_lte=None, source_identity_keys=()):
         """Read matching revisions from the catalog's visible, admitted pages."""
@@ -375,6 +377,7 @@ class PostgresColdHistory:
             session, ids, require_all=require_all,
         ).items()}
 
+    @observe_read(tier="cold", operation="identity")
     def read_by_ids(self, session, ids: Sequence[str], *, require_all=True):
         locations, witnesses = {}, {}
         for claim in self._location_rows(session, ids, require_all=require_all):

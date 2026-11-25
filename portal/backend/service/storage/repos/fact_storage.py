@@ -21,6 +21,7 @@ from market_data.canonical_storage import verify_archived_envelope
 from market_data.cold_history import ColdHistoryReader
 from market_data.fact_archive import CanonicalArchiveReadPage, FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
 from .fact_archive_generation import material_alias_projection
+from ..canonical_read_metrics import observe_read
 
 from market_data.fact_registry import (
     NORMALIZED_FACT_VERSION, build_normalized_fact_payload_schema,
@@ -322,6 +323,7 @@ class PostgresCanonicalFactStorageRepository:
                     return True
         return False
 
+    @observe_read(tier="canonical", operation="identity")
     def read_rows_by_ids(self, session, fact_ids: Sequence[str], *,
                          _decoded_page: CanonicalArchiveReadPage | None = None) -> dict[str, dict[str, Any]]:
         """Hydrate an already selected immutable identity set in bounded SQL batches."""
@@ -408,6 +410,7 @@ class PostgresCanonicalFactStorageRepository:
         return result
 
     @measured_execution("hydration")
+    @observe_read(tier="hot", operation="hydration")
     def hydrate_rows(self, session, rows: Sequence[Mapping[str, Any]], *,
                      _decoded_page: CanonicalArchiveReadPage | None = None) -> list[dict[str, Any]]:
         """Preserve SQL order and validate every cold page before supplying payloads.

@@ -210,7 +210,8 @@ def _worker_phase(workers: list[dict[str, Any]], *, now: datetime) -> dict[str, 
                     "worker_id": worker.get("worker_id"),
                     "heartbeat_at": heartbeat.isoformat()}
         return {"state": "running", "worker_id": worker.get("worker_id"),
-                "heartbeat_at": heartbeat.isoformat(), **phase}
+                "heartbeat_at": heartbeat.isoformat(),
+                "last_canonical_run": lifecycle.get("last_canonical_run"), **phase}
     return {"state": "idle", "worker_id": worker.get("worker_id"),
             "heartbeat_at": heartbeat.isoformat(), "last_run": lifecycle.get("last_run")}
 

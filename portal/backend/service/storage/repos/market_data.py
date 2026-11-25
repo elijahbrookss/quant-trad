@@ -34,6 +34,7 @@ from market_data.canonical_storage import (
     source_from_storage_row as _canonical_source,
 )
 from market_data.cold_history import select_fact_rows
+from ..canonical_read_metrics import observe_read_iterator
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     FUNDING_RATE_FACT_TYPE,
@@ -3105,6 +3106,7 @@ class PostgresMarketDataRepository:
         return list(PostgresMarketDataRepository._iter_canonical_rows_with_session(session, **selection))
 
     @staticmethod
+    @observe_read_iterator(tier="canonical", operation="range")
     def _iter_canonical_rows_with_session(
         session,
         *,

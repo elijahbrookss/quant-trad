@@ -1857,8 +1857,9 @@ class PostgresCanonicalFactArchiveRepository:
             timings=timings, phase="transaction_total", day=day, page=page,
             seconds=perf_counter() - transaction_started, outcome="completed",
         )
-        logger.info("canonical_archive_page_verified | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s verification_hash=%s",
-                    day, page["page_ordinal"], manifest.manifest_id, manifest.row_count, receipt["verification_hash"])
+        logger.info("canonical_archive_page_verified | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s bytes=%s verification_hash=%s",
+                    day, page["page_ordinal"], manifest.manifest_id, manifest.row_count,
+                    manifest.byte_count, receipt["verification_hash"])
         return {"storage_day": day, "status": "page_verified", "page_ordinal": page["page_ordinal"],
                 "manifest_id": manifest.manifest_id, "verification_hash": receipt["verification_hash"],
                 "phase_seconds": {name: round(seconds, 6) for name, seconds in timings.items()}}

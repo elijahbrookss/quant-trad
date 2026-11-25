@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from threading import Event
+import json
+import logging
 
 import pytest
 
@@ -74,3 +76,17 @@ def test_capacity_sampler_starts_immediately_and_stops_cleanly() -> None:
     sampler.start()
     assert sampled.wait(timeout=2.0)
     sampler.stop(timeout_s=2.0)
+
+
+def test_storage_metrics_reuse_existing_capacity_cadence_and_structured_logs(caplog):
+    data = {"operating": {"schema_version": "qt.storage_operating_snapshot.v1",
+        "state": "partial", "backlog_rows": None, "published_rows_window": 10},
+        "allocation": [{"family": "raw_custody_lookup", "tablespace": "pg_default", "allocated_bytes": 100}]}
+    sampler = DatabaseCapacitySampler(sample_fn=lambda **kwargs: {"sampled": True, "storage_metrics": data}, enabled=True)
+    with caplog.at_level(logging.INFO):
+        sampler.sample_once(now=datetime(2026, 8, 4, 12, 7, 43, tzinfo=UTC))
+    snapshots = [json.loads(row.message.split(" | ", 1)[1]) for row in caplog.records
+                 if row.message.startswith("storage_operating_snapshot | ")]
+    assert snapshots == [data["operating"]]
+    assert snapshots[0]["backlog_rows"] is None
+    assert sum(row.message.startswith("storage_relation_allocation_snapshot | ") for row in caplog.records) == 1

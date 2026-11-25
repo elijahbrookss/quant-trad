@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -90,6 +91,13 @@ class DatabaseCapacitySampler:
                 result.get("retention_rows_deleted"),
                 float(result.get("sample_query_ms") or 0.0),
             )
+            metrics = result.get("storage_metrics")
+            if isinstance(metrics, dict):
+                logger.info("storage_operating_snapshot | %s",
+                            json.dumps(metrics["operating"], sort_keys=True, allow_nan=False))
+                for allocation in metrics["allocation"]:
+                    logger.info("storage_relation_allocation_snapshot | %s",
+                                json.dumps(allocation, sort_keys=True, allow_nan=False))
         else:
             logger.debug(
                 "database_capacity_sample_skipped | sampled_at=%s reason=%s",

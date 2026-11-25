@@ -27,6 +27,7 @@ from portal.backend.db.storage_target_models import (
 )
 from portal.backend.service.storage import retention_observability as module
 from portal.backend.service.storage_management import StorageManagementService
+from portal.backend.service.storage.repos.capacity import sample_storage_operating_metrics
 from tests.test_market_data.migration_test_support import fresh_migration_database
 
 
@@ -132,6 +133,44 @@ def _snapshot(session, policy=None, *, sampled_at=None):
         workers=[],
         sampled_at=sampled_at,
     )
+
+
+def test_operating_sample_counts_committed_flows_and_excludes_initial_retired_cohorts(postgres):
+    engine, _ = postgres
+    now = datetime.now(UTC)
+    initial, sealed, opened, retired = [(now-timedelta(days=day)).date() for day in (90, 89, 88, 87)]
+    ColdFactRetiredDayRecord.__table__.create(engine)
+    with Session(engine) as session, session.begin():
+        session.add(StoragePolicyRecord(id=1, revision=4, policy=_policy(recent_days=14)))
+        session.add_all([
+            MarketFactRetentionPartitionRecord(storage_day=initial, state="sealed", expected_rows=100,
+                source_bytes=1000, sealed_at=now-timedelta(hours=1)),
+            MarketFactRetentionPartitionRecord(storage_day=sealed, state="sealed", expected_rows=20,
+                source_bytes=200, sealed_at=now-timedelta(hours=1)),
+            MarketFactRetentionPartitionRecord(storage_day=opened, state="open"),
+            MarketFactRetentionPartitionRecord(storage_day=retired, state="reclaimed", expected_rows=30,
+                source_bytes=300, sealed_at=now-timedelta(hours=1), verified_at=now-timedelta(minutes=3),
+                manifest_set_hash=HASH_A, reclaimed_at=now-timedelta(minutes=1), reclaimed_bytes=280),
+            ColdFactRetiredDayRecord(storage_day=initial, handoff_kind="initial", row_count=100,
+                manifest_set_hash=HASH_A, protected_dataset_ranges=0, reclaimed_header_bytes=2000),
+        ])
+        session.flush()
+        manifest = _manifest(sealed, ordinal=0, byte_count=80, acknowledged_at=now-timedelta(minutes=2))
+        session.add(manifest)
+        session.flush()
+        session.add(MarketFactArchiveVerificationRecord(manifest_id=manifest.id,
+            verifier_version="market.canonical_archive_verification.v12", manifest_hash=HASH_B,
+            catalog_hash=HASH_C, verification_hash=HASH_A, verified_at=now-timedelta(minutes=1)))
+    result = sample_storage_operating_metrics(sampled_at=now, database=_Database(engine))
+    metrics = result["operating"]
+    assert metrics["state"] == "partial" and metrics["unknown_cohorts"] == 1
+    assert metrics["eligible_cohorts"] == 2 and metrics["known_backlog_rows"] == 10
+    assert metrics["backlog_rows"] is None and metrics["backlog_source_bytes"] is None
+    assert (metrics["published_rows_window"], metrics["published_bytes_window"]) == (10, 80)
+    assert (metrics["verified_rows_window"], metrics["verified_bytes_window"]) == (10, 80)
+    assert (metrics["retired_rows_window"], metrics["retired_relation_bytes_window"]) == (30, 280)
+    assert result["allocation"] and all(row["state"] == "ready" for row in result["allocation"])
+    json.dumps(result, allow_nan=False)
 
 
 def test_projection_executes_read_only_against_empty_real_schema_and_keeps_timeouts(postgres):

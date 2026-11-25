@@ -1,5 +1,7 @@
 """Recovery shares the existing loop but remains independent of retention failure."""
 from threading import Event
+import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +31,44 @@ def test_recovery_runs_after_retention_releases_its_context():
     assert events==["retention","released","recovery"]
     assert result["local_recovery"]["generation"]=="saved"
     assert worker.snapshot()["last_run"]["local_recovery"]==result["local_recovery"]
+
+
+def test_completed_canonical_phase_is_visible_during_long_recovery(caplog):
+    def retention(**kwargs):
+        return {"status": "deferred", "plan": {"summary": {},
+            "raw_phase": {"status": "deferred", "reason": "lifecycle_busy"}},
+            "failure_count": 0, "canonical_retention": {"status": "bounded", "stop_reason": "time_budget"}}
+    def recovery(**kwargs):
+        current = worker.snapshot()
+        assert current["last_run"] is None
+        assert current["current_phase"]["name"] == "local_recovery"
+        phase = current["last_canonical_run"]
+        assert phase["status"] == "deferred" and phase["failure_count"] == 0
+        assert phase["raw_phase_status"] == "deferred" and phase["raw_phase_reason"] == "lifecycle_busy"
+        assert phase["canonical_status"] == "bounded" and phase["canonical_stop_reason"] == "time_budget"
+        return {"state": "not_due"}
+    worker = MarketStorageLifecycleSupervisor(policy=MarketStorageLifecyclePolicy(),
+        service=SimpleNamespace(run=retention), recovery_runner=recovery)
+    with caplog.at_level(logging.INFO):
+        worker.run_once()
+    phases = [json.loads(record.message.split(" | ", 1)[1]) for record in caplog.records
+              if record.message.startswith("storage_maintenance_phase_completed | ")]
+    assert [phase["phase"] for phase in phases] == ["canonical_retention", "local_recovery"]
+    assert all(phase["duration_seconds"] >= 0 for phase in phases)
+    assert worker.snapshot()["last_canonical_run"] == phases[0]
+
+
+def test_failed_phase_summary_never_claims_canonical_success_or_exports_error_text(caplog):
+    def retention(**kwargs):
+        raise RuntimeError("private diagnostic detail")
+    worker = MarketStorageLifecycleSupervisor(policy=MarketStorageLifecyclePolicy(),
+        service=SimpleNamespace(run=retention), recovery_runner=lambda **kwargs: {"state": "not_due"})
+    with caplog.at_level(logging.INFO):
+        worker.run_once()
+    phase = worker.snapshot()["last_canonical_run"]
+    assert phase["status"] == "degraded" and phase["failure_count"] == 1
+    assert phase["canonical_status"] == "not_reported"
+    assert "private" not in json.dumps(phase)
 
 
 @pytest.mark.parametrize("busy",[False,True])
