@@ -188,6 +188,9 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
         database_key, archive_key = _keys(incremental, self.target_root)
         self.env = {
             "PATH": os.defpath, "LC_ALL": "C", "HOME": str(self.root),
+            # Go's GC target is soft; the worker's cgroup remains the hard limit.
+            # Leave room for Python, native buffers and other non-Go allocations.
+            "GOMEMLIMIT": "4GiB", "GOMAXPROCS": "2",
             "PGBACKREST_REPO1_CIPHER_PASS": database_key,
             "RESTIC_PASSWORD": archive_key,
             # Authentication derives only from the already-open PG_DSN.

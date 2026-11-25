@@ -178,3 +178,347 @@ groups:
           owner: qt-infra
           severity: critical
         isPaused: false
+
+  - orgId: 1
+    name: Storage closeout
+    folder: Quant Trad
+    interval: 1m
+    rules:
+    - uid: qt-ssd-operating-warning
+      title: SSD approaching normal operating ceiling
+      condition: C
+      data:
+      - refId: A
+        relativeTimeRange:
+          from: 900
+          to: 0
+        datasourceUid: quanttrad-loki
+        model:
+          datasource:
+            type: loki
+            uid: quanttrad-loki
+          editorMode: code
+          queryType: instant
+          instant: true
+          expr: max(max_over_time({compose_service="docker-stats"} | json | sample_kind="filesystem" | physical_host_visible="true"
+            | resource_id="docker-engine-storage" | keep used_percent | unwrap used_percent | __error__="" [2m]))
+          refId: A
+      - refId: C
+        relativeTimeRange:
+          from: 600
+          to: 0
+        datasourceUid: __expr__
+        model:
+          datasource:
+            type: __expr__
+            uid: __expr__
+          type: math
+          expression: ($A >= 60) && ($A < 65)
+          refId: C
+      noDataState: Alerting
+      execErrState: Alerting
+      for: 5m
+      annotations:
+        summary: SSD usage is at least 60%; normal operating ceiling is 65%.
+        first_action: Inspect the physical SSD trend, eligible backlog and research admission. Preserve verified retention
+          guards.
+        recovery: Physical SSD use remains below 60%.
+      labels:
+        component: storage
+        owner: qt-infra
+        severity: warning
+      isPaused: false
+    - uid: qt-ssd-operating-ceiling
+      title: SSD normal operating ceiling exceeded
+      condition: C
+      data:
+      - refId: A
+        relativeTimeRange:
+          from: 900
+          to: 0
+        datasourceUid: quanttrad-loki
+        model:
+          datasource:
+            type: loki
+            uid: quanttrad-loki
+          editorMode: code
+          queryType: instant
+          instant: true
+          expr: max(max_over_time({compose_service="docker-stats"} | json | sample_kind="filesystem" | physical_host_visible="true"
+            | resource_id="docker-engine-storage" | keep used_percent | unwrap used_percent | __error__="" [2m]))
+          refId: A
+      - refId: C
+        relativeTimeRange:
+          from: 600
+          to: 0
+        datasourceUid: __expr__
+        model:
+          datasource:
+            type: __expr__
+            uid: __expr__
+          type: math
+          expression: ($A >= 65) && ($A < 70)
+          refId: C
+      noDataState: Alerting
+      execErrState: Alerting
+      for: 5m
+      annotations:
+        summary: SSD usage exceeded the 65% normal operating ceiling.
+        first_action: Pause nonessential acquisition and inspect archival/retirement progress. Do not delete unverified
+          history.
+        recovery: Physical SSD use remains below 65%, or existing higher-severity alerts take over.
+      labels:
+        component: storage
+        owner: qt-infra
+        severity: critical
+      isPaused: false
+    - uid: qt-archive-stalled
+      title: Canonical archive progress stalled
+      condition: C
+      data:
+      - refId: A
+        relativeTimeRange:
+          from: 900
+          to: 0
+        datasourceUid: quanttrad-loki
+        model:
+          datasource:
+            type: loki
+            uid: quanttrad-loki
+          editorMode: code
+          queryType: instant
+          instant: true
+          expr: max(last_over_time({compose_service="backend"} |= "storage_operating_snapshot |" | pattern "<_>storage_operating_snapshot
+            | <payload>" | line_format "{{.payload}}" | json | keep known_backlog_rows | unwrap known_backlog_rows
+            | __error__="" [15m]))
+          refId: A
+      - refId: B
+        relativeTimeRange:
+          from: 900
+          to: 0
+        datasourceUid: quanttrad-loki
+        model:
+          datasource:
+            type: loki
+            uid: quanttrad-loki
+          editorMode: code
+          queryType: instant
+          instant: true
+          expr: max(last_over_time({compose_service="backend"} |= "storage_operating_snapshot |" | pattern "<_>storage_operating_snapshot
+            | <payload>" | line_format "{{.payload}}" | json | keep last_publication_unixtime | unwrap last_publication_unixtime
+            | __error__="" [15m]))
+          refId: B
+      - refId: T
+        relativeTimeRange:
+          from: 600
+          to: 0
+        datasourceUid: quanttrad-postgres
+        model:
+          datasource:
+            type: grafana-postgresql-datasource
+            uid: quanttrad-postgres
+          editorMode: code
+          format: table
+          rawQuery: true
+          rawSql: SELECT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::double precision AS value
+      - refId: C
+        relativeTimeRange:
+          from: 600
+          to: 0
+        datasourceUid: __expr__
+        model:
+          datasource:
+            type: __expr__
+            uid: __expr__
+          type: math
+          expression: ($A > 0) && (($T - $B) > 1800)
+          refId: C
+      noDataState: Alerting
+      execErrState: Alerting
+      for: 10m
+      annotations:
+        summary: Eligible archive work exists without recent completed progress, or required evidence is unavailable.
+        first_action: Inspect current maintenance phase, bounded blocked reason and last completed recovery. Copied
+          bytes are not SSD reclaim.
+        recovery: Eligible work drains or a new durable completion timestamp is observed.
+      labels:
+        component: storage
+        owner: qt-infra
+        severity: warning
+      isPaused: false
+    - uid: qt-retirement-stalled
+      title: Canonical retirement progress stalled
+      condition: C
+      data:
+      - refId: A
+        relativeTimeRange:
+          from: 900
+          to: 0
+        datasourceUid: quanttrad-loki
+        model:
+          datasource:
+            type: loki
+            uid: quanttrad-loki
+          editorMode: code
+          queryType: instant
+          instant: true
+          expr: max(last_over_time({compose_service="backend"} |= "storage_operating_snapshot |" | pattern "<_>storage_operating_snapshot
+            | <payload>" | line_format "{{.payload}}" | json | keep retirement_pending_cohorts | unwrap retirement_pending_cohorts
+            | __error__="" [15m]))
+          refId: A
+      - refId: B
+        relativeTimeRange:
+          from: 900
+          to: 0
+        datasourceUid: quanttrad-loki
+        model:
+          datasource:
+            type: loki
+            uid: quanttrad-loki
+          editorMode: code
+          queryType: instant
+          instant: true
+          expr: max(last_over_time({compose_service="backend"} |= "storage_operating_snapshot |" | pattern "<_>storage_operating_snapshot
+            | <payload>" | line_format "{{.payload}}" | json | keep last_retirement_unixtime | unwrap last_retirement_unixtime
+            | __error__="" [15m]))
+          refId: B
+      - refId: T
+        relativeTimeRange:
+          from: 600
+          to: 0
+        datasourceUid: quanttrad-postgres
+        model:
+          datasource:
+            type: grafana-postgresql-datasource
+            uid: quanttrad-postgres
+          editorMode: code
+          format: table
+          rawQuery: true
+          rawSql: SELECT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::double precision AS value
+      - refId: C
+        relativeTimeRange:
+          from: 600
+          to: 0
+        datasourceUid: __expr__
+        model:
+          datasource:
+            type: __expr__
+            uid: __expr__
+          type: math
+          expression: ($A > 0) && (($T - $B) > 3600)
+          refId: C
+      noDataState: Alerting
+      execErrState: Alerting
+      for: 10m
+      annotations:
+        summary: Eligible retirement work exists without recent completed progress, or required evidence is unavailable.
+        first_action: Inspect current maintenance phase, bounded blocked reason and last completed recovery. Copied
+          bytes are not SSD reclaim.
+        recovery: Eligible work drains or a new durable completion timestamp is observed.
+      labels:
+        component: storage
+        owner: qt-infra
+        severity: warning
+      isPaused: false
+    - uid: qt-recovery-freshness
+      title: Completed paired recovery point stale
+      condition: C
+      data:
+      - refId: A
+        relativeTimeRange:
+          from: 90000
+          to: 0
+        datasourceUid: quanttrad-loki
+        model:
+          datasource:
+            type: loki
+            uid: quanttrad-loki
+          editorMode: code
+          queryType: instant
+          instant: true
+          expr: max(last_over_time({compose_service="storage-maintenance"} |= "storage_recovery_snapshot |" | pattern
+            "<_>storage_recovery_snapshot | <payload>" | line_format "{{.payload}}" | json | state="known" | keep
+            last_completed_unixtime | unwrap last_completed_unixtime | __error__="" [25h]))
+          refId: A
+      - refId: B
+        relativeTimeRange:
+          from: 600
+          to: 0
+        datasourceUid: quanttrad-postgres
+        model:
+          datasource:
+            type: grafana-postgresql-datasource
+            uid: quanttrad-postgres
+          editorMode: code
+          format: table
+          rawQuery: true
+          rawSql: SELECT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::double precision AS value
+      - refId: C
+        relativeTimeRange:
+          from: 600
+          to: 0
+        datasourceUid: __expr__
+        model:
+          datasource:
+            type: __expr__
+            uid: __expr__
+          type: math
+          expression: ($B - $A) > 90000
+          refId: C
+      noDataState: Alerting
+      execErrState: Alerting
+      for: 10m
+      annotations:
+        summary: Last validated completed paired recovery point is older than 25 hours, or evidence is unavailable.
+        first_action: Inspect local_recovery phase and failure code. Same-HDD copies provide rollback protection,
+          not independent disaster recovery.
+        recovery: A validated completed paired recovery point is less than 25 hours old.
+      labels:
+        component: storage
+        owner: qt-infra
+        severity: warning
+      isPaused: false
+    - uid: qt-collection-publication-failures
+      title: Repeated collection or acquisition failures
+      condition: C
+      data:
+      - refId: A
+        relativeTimeRange:
+          from: 900
+          to: 0
+        datasourceUid: quanttrad-loki
+        model:
+          datasource:
+            type: loki
+            uid: quanttrad-loki
+          editorMode: code
+          queryType: instant
+          instant: true
+          expr: sum(count_over_time({compose_service=~"market-data-collector|backend"} |~ "continuous_collector_task_failed|continuous_collector_supervisor_failed|continuous_collector_connection_failed|market_data_collection_failed"
+            [5m])) or vector(0)
+          refId: A
+      - refId: C
+        relativeTimeRange:
+          from: 600
+          to: 0
+        datasourceUid: __expr__
+        model:
+          datasource:
+            type: __expr__
+            uid: __expr__
+          type: math
+          expression: $A > 3
+          refId: C
+      noDataState: OK
+      execErrState: Alerting
+      for: 5m
+      annotations:
+        summary: Repeated collection/acquisition errors can delay canonical publication.
+        first_action: Inspect the existing collector fleet, publication lag, outstanding gaps and acquisition jobs.
+          Existing safety-latch and telemetry-missing rules remain authoritative.
+        recovery: Collection/acquisition failures stop recurring.
+      labels:
+        component: storage
+        owner: qt-infra
+        severity: warning
+      isPaused: false

@@ -31,6 +31,10 @@ from portal.backend.service.research.async_dispatch import (
     JOB_TYPE_RESEARCH_CHECK_SWEEP,
 )
 from portal.backend.service.research.execution_limits import research_execution_limits, _global_admission
+from portal.backend.service.observability_exporter import (
+    start_observability_exporter,
+    stop_observability_exporter,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +49,19 @@ def _configure_logging() -> None:
         level=_SETTINGS.logging.level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+
+
+def _lower_process_priority() -> None:
+    nice = getattr(os, "nice", None)
+    if nice is None:
+        logger.warning("research_worker_priority_unavailable | reason=os_nice_unsupported")
+        return
+    try:
+        applied = nice(10)
+    except OSError as exc:
+        logger.warning("research_worker_priority_unavailable | reason=%s", type(exc).__name__)
+        return
+    logger.info("research_worker_priority_applied | nice=%s", applied)
 
 
 def _on_signal(signum: int, _frame: Any) -> None:
@@ -108,15 +125,13 @@ def execute_claimed_research_job(job: ClaimedJob) -> Dict[str, Any]:
 
 def main() -> int:
     _configure_logging()
+    _lower_process_priority()
     ensure_builtin_overlays_registered()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
     worker_id, partition_index, partition_total = _worker_identity()
-    idle_sleep = float(_RESEARCH_WORKER_SETTINGS.idle_sleep_seconds)
-    idle_sleep_max = max(float(_RESEARCH_WORKER_SETTINGS.idle_sleep_max_seconds), idle_sleep)
-    current_idle_sleep = idle_sleep
     db_wait_timeout = _RESEARCH_WORKER_SETTINGS.db_wait_timeout_seconds
 
     if not wait_for_database_ready(timeout_seconds=db_wait_timeout, poll_interval_seconds=0.5):
@@ -127,6 +142,18 @@ def main() -> int:
         )
         return 2
 
+    start_observability_exporter()
+    try:
+        return _run_worker(worker_id=worker_id, partition_index=partition_index, partition_total=partition_total)
+    finally:
+        # The existing exporter drains pending metrics/rollups on stop.
+        stop_observability_exporter()
+
+
+def _run_worker(*, worker_id: str, partition_index: int, partition_total: int) -> int:
+    idle_sleep = float(_RESEARCH_WORKER_SETTINGS.idle_sleep_seconds)
+    idle_sleep_max = max(float(_RESEARCH_WORKER_SETTINGS.idle_sleep_max_seconds), idle_sleep)
+    current_idle_sleep = idle_sleep
     logger.info(
         "research_worker_ready | worker_id=%s partition_index=%s partition_total=%s job_types=%s",
         worker_id,

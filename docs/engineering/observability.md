@@ -131,6 +131,64 @@ The user-level task starts immediately, starts again at logon, restarts after
 failure, writes one bounded daily NDJSON file under `logs/host-capacity`, and is
 removed with the same command plus `-RemoveScheduledTask`.
 
+## Storage Closeout Operations
+
+The capacity dashboard (`/d/quanttrad-capacity-growth`) starts with physical
+SSD/HDD use, publication/verification/retirement windows, eligible backlog,
+measurement availability, canonical read errors and latency, database allocation,
+and the last completed paired recovery point. The existing Workers and Runtime
+Control Tower dashboards show collection, acquisition, gaps and research jobs.
+No Prometheus service is required: PostgreSQL rollups and Loki/Alloy remain the
+existing monitoring path.
+
+Every five minutes, the existing capacity sampler records bounded catalog
+metadata and fixed-label gauges through the existing observer exporter. It does
+not walk archive objects or count historical fact rows. Unknown counts remain
+unknown; a known backlog lower bound is distinct from a complete estimate.
+`storage_admitted_revisions_available=0` explicitly marks the missing universal
+post-commit admission counter. Sequence advances and PostgreSQL tuple inserts
+must not be presented as exact accepted revisions. Staging remains visible in
+maintenance phases/catalog state rather than a fabricated exact admission rate.
+
+Published/verified byte windows describe manifest objects. Retired relation-byte
+windows describe completed retirement records. Neither is net physical SSD
+reclaim: use the independently observed mount bytes for that. Allocation by
+family/tablespace is inferred main-fork allocation and excludes unmeasured
+forks; it is not a filesystem total. Missing or clipped snapshots do not become
+zero. Rolling five-minute windows must not be summed as disjoint counters.
+
+Canonical read counters and timings use fixed tier, operation and outcome
+labels. Iterator timing excludes time the caller spends between requests for
+rows. Mean latency is weighted by sample counts; maxima remain maxima. Percentile
+rollups cannot be merged into a global percentile. The research worker starts
+and drains the same exporter used by the API. Existing capacity records retain
+30 days and Loki retains seven days. Backend metric rollups have no automatic
+retention job at present; do not claim a 30-day bound for those rows.
+
+Storage safety alerts include the 60% SSD warning and 65% normal operating
+ceiling, archival/verified-retirement stalls with eligible work, paired recovery
+freshness after 25 hours, and repeated collection/acquisition failures. Existing
+missing-device, collector safety and higher-capacity alerts remain active.
+Missing essential evidence alerts rather than reporting healthy zero progress.
+A recovery snapshot reads completed receipt metadata before pruning; it does
+not certify that the current backup has completed. Same-HDD copies protect
+rollback but remain exposed to HDD loss.
+
+Interactive research uses one serialized research worker at lower CPU priority
+(nice +10); backtest containers and API work use reduced CPU shares. This is
+relative priority under contention, not a hard throughput or memory guarantee.
+Native recovery tools receive explicit Go GC/scheduler targets (`GOMEMLIMIT=4GiB`,
+`GOMAXPROCS=2`); maintenance retains its existing 8 GiB container limit. These Go
+targets do not cap subprocess RSS. Check actual memory events, normal recovery
+completion and collector publication after deployment. High-volume autonomous
+research schedules remain paused until explicitly resumed.
+
+After changing provisioning files on the native server, deploy the reviewed
+feature commit normally, then use `server_deploy.sh apply-alerts` to remount and
+reload the existing Grafana/Alloy configuration. Verify current samples through
+Grafana, actual rule evaluation state, research-worker metric export and normal
+maintenance progress; source changes alone are not operational acceptance.
+
 ## Grafana Dashboard Source And Recovery
 
 Checked-in JSON under `docker/grafana/provisioning/dashboards/` is the supported

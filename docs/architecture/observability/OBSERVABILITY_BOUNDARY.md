@@ -19,6 +19,10 @@ code_paths:
   - portal/backend/service/bots/botlens_intake_router.py
   - portal/backend/service/bots/botlens_candle_continuity.py
   - portal/backend/service/bots/botlens_run_stream.py
+  - portal/backend/service/storage/canonical_read_metrics.py
+  - portal/backend/service/storage/retention_observability.py
+  - portal/backend/service/storage/recovery_maintenance.py
+  - portal/backend/workers/research_worker.py
   - portal/backend/service/capacity_observability.py
   - portal/backend/service/storage/repos/capacity.py
   - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
@@ -162,6 +166,29 @@ Exporter write latency is itself observable through
 `observability_export_db_ms`, and `observability_export_errors`. Dashboards must
 use these alongside storage `db_write_*` metrics; `db_write_ms` alone is not a
 complete database pressure signal.
+
+## Canonical Storage Operational Signals
+
+The existing five-minute capacity sampler also emits one bounded canonical
+lifecycle snapshot, main-fork allocation by family/tablespace and native
+UUID-validated mount gauges. Fixed-label storage/read metrics use the existing
+backend observer and PostgreSQL rollups; maintenance phases and paired recovery
+receipt metadata use the existing structured logging path. There is no new
+telemetry service, lifecycle authority, object walk or per-fact metric identity.
+Clipped/unsealed inventory stays partial, and universal accepted revision counts
+remain explicitly unavailable. The research worker owns its exporter lifecycle
+so normal research reads persist their measurements.
+
+Physical mount changes, completed retired relation bytes and inferred database
+allocation are separate measurements. Manifest publication is not SSD reclaim.
+Completed phase timings do not stand in for the current phase; the fresh worker
+lease/context supplies current phase age and a bounded error class. Optional
+native PSI gauges describe host-wide pressure, not HDD-specific latency.
+
+See [storage closeout operations](../../engineering/observability.md#storage-closeout-operations)
+for sampling/retention limits, alert meanings, relative research priority and
+post-deployment checks. Telemetry does not change canonical selection, backup
+formats, retirement guards, frozen bindings or trading behavior.
 
 ## Capacity Telemetry
 

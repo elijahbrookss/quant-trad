@@ -23,6 +23,458 @@
   "links": [],
   "panels": [
     {
+      "id": 101,
+      "title": "Storage closeout: capacity, backlog and research",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 102,
+      "title": "Physical SSD / HDD use",
+      "type": "timeseries",
+      "description": "Validated native UUID mounts, sampled every five minutes and persisted in existing metric rollups. hot=SSD working filesystem; cold=HDD archive filesystem. Used/(used+available) matches df. No directory scans. Unknown mount evidence is not zero.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH bounded AS MATERIALIZED (SELECT bucket_start,metric_name,storage_target,latest_value FROM observability_metrics.botlens_backend_metric_rollups WHERE component IN ('storage_operating','storage_mount') AND metric_name IN ('storage_mount_used_percent') AND $__timeFilter(bucket_start) ORDER BY bucket_start DESC LIMIT 50001) SELECT bucket_start AT TIME ZONE 'UTC' AS time, CASE WHEN (SELECT count(*) FROM bounded)<=50000 THEN max(latest_value) END AS value, metric_name||':'||coalesce(storage_target,'') AS metric FROM bounded GROUP BY bucket_start,metric_name,storage_target ORDER BY time,metric;"
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "title": "Archival progress: revisions per sampled window",
+      "type": "timeseries",
+      "description": "Rolling five-minute source windows. Published, first verified and retired rows are distinct stages. Do not sum overlapping window gauges as lifetime counters or infer physical SSD free space from copied rows. Universal admission count is explicitly unavailable.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH bounded AS MATERIALIZED (SELECT bucket_start,metric_name,storage_target,latest_value FROM observability_metrics.botlens_backend_metric_rollups WHERE component IN ('storage_operating','storage_mount') AND metric_name IN ('storage_published_rows_window','storage_verified_rows_window','storage_retired_rows_window') AND $__timeFilter(bucket_start) ORDER BY bucket_start DESC LIMIT 50001) SELECT bucket_start AT TIME ZONE 'UTC' AS time, CASE WHEN (SELECT count(*) FROM bounded)<=50000 THEN max(latest_value) END AS value, metric_name||':'||coalesce(storage_target,'') AS metric FROM bounded GROUP BY bucket_start,metric_name,storage_target ORDER BY time,metric;"
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "title": "Backlog revisions: complete estimate / known lower bound",
+      "type": "timeseries",
+      "description": "Current expected-minus-published revision metadata. A complete estimate is absent when eligible open cohorts lack row counts. The known lower bound can still be shown; null is never zero. Cohorts awaiting verification/retirement remain eligible after publishing.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH bounded AS MATERIALIZED (SELECT bucket_start,metric_name,storage_target,latest_value FROM observability_metrics.botlens_backend_metric_rollups WHERE component IN ('storage_operating','storage_mount') AND metric_name IN ('storage_backlog_rows','storage_known_backlog_rows') AND $__timeFilter(bucket_start) ORDER BY bucket_start DESC LIMIT 50001) SELECT bucket_start AT TIME ZONE 'UTC' AS time, CASE WHEN (SELECT count(*) FROM bounded)<=50000 THEN max(latest_value) END AS value, metric_name||':'||coalesce(storage_target,'') AS metric FROM bounded GROUP BY bucket_start,metric_name,storage_target ORDER BY time,metric;"
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "title": "Oldest eligible unfinished cohort age",
+      "type": "stat",
+      "description": "Age of the oldest eligible unfinished cohort from the existing bounded catalog, excluding the already retired initial cutover cohorts. Unknown or truncated source is visible as missing/incomplete.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH bounded AS MATERIALIZED (SELECT bucket_start,metric_name,storage_target,latest_value FROM observability_metrics.botlens_backend_metric_rollups WHERE component IN ('storage_operating','storage_mount') AND metric_name IN ('storage_oldest_eligible_age_seconds') AND bucket_start >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')-interval '15 minutes' ORDER BY bucket_start DESC LIMIT 50001) SELECT bucket_start AT TIME ZONE 'UTC' AS time, CASE WHEN (SELECT count(*) FROM bounded)<=50000 THEN max(latest_value) END AS value, metric_name||':'||coalesce(storage_target,'') AS metric FROM bounded GROUP BY bucket_start,metric_name,storage_target ORDER BY time,metric;"
+        }
+      ]
+    },
+    {
+      "id": 106,
+      "title": "Measured canonical read errors",
+      "type": "timeseries",
+      "description": "Errors in five-minute buckets with measured canonical calls. A successful measured call supports zero errors in its bucket; no calls produces no sample. Covers API and exported research-worker reads.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH bounded AS MATERIALIZED (SELECT bucket_start,metric_name,value_sum FROM observability_metrics.botlens_backend_metric_rollups WHERE component='canonical_storage_read' AND metric_name IN ('canonical_read_calls_total','canonical_read_errors_total') AND $__timeFilter(bucket_start) ORDER BY bucket_start DESC LIMIT 50001) SELECT date_bin(interval '5 minutes',bucket_start,timestamp '2000-01-01') AT TIME ZONE 'UTC' AS time,CASE WHEN (SELECT count(*) FROM bounded)<=50000 THEN sum(CASE WHEN metric_name='canonical_read_errors_total' THEN value_sum ELSE 0 END) END AS value,'Read errors per 5 minutes' AS metric FROM bounded GROUP BY 1 ORDER BY time;"
+        }
+      ]
+    },
+    {
+      "id": 107,
+      "title": "Canonical read latency: weighted mean / maximum",
+      "type": "timeseries",
+      "description": "Active iterator time, excluding consumer idle. Separate target/stage series; nested stages are not additive. Mean merges sums/counts; maximum merges maxima. Per-bucket p95 is not presented as a global percentile. Queries cap source rows at 50,000; shorten the range if incomplete.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH bounded AS MATERIALIZED (SELECT bucket_start,storage_target,pipeline_stage,value_sum,sample_count,value_max FROM observability_metrics.botlens_backend_metric_rollups WHERE metric_name='canonical_read_ms' AND component='canonical_storage_read' AND labels->>'outcome'='completed' AND $__timeFilter(bucket_start) ORDER BY bucket_start DESC LIMIT 50001), points AS (SELECT date_bin(interval '5 minutes',bucket_start,timestamp '2000-01-01') AS bucket,storage_target,pipeline_stage,sum(value_sum)/nullif(sum(sample_count),0) AS mean_ms,max(value_max) AS max_ms FROM bounded GROUP BY 1,2,3) SELECT bucket AT TIME ZONE 'UTC' AS time,CASE WHEN (SELECT count(*) FROM bounded)<=50000 THEN mean_ms END AS value,storage_target||':'||pipeline_stage||' mean' AS metric FROM points UNION ALL SELECT bucket AT TIME ZONE 'UTC',CASE WHEN (SELECT count(*) FROM bounded)<=50000 THEN max_ms END,storage_target||':'||pipeline_stage||' max' FROM points ORDER BY time,metric;"
+        }
+      ]
+    },
+    {
+      "id": 108,
+      "title": "Database allocation by family / tablespace",
+      "type": "timeseries",
+      "description": "Main-fork PostgreSQL allocation estimates, not filesystem reclaim. Tablespace placement separates SSD indexes from HDD heaps on this host. Other forks/TOAST/temporary files remain in the existing diagnostics below; no per-Fact labels or filesystem walks.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (family, tablespace, allocation_kind) (last_over_time({compose_service=\"backend\"} |= \"storage_relation_allocation_snapshot |\" | pattern \"<_>storage_relation_allocation_snapshot | <payload>\" | line_format \"{{.payload}}\" | json | state=\"ready\" | keep family, tablespace, allocation_kind, allocated_bytes | unwrap allocated_bytes | __error__=\"\" [15m]))",
+          "queryType": "range",
+          "legendFormat": "{{family}} / {{tablespace}} / {{allocation_kind}}"
+        }
+      ]
+    },
+    {
+      "id": 109,
+      "title": "Last completed paired recovery point",
+      "type": "stat",
+      "description": "Actual last completed pair timestamp, read before pruning starts. It is not refreshed by starting or failing a new backup. Same-HDD recovery remains in the same failure domain. No current backup completion is inferred.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 8,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeFromNow",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(last_over_time({compose_service=\"storage-maintenance\"} |= \"storage_recovery_snapshot |\" | pattern \"<_>storage_recovery_snapshot | <payload>\" | line_format \"{{.payload}}\" | json | state=\"known\" | keep last_completed_unixtime | unwrap last_completed_unixtime | __error__=\"\" [25h])) * 1000",
+          "queryType": "instant",
+          "instant": true,
+          "legendFormat": "Validated completed receipt"
+        }
+      ]
+    },
+    {
+      "id": 110,
+      "title": "Completed maintenance time in the last hour",
+      "type": "timeseries",
+      "description": "Completed phase durations only, split archiving/recovery. Long in-progress recovery is additionally visible in worker state and alert reasons; it is not fabricated as a completed duration.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 21,
+        "w": 8,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase) (sum_over_time({compose_service=\"storage-maintenance\"} |= \"storage_maintenance_phase_completed |\" | pattern \"<_>storage_maintenance_phase_completed | <payload>\" | line_format \"{{.payload}}\" | json | keep phase, duration_seconds | unwrap duration_seconds | __error__=\"\" [1h]))",
+          "queryType": "range",
+          "legendFormat": "{{phase}} completed seconds"
+        }
+      ]
+    },
+    {
+      "id": 111,
+      "title": "Reading these storage measurements",
+      "type": "text",
+      "gridPos": {
+        "x": 16,
+        "y": 21,
+        "w": 8,
+        "h": 6
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Physical mount changes, recorded retired relation bytes and inferred allocation are different measurements.** Publication means an immutable archive was committed; it does not mean SSD capacity was released. See the existing completed-bytes panel below.\n\nUnknown/open cohort sizes remain unknown; the known backlog is a lower bound. Exact universal admitted revisions are not instrumented; existing collector admission logs cover only their producers.\n\n[Workers and collection](/d/qt-worker-activity) \u00b7 [Runtime control](/d/qt-runtime-control-tower). Existing safety rules remain active. Research is serialized and lower priority; autonomous high-volume schedules stay paused.\n\nPersisted fixed-cardinality gauges support multiweek trends. Loki detail retains its existing window. No sustainability claim follows from a short observation.\n\nMeasurement availability is explicit below. Collection/read health: [Workers and active jobs](/d/qt-worker-activity) and [Runtime control tower](/d/qt-runtime-control-tower). Host pressure, WAL and relation growth remain in the existing lower panels. Research runs at lower CPU priority; high-volume autonomous schedules stay paused."
+      }
+    },
+    {
       "datasource": {
         "type": "postgres",
         "uid": "quanttrad-postgres"
@@ -31,11 +483,11 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 0
+        "y": 34
       },
       "id": 1,
       "options": {
-        "content": "## Storage growth decisions\n**Physical free space is the capacity authority.** Database/relation bytes explain part of that use; never add them to filesystem used bytes. Retained migration copies are not reclaimable space until explicitly retired.\n\nNative SSD/HDD panels below compare two fresh **2-minute windows, 24 hours apart**, matched by resource, filesystem UUID, device and size. They show net physical growth and a linear planning estimate to the existing **85% usage alert**, not the storage policy reserve or permission to run maintenance. Negative projected days mean the threshold is already exceeded. Flat/falling growth, missing UUID/history or unhealthy telemetry produces no runway estimate—not infinite capacity. Shared-device resources must not be added together.\n\nDatabase snapshots: **5-minute cadence / 30-day retention**. Filesystem telemetry: **15-second cadence / 7-day Loki retention**. Top relations include indexes and TOAST; sizes and row estimates do not establish compression, reclaimability or future growth.\n\nExisting alerts: **70% warning / 85% critical / 92% emergency**, plus missing/failed physical telemetry. They notify only. Use the storage capacity plan before changing placement, retention or hardware.\n\n**Shared storage metrics:** the dedicated datasource is disabled until explicitly configured with approved restricted access. Datasource-not-found or a query error means **unconfigured/unavailable**, never zero. The status table shows the shared contract's ready/partial/stale/unavailable reasons. Backlog/verified/oldest-day are CURRENT; trends use the selected UTC range (maximum 30 days / 720 buckets). Larger ranges fail visibly. Archived compressed, first-verified compressed and reclaimed physical bytes have different bases; they are not a net-growth equation. Legacy relation/insert/WAL/filesystem diagnostics retain their own datasource and labels.",
+        "content": "## Storage growth decisions\n**Physical free space is the capacity authority.** Database/relation bytes explain part of that use; never add them to filesystem used bytes. Retained migration copies are not reclaimable space until explicitly retired.\n\nNative SSD/HDD panels below compare two fresh **2-minute windows, 24 hours apart**, matched by resource, filesystem UUID, device and size. They show net physical growth and a linear planning estimate to the existing **85% usage alert**, not the storage policy reserve or permission to run maintenance. Negative projected days mean the threshold is already exceeded. Flat/falling growth, missing UUID/history or unhealthy telemetry produces no runway estimate\u2014not infinite capacity. Shared-device resources must not be added together.\n\nDatabase snapshots: **5-minute cadence / 30-day retention**. Filesystem telemetry: **15-second cadence / 7-day Loki retention**. Top relations include indexes and TOAST; sizes and row estimates do not establish compression, reclaimability or future growth.\n\nExisting alerts: **70% warning / 85% critical / 92% emergency**, plus missing/failed physical telemetry. They notify only. Use the storage capacity plan before changing placement, retention or hardware.\n\n**Shared storage metrics:** the dedicated datasource is disabled until explicitly configured with approved restricted access. Datasource-not-found or a query error means **unconfigured/unavailable**, never zero. The status table shows the shared contract's ready/partial/stale/unavailable reasons. Backlog/verified/oldest-day are CURRENT; trends use the selected UTC range (maximum 30 days / 720 buckets). Larger ranges fail visibly. Archived compressed, first-verified compressed and reclaimed physical bytes have different bases; they are not a net-growth equation. Legacy relation/insert/WAL/filesystem diagnostics retain their own datasource and labels.",
         "mode": "markdown"
       },
       "title": "How to use this dashboard",
@@ -61,7 +513,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 6
+        "y": 40
       },
       "id": 25,
       "options": {
@@ -110,7 +562,7 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 6
+        "y": 40
       },
       "id": 26,
       "options": {
@@ -172,7 +624,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 6
+        "y": 40
       },
       "id": 27,
       "options": {
@@ -220,7 +672,7 @@
         "h": 5,
         "w": 6,
         "x": 0,
-        "y": 12
+        "y": 46
       },
       "id": 2,
       "options": {
@@ -266,7 +718,7 @@
         "h": 5,
         "w": 6,
         "x": 6,
-        "y": 12
+        "y": 46
       },
       "id": 3,
       "options": {
@@ -315,7 +767,7 @@
         "h": 5,
         "w": 6,
         "x": 12,
-        "y": 12
+        "y": 46
       },
       "id": 4,
       "options": {
@@ -360,7 +812,7 @@
         "h": 5,
         "w": 6,
         "x": 18,
-        "y": 12
+        "y": 46
       },
       "id": 5,
       "options": {
@@ -407,7 +859,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 17
+        "y": 51
       },
       "id": 6,
       "options": {
@@ -457,7 +909,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 17
+        "y": 51
       },
       "id": 7,
       "options": {
@@ -503,7 +955,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 25
+        "y": 59
       },
       "id": 8,
       "options": {
@@ -547,7 +999,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 25
+        "y": 59
       },
       "id": 9,
       "options": {
@@ -589,7 +1041,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 68
       },
       "id": 10,
       "options": {
@@ -620,7 +1072,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 34
+        "y": 68
       },
       "id": 11,
       "options": {
@@ -653,7 +1105,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 77
       },
       "id": 12,
       "options": {
@@ -697,7 +1149,7 @@
         "h": 9,
         "w": 6,
         "x": 12,
-        "y": 43
+        "y": 77
       },
       "id": 13,
       "options": {
@@ -741,7 +1193,7 @@
         "h": 9,
         "w": 6,
         "x": 18,
-        "y": 43
+        "y": 77
       },
       "id": 14,
       "options": {
@@ -785,7 +1237,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 52
+        "y": 86
       },
       "id": 15,
       "options": {
@@ -829,7 +1281,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 52
+        "y": 86
       },
       "id": 16,
       "options": {
@@ -872,7 +1324,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 52
+        "y": 86
       },
       "id": 17,
       "options": {
@@ -915,7 +1367,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 60
+        "y": 94
       },
       "id": 18,
       "options": {
@@ -971,7 +1423,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 60
+        "y": 94
       },
       "id": 19,
       "options": {
@@ -1015,7 +1467,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 60
+        "y": 94
       },
       "id": 20,
       "options": {
@@ -1059,7 +1511,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 68
+        "y": 102
       },
       "id": 21,
       "options": {
@@ -1132,7 +1584,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 68
+        "y": 102
       },
       "id": 22,
       "options": {
@@ -1176,7 +1628,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 68
+        "y": 102
       },
       "id": 23,
       "options": {
@@ -1220,7 +1672,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 76
+        "y": 110
       },
       "id": 24,
       "options": {
@@ -1256,7 +1708,7 @@
         "h": 6,
         "w": 6,
         "x": 0,
-        "y": 83
+        "y": 117
       },
       "fieldConfig": {
         "defaults": {
@@ -1301,7 +1753,7 @@
         "h": 6,
         "w": 6,
         "x": 6,
-        "y": 83
+        "y": 117
       },
       "fieldConfig": {
         "defaults": {
@@ -1346,7 +1798,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 83
+        "y": 117
       },
       "fieldConfig": {
         "defaults": {
@@ -1397,7 +1849,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 92
+        "y": 126
       },
       "fieldConfig": {
         "defaults": {},
@@ -1428,7 +1880,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 101
+        "y": 135
       },
       "fieldConfig": {
         "defaults": {
@@ -1445,6 +1897,100 @@
           "format": "table",
           "rawQuery": true,
           "rawSql": "SELECT 'current'::text AS scope, metric_id, state, reason, complete, truncated FROM observability_metrics.storage_metric_status_v1() UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'database_allocated_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('database_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'market_allocated_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('market_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'archive_compressed_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('archive_compressed_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'verified_first_compressed_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('verified_first_compressed_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'reclaimed_physical_hot_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('reclaimed_physical_hot_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'database_growth_bytes_per_day'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_growth_v1('database_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) ORDER BY scope, metric_id, state, reason;"
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "title": "Current measurement availability",
+      "type": "stat",
+      "description": "Fresh 15-minute samples only. 1 means observed/complete; 0 means unavailable/partial. Missing is not zero. Admissions remain explicitly unavailable until a universal post-commit counter exists.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 12,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT DISTINCT ON (metric_name) bucket_start AT TIME ZONE 'UTC' AS time,latest_value AS value,metric_name AS metric FROM observability_metrics.botlens_backend_metric_rollups WHERE component='storage_operating' AND metric_name IN ('storage_snapshot_available','storage_snapshot_complete','storage_backlog_rows_available','storage_admitted_revisions_available','storage_worker_phase_known') AND bucket_start >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')-interval '15 minutes' ORDER BY metric_name,bucket_start DESC;"
+        }
+      ]
+    },
+    {
+      "id": 113,
+      "title": "Copied / verified / retired bytes per sampled window",
+      "type": "timeseries",
+      "description": "Manifest bytes published and verified are HDD objects. Retired relation bytes are exact lifecycle retirement records, not net SSD filesystem change. The physical mount chart is the independent capacity measurement.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 27,
+        "w": 12,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No measured sample / incomplete",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH bounded AS MATERIALIZED (SELECT bucket_start,metric_name,storage_target,latest_value FROM observability_metrics.botlens_backend_metric_rollups WHERE component IN ('storage_operating','storage_mount') AND metric_name IN ('storage_published_bytes_window','storage_verified_bytes_window','storage_retired_relation_bytes_window') AND $__timeFilter(bucket_start) ORDER BY bucket_start DESC LIMIT 50001) SELECT bucket_start AT TIME ZONE 'UTC' AS time, CASE WHEN (SELECT count(*) FROM bounded)<=50000 THEN max(latest_value) END AS value, metric_name||':'||coalesce(storage_target,'') AS metric FROM bounded GROUP BY bucket_start,metric_name,storage_target ORDER BY time,metric;"
         }
       ]
     }
@@ -1542,6 +2088,6 @@
   "timezone": "utc",
   "title": "QuantTrad Capacity & Database Growth",
   "uid": "quanttrad-capacity-growth",
-  "version": 5,
+  "version": 7,
   "weekStart": ""
 }

@@ -3,7 +3,8 @@
 No additional scheduler, placement policy or automatic activation. The existing
 maintenance supervisor can invoke this after its retention transaction ends.
 """
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+import json
 import logging
 from pathlib import Path
 from time import monotonic
@@ -21,6 +22,32 @@ from .header_resources import observe_header_resources
 from .recovery_copies import MAX_RECOVERY_OBJECTS, LocalRecoveryCopies, _identity, _snapshot_layout
 
 logger = logging.getLogger(__name__)
+
+
+def _completed_for_due_check(copies, policy, *, prune):
+    """Observe retained receipts before pruning, preserving the scheduling order."""
+    sampled = datetime.now(UTC)
+    interval = policy.backup_interval_hours * 3600
+    value = {"schema_version": "qt.storage_recovery_snapshot.v1", "sampled_at": sampled.isoformat(),
+             "backup_interval_seconds": interval, "basis": "validated_completed_pair_receipt_metadata",
+             "completed_copies": None, "last_completed_unixtime": None, "next_due_unixtime": None,
+             "state": "unavailable", "current_backup_completed": False}
+    try:
+        retained = copies.completed()
+        last = retained[-1][0] if retained else None
+        value.update(completed_copies=len(retained), state="known" if retained else "none")
+        if last is not None and last > sampled:
+            value.update(state="unavailable", reason="completion_clock_ahead")
+        elif last is not None:
+            value.update(last_completed_unixtime=last.timestamp(), next_due_unixtime=last.timestamp()+interval,
+                last_completed_layout_version=retained[-1][2].get("storage_layout", {}).get("layout_version"))
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+        # This diagnostic read cannot replace normal prune/due validation.
+        value["reason"] = type(exc).__name__
+    logger.info("storage_recovery_snapshot | %s", json.dumps(value, sort_keys=True, allow_nan=False))
+    if prune:
+        copies._prune(policy.backup_copies)
+    return copies.completed()
 
 
 def validate_recovery_maintenance_limits(*, max_bytes, timeout_seconds, headroom_bytes,
@@ -148,11 +175,10 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
                          or archiver["last_failed_time"] > archiver["last_archived_time"])):
                 raise RuntimeError("incremental_wal_archiving_failed")
         with copies.lock():
-            if incremental is not None and cutover_capture is None:
-                # Finish an interrupted retirement before reporting not_due.
-                # This touches only the prepared encrypted repositories.
-                copies._prune(policy.backup_copies)
-            completed=copies.completed()
+            # Finish interrupted retirement before the due decision, while a
+            # pruning failure can no longer hide the last retained good point.
+            completed = _completed_for_due_check(copies, policy,
+                prune=incremental is not None and cutover_capture is None)
         current_layout=_snapshot_layout(owner)
         now=owner.scalar(text("SELECT clock_timestamp()"))
         if completed:
