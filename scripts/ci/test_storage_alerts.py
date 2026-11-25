@@ -30,6 +30,15 @@ RULES = (
     "qt-nvme-storage-unavailable", "qt-archive-storage-unavailable",
 )
 
+# These rules share provisioning; their PostgreSQL clock/read sources are
+# qualified through the deployed Grafana datasource path, not this Loki-only
+# disposable fixture's legacy evaluator.
+CLOSEOUT_RULES = {
+    "qt-ssd-operating-warning", "qt-ssd-operating-ceiling",
+    "qt-archive-stalled", "qt-retirement-stalled", "qt-recovery-freshness",
+    "qt-collection-publication-failures",
+}
+
 
 def request(url: str, payload: dict | None = None, *, auth: bool = False) -> Any:
     headers = {"Content-Type": "application/json"}
@@ -108,7 +117,7 @@ def evaluate(grafana: str, rule: dict, timestamp: float, *, expression: bool = T
 def prove(grafana: str, loki: str) -> None:
     loaded = request(grafana + "/api/v1/provisioning/alert-rules", auth=True)
     rules = {rule["uid"]: rule for rule in loaded}
-    assert set(rules) == set(RULES) | {"qt-host-clock-unhealthy"}, rules.keys()
+    assert set(rules) == set(RULES) | CLOSEOUT_RULES | {"qt-host-clock-unhealthy"}, rules.keys()
     for uid in RULES[3:]:
         assert rules[uid]["noDataState"] == "Alerting"
         assert rules[uid]["execErrState"] == "Alerting"
@@ -245,7 +254,7 @@ def prove_clock_lifecycle(compose: list[str], endpoint_for) -> None:
         grafana = endpoint_for("grafana", 3000)
         wait_ready(grafana + "/api/health")
         rules = {rule["uid"] for rule in request(grafana + "/api/v1/provisioning/alert-rules", auth=True)}
-        assert rules == set(RULES) | ({"qt-host-clock-unhealthy"} if enabled else set()), rules
+        assert rules == set(RULES) | CLOSEOUT_RULES | ({"qt-host-clock-unhealthy"} if enabled else set()), rules
         assert request(grafana + "/api/v1/provisioning/policies", auth=True) == policies
         assert request(grafana + "/api/v1/provisioning/contact-points", auth=True) == contacts
     print("clock_rule_lifecycle_proved enabled-disabled-enabled persistent-db routing=unchanged", flush=True)
