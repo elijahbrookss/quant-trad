@@ -46,7 +46,11 @@ def test_native_children_receive_fixed_go_targets_without_ambient_secrets(tmp_pa
     target = SimpleNamespace(medium="hdd", state="active", roles=("backups",),
                              filesystem_uuid="disposable-hdd",
                              inspect=lambda **kw: SimpleNamespace(path=str(target_root), available_bytes=8 * 2**30))
-    binary = Path(sys.executable).resolve()
+    # Hosted Python toolchains can have foreign ownership or writable modes.
+    # Keep production tool admission strict and use an owned disposable child.
+    binary = tmp_path / "native-env-probe"
+    shutil.copyfile(Path("/bin/sh").resolve(), binary)
+    binary.chmod(0o700)
     config = recovery.IncrementalRecoveryConfig(binary, binary, tmp_path / "pgdata", tmp_path / "socket",
         tmp_path / "database-key", tmp_path / "archive-key", 3)
     for name, value in {"GOMEMLIMIT": "64MiB", "GOMAXPROCS": "64",
@@ -62,11 +66,14 @@ def test_native_children_receive_fixed_go_targets_without_ambient_secrets(tmp_pa
         "PGBACKREST_REPO1_CIPHER_PASS", "RESTIC_PASSWORD", "PGPASSWORD", "PGPASSFILE",
         "PGSERVICEFILE", "PGCONNECT_TIMEOUT"}
     # Exercise real child propagation without a repository, native backup or secret output.
-    raw = worker._run([str(binary), "-I", "-c",
-        "import json,os; print(json.dumps({'memory_target':os.getenv('GOMEMLIMIT'),"
-        "'processors':os.getenv('GOMAXPROCS'),'ambient_secret_present':'AWS_SECRET_ACCESS_KEY' in os.environ,"
-        "'archive_auth_matches':os.getenv('RESTIC_PASSWORD')=='b'*64,"
-        "'database_auth_matches':os.getenv('PGPASSWORD')=='disposable-db-password'}))"])
+    raw = worker._run([str(binary), "-c",
+        "ambient=false; archive=false; database=false; "
+        '[ "${AWS_SECRET_ACCESS_KEY+x}" = x ] && ambient=true; '
+        f'[ "$RESTIC_PASSWORD" = "{archive_key}" ] && archive=true; '
+        '[ "$PGPASSWORD" = "disposable-db-password" ] && database=true; '
+        "printf '{\"memory_target\":\"%s\",\"processors\":\"%s\","
+        '\"ambient_secret_present\":%s,\"archive_auth_matches\":%s,\"database_auth_matches\":%s}\\n\' '
+        '"$GOMEMLIMIT" "$GOMAXPROCS" "$ambient" "$archive" "$database"'])
     assert json.loads(raw) == {"memory_target": "4GiB", "processors": "2",
         "ambient_secret_present": False, "archive_auth_matches": True, "database_auth_matches": True}
     assert database_key.encode() not in raw and archive_key.encode() not in raw
