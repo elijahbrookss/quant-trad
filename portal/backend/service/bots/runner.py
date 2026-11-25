@@ -282,6 +282,9 @@ class DockerBotRunner:
             "--network",
             network,
         ]
+        # run_type owns execution mode; mode only controls playback pacing.
+        if str(bot.get("run_type") or "backtest").strip().lower() == "backtest":
+            cmd.extend(["--cpu-shares", "256"])
         if shared_group is not None:
             cmd.extend(["--user", "1000:1000", "--group-add", str(shared_group),
                         "--cap-drop", "ALL", "--security-opt", "no-new-privileges"])

@@ -21,6 +21,58 @@ from portal.backend.service.storage.incremental_recovery import (
 from portal.backend.service.storage import incremental_recovery as recovery
 
 
+def test_native_children_receive_fixed_go_targets_without_ambient_secrets(tmp_path, monkeypatch):
+    from sqlalchemy.engine import make_url
+
+    target_root = tmp_path / "hdd"
+    target_root.mkdir(mode=0o700)
+    identity = "123/456"
+    root = target_root / "recovery-incremental" / hashlib.sha256(identity.encode()).hexdigest()[:32]
+    root.parent.mkdir(mode=0o700)
+    root.mkdir(mode=0o700)
+    for name in ("database", "archives", "locks", "logs"):
+        (root / name).mkdir(mode=0o700)
+    database_key, archive_key = "a" * 64, "b" * 64
+    for name, key in (("database-key", database_key), ("archive-key", archive_key)):
+        path = tmp_path / name
+        path.write_text(key)
+        path.chmod(0o600)
+    prepared = {"schema_version": "qt.encrypted_recovery_repository.v1",
+                "database_identity": identity, "filesystem_uuid": "disposable-hdd",
+                "database_key_sha256": hashlib.sha256(database_key.encode()).hexdigest(),
+                "archive_key_sha256": hashlib.sha256(archive_key.encode()).hexdigest()}
+    (root / "prepared.json").write_text(json.dumps(prepared))
+    (root / "prepared.json").chmod(0o600)
+    target = SimpleNamespace(medium="hdd", state="active", roles=("backups",),
+                             filesystem_uuid="disposable-hdd",
+                             inspect=lambda **kw: SimpleNamespace(path=str(target_root), available_bytes=8 * 2**30))
+    binary = Path(sys.executable).resolve()
+    config = recovery.IncrementalRecoveryConfig(binary, binary, tmp_path / "pgdata", tmp_path / "socket",
+        tmp_path / "database-key", tmp_path / "archive-key", 3)
+    for name, value in {"GOMEMLIMIT": "64MiB", "GOMAXPROCS": "64",
+                        "AWS_SECRET_ACCESS_KEY": "private-ambient-key",
+                        "RESTIC_PASSWORD": "private-ambient-password",
+                        "PGPASSWORD": "private-ambient-db-password"}.items():
+        monkeypatch.setenv(name, value)
+    worker = EncryptedRecoveryCopies(incremental=config,
+        connection_url=make_url("postgresql://fixture:disposable-db-password@localhost/fixture"),
+        target=target, database_identity=identity, max_bytes=64 * 2**20,
+        reserve_bytes=0, timeout_seconds=10)
+    assert set(worker.env) == {"PATH", "LC_ALL", "HOME", "GOMEMLIMIT", "GOMAXPROCS",
+        "PGBACKREST_REPO1_CIPHER_PASS", "RESTIC_PASSWORD", "PGPASSWORD", "PGPASSFILE",
+        "PGSERVICEFILE", "PGCONNECT_TIMEOUT"}
+    # Exercise real child propagation without a repository, native backup or secret output.
+    raw = worker._run([str(binary), "-I", "-c",
+        "import json,os; print(json.dumps({'memory_target':os.getenv('GOMEMLIMIT'),"
+        "'processors':os.getenv('GOMAXPROCS'),'ambient_secret_present':'AWS_SECRET_ACCESS_KEY' in os.environ,"
+        "'archive_auth_matches':os.getenv('RESTIC_PASSWORD')=='b'*64,"
+        "'database_auth_matches':os.getenv('PGPASSWORD')=='disposable-db-password'}))"])
+    assert json.loads(raw) == {"memory_target": "4GiB", "processors": "2",
+        "ambient_secret_present": False, "archive_auth_matches": True, "database_auth_matches": True}
+    assert database_key.encode() not in raw and archive_key.encode() not in raw
+    assert b"disposable-db-password" not in raw and b"private-ambient" not in raw
+
+
 def test_archive_parent_uses_latest_published_point_instead_of_orphan():
     worker = object.__new__(EncryptedRecoveryCopies)
     worker.identity = "disposable/15"

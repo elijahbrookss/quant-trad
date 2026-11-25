@@ -24,10 +24,10 @@ def launch(monkeypatch):
         commands.append(command)
         return SimpleNamespace(returncode=0, stdout="disposable-container", stderr="")
     monkeypatch.setattr(DockerBotRunner, "_run_docker", staticmethod(run))
-    def start():
+    def start(**bot_fields):
         clear_settings_cache()
         return DockerBotRunner(image="disposable-image", network="disposable-internal").start_bot(
-            bot={"id":"disposable-bot", "snapshot_interval_ms":250}, run_id="disposable-run")
+            bot={"id":"disposable-bot", "snapshot_interval_ms":250, **bot_fields}, run_id="disposable-run")
     yield start, commands
     clear_settings_cache()
 
@@ -93,6 +93,20 @@ def test_unconfigured_runtime_keeps_existing_launch_contract(launch):
     start, commands = launch
     start()
     assert values(commands[-1], "--mount") == []
+
+
+@pytest.mark.parametrize("run_type,playback_mode,expected", [
+    ("backtest", "instant", ["256"]),
+    (None, "paced", ["256"]),
+    ("paper", "backtest", []),
+    ("live", "instant", []),
+])
+def test_only_backtest_run_type_gets_lower_cpu_priority(launch, run_type, playback_mode, expected):
+    start, commands = launch
+    start(run_type=run_type, mode=playback_mode)
+    command = commands[-1]
+    assert values(command, "--cpu-shares") == expected
+    assert not any(flag in command for flag in ("--memory", "--memory-swap", "--cpus"))
 
 
 def test_shared_archive_bot_runs_as_application_with_only_archive_group(launch, tmp_path, monkeypatch):

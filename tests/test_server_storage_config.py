@@ -15,6 +15,18 @@ ComposeLoader.add_constructor("!reset", lambda loader, node: None)
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_storage_server_research_priority_preserves_critical_service_resources():
+    services = yaml.load((ROOT / "docker/docker-compose.storage-server.yml").read_text(),
+                         Loader=ComposeLoader)["services"]
+    assert services["backend"]["cpu_shares"] == 256
+    assert services["storage-maintenance"]["mem_limit"] == "8g"
+    assert services["storage-maintenance"]["memswap_limit"] == "8g"
+    for name in ("tsdb", "market-data-collector", "storage-maintenance"):
+        assert "cpu_shares" not in services[name] and "cpus" not in services[name]
+    assert services["backend"]["environment"]["QT_RESEARCH_GLOBAL_SERIALIZATION"] == "true"
+    assert services["backend"]["environment"]["QT_WORKERS_RESEARCH_PROCESSES"] == "1"
+
+
 def test_fixed_overlay_preserves_spool_and_database_paths_without_fallback_mounts():
     overlay = yaml.load((ROOT / "docker/docker-compose.storage-server.yml").read_text(), Loader=ComposeLoader)
     services = overlay["services"]

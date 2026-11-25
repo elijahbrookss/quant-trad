@@ -65,6 +65,7 @@ services:
 
   backend:
     pull_policy: never
+    cpu_shares: 256
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     # Candidate application account; activation must separately admit source ownership.
