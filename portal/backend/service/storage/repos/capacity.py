@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import logging
+import re
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -72,6 +73,7 @@ SELECT
  (SELECT count(*)>10000 FROM backlog_pages) AS backlog_truncated,
  (SELECT count(*)>10000 FROM verification_page) AS verified_source_truncated,
  (SELECT count(*) FROM remaining) AS eligible_cohorts,
+ (SELECT count(*) FROM remaining WHERE state='verified') AS retirement_pending_cohorts,
  (SELECT count(*) FROM remaining WHERE expected_rows IS NULL OR source_bytes IS NULL OR state='open') AS unknown_cohorts,
  (SELECT coalesce(sum(greatest(expected_rows-archived_rows,0)) FILTER (WHERE expected_rows IS NOT NULL),0) FROM remaining) AS known_backlog_rows,
  (SELECT EXISTS(SELECT FROM remaining WHERE expected_rows IS NOT NULL AND archived_rows>expected_rows)) AS backlog_count_inconsistent,
@@ -125,6 +127,42 @@ FROM sized s JOIN pg_tablespace t ON t.oid=s.tablespace_oid
 GROUP BY family,t.spcname,allocation_kind ORDER BY family,t.spcname,allocation_kind
 """)
 
+_MAINTENANCE_PHASE_QUERY = text("""
+ SELECT state,heartbeat_at,context#>'{storage_lifecycle,current_phase}' AS phase,
+        left(last_error,128) AS error_prefix
+ FROM market.collector_worker_state
+ WHERE expires_at>statement_timestamp() AND worker_role='market_storage_maintenance'
+ ORDER BY heartbeat_at DESC LIMIT 2
+""")
+
+
+def _worker_phase_payload(rows, now):
+    value = {"worker_phase": "unknown", "worker_phase_age_seconds": None,
+             "worker_state": "unavailable", "worker_last_error_code": None}
+    if len(rows) != 1:
+        return value
+    row = rows[0]
+    heartbeat = row.get("heartbeat_at")
+    if not isinstance(heartbeat, datetime) or heartbeat.tzinfo is None or heartbeat > now:
+        return value
+    value["worker_state"] = row["state"]
+    error = row.get("error_prefix")
+    if error:
+        prefix = re.match(r"[A-Za-z_][A-Za-z0-9_.]*", error)
+        value["worker_last_error_code"] = prefix[0] if prefix and prefix[0].endswith(("Error", "Exception")) else "reported_error"
+    phase = row.get("phase")
+    if not isinstance(phase, dict):
+        value["worker_phase"] = "idle"
+        return value
+    try:
+        started = datetime.fromisoformat(phase["started_at"])
+        if phase.get("name") not in {"canonical_retention", "local_recovery", "history_movement"} or started.tzinfo is None or started > now:
+            return value
+        value.update(worker_phase=phase["name"], worker_phase_age_seconds=(now-started).total_seconds())
+    except (KeyError, ValueError, TypeError):
+        pass
+    return value
+
 
 def sample_storage_operating_metrics(*, sampled_at, database=db):
     """One capped read-only observation; an unavailable sample is never zero."""
@@ -134,6 +172,7 @@ def sample_storage_operating_metrics(*, sampled_at, database=db):
         "window_seconds": 300, "source_bytes_basis": "sealed_partition_catalog_at_seal",
         "published_bytes_basis": "acknowledged_manifest_object_bytes_not_filesystem_delta",
         "verified_bytes_basis": "current_hash_bound_manifest_verification",
+        "retirement_pending_basis": "eligible_verified_cohorts_pending_fresh_reclaim_guards",
         "reclaim_basis": "recorded_retired_relation_bytes_not_filesystem_delta",
         "admitted_revisions_state": "unavailable", "admitted_revisions_reason": "no_universal_post_commit_counter",
         "research_cache_allocation_state": "unavailable", "hdd_recovery_inventory_state": "unavailable",
@@ -154,6 +193,12 @@ def sample_storage_operating_metrics(*, sampled_at, database=db):
             row = dict(query(_STORAGE_OPERATING_QUERY, {"sampled_at": sample_time,
                 "verifier": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one())
             operating = _storage_operating_payload(envelope, row, sample_time)
+            try:
+                with session.begin_nested():
+                    workers = [dict(r) for r in query(_MAINTENANCE_PHASE_QUERY).mappings()]
+                operating.update(_worker_phase_payload(workers, datetime.now(timezone.utc)))
+            except (SQLAlchemyError, TimeoutError):
+                operating.update(_worker_phase_payload([], sample_time))
             allocation = [dict(r) for r in query(_RELATION_ALLOCATION_QUERY).mappings()]
         operating["sample_query_ms"] = (time.monotonic()-started)*1000
         return {"operating": operating,
@@ -182,6 +227,9 @@ def _storage_operating_payload(envelope, row, sample_time):
         value["backlog_source_bytes"] = None
     if clipped or inconsistent or not row["policy_available"]:
         value["known_backlog_rows"] = value["known_backlog_source_bytes"] = None
+        value["retirement_pending_cohorts"] = None
+    if row["cohorts_truncated"] or not row["policy_available"]:
+        value["eligible_cohorts"] = None
     if row["retired_rows_window"] is None:
         value.update(state="partial", partial=True, reason="retired_rows_unknown")
     for prefix, limit, count in (("published", 10000, "pages"), ("verified", 10000, "pages"), ("retired", 2048, "cohorts")):

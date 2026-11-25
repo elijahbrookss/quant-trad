@@ -14,7 +14,7 @@ NOW = datetime(2026, 1, 20, 12, tzinfo=UTC)
 def _row(**changes):
     row = {"policy_available": True, "cohorts_truncated": False, "backlog_truncated": False,
         "backlog_count_inconsistent": False, "verified_source_truncated": False,
-        "eligible_cohorts": 2, "unknown_cohorts": 0,
+        "eligible_cohorts": 2, "retirement_pending_cohorts": 1, "unknown_cohorts": 0,
         "known_backlog_rows": Decimal(90), "backlog_source_bytes": Decimal(1000),
         "oldest_eligible_day": date(2026, 1, 1), "published_pages_window": 1,
         "published_rows_window": Decimal(10), "published_bytes_window": Decimal(100),
@@ -42,6 +42,7 @@ def test_open_cohort_is_unknown_not_zero_or_complete():
     assert result["backlog_rows"] is None and result["backlog_source_bytes"] is None
     assert result["known_backlog_rows"] == 90 and result["known_backlog_source_bytes"] == 1000
     assert result["state"] == "partial" and result["partial"]
+    assert result["retirement_pending_cohorts"] == 1
 
 
 @pytest.mark.parametrize("changes", [{"cohorts_truncated": True}, {"backlog_truncated": True},
@@ -50,6 +51,7 @@ def test_incomplete_catalog_cannot_claim_an_exact_backlog(changes):
     result = capacity._storage_operating_payload({}, _row(**changes), NOW)
     assert result["backlog_rows"] is None and result["known_backlog_rows"] is None
     assert result["state"] != "ready" and result["partial"]
+    assert result["retirement_pending_cohorts"] is None
 
 
 @pytest.mark.parametrize("prefix,key,limit", [("published", "pages", 10000),
@@ -86,6 +88,8 @@ class _Session:
             return _Result([{"family": "raw_custody_lookup", "tablespace": "pg_default", "allocation_kind": "index",
                 "allocated_bytes": 100, "relation_count": 1, "truncated": False}])
         return _Result([])
+    @contextmanager
+    def begin_nested(self): yield self
 
 
 class _Database:
@@ -101,7 +105,7 @@ def test_sample_is_read_only_deadline_bounded_and_does_not_open_objects():
     assert statements[0][0] == "SET TRANSACTION READ ONLY"
     assert statements[1][0] == "SET LOCAL lock_timeout='250ms'"
     timeouts = [params["timeout"] for sql, params in statements if "set_config('statement_timeout'" in sql]
-    assert len(timeouts) == 2 and all(0 < int(value) <= 5000 for value in timeouts)
+    assert len(timeouts) == 3 and all(0 < int(value) <= 5000 for value in timeouts)
     assert result["operating"]["admitted_revisions_state"] == "unavailable"
     allocation = result["allocation"][0]
     assert allocation["tablespace"] == "pg_default" and allocation["allocation_kind"] == "index"
@@ -121,3 +125,18 @@ def test_optional_allocation_failure_preserves_valid_retention_observation():
     assert result["operating"]["backlog_rows"] == 90
     assert result["operating"]["allocation_state"] == "unavailable"
     assert result["allocation"] == []
+
+
+def test_running_phase_age_is_bounded_metadata_and_error_text_is_not_exported():
+    result = capacity._worker_phase_payload([{"state": "idle", "heartbeat_at": NOW,
+        "phase": {"name": "local_recovery", "started_at": "2026-01-20T11:00:00+00:00"},
+        "error_prefix": "RuntimeError: private SQL values"}], NOW)
+    assert result["worker_phase"] == "local_recovery" and result["worker_phase_age_seconds"] == 3600
+    assert result["worker_last_error_code"] == "RuntimeError"
+    assert "private" not in json.dumps(result)
+
+
+def test_ambiguous_or_future_worker_clocks_remain_unknown():
+    assert capacity._worker_phase_payload([{}, {}], NOW)["worker_phase_age_seconds"] is None
+    assert capacity._worker_phase_payload([{"state": "idle", "heartbeat_at": NOW,
+        "phase": {"name": "local_recovery", "started_at": "2026-01-21T12:00:00+00:00"}}], NOW)["worker_phase"] == "unknown"
