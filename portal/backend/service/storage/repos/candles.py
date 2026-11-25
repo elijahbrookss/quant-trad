@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 
+from core.events import normalize_utc_datetime
 from data_providers.utils.ohlcv import interval_to_timedelta
 from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION
 from sqlalchemy import text
@@ -18,6 +19,12 @@ from .fact_storage import canonical_fact_storage_repository
 
 _EARLIEST_MARKET_TIME = datetime(1, 1, 2, tzinfo=UTC)
 _LATEST_MARKET_TIME = datetime(9999, 12, 30, tzinfo=UTC)
+
+
+def _candle_timestamp(value: Any) -> Optional[datetime]:
+    """Compare read bounds with canonical clocks as UTC instants."""
+    parsed = _parse_optional_timestamp(value)
+    return normalize_utc_datetime(parsed) if parsed is not None else None
 
 
 def _candle_projection(fact, **selection):
@@ -151,8 +158,8 @@ def get_candle_storage_summary(
 
     instrument = str(instrument_id or "").strip()
     interval = str(timeframe or "").strip()
-    start_at = _parse_optional_timestamp(start)
-    end_at = _parse_optional_timestamp(end)
+    start_at = _candle_timestamp(start)
+    end_at = _candle_timestamp(end)
     if not instrument or not interval or start_at is None or end_at is None or end_at <= start_at:
         return None
     timeframe_seconds = _timeframe_seconds(interval)
@@ -249,8 +256,8 @@ def list_candle_provider_gap_evidence(
 
     instrument = str(instrument_id or "").strip()
     interval = str(timeframe or "").strip()
-    start_at = _parse_optional_timestamp(start)
-    end_at = _parse_optional_timestamp(end)
+    start_at = _candle_timestamp(start)
+    end_at = _candle_timestamp(end)
     if not instrument or not interval or start_at is None or end_at is None or end_at <= start_at:
         return []
     timeframe_seconds = _timeframe_seconds(interval)
@@ -315,8 +322,8 @@ def list_candles_for_series(
 
     instrument = str(instrument_id or "").strip()
     interval = str(timeframe or "").strip()
-    start_at = _parse_optional_timestamp(start)
-    end_at = _parse_optional_timestamp(end)
+    start_at = _candle_timestamp(start)
+    end_at = _candle_timestamp(end)
     if not instrument or not interval or (start_at is None and end_at is None):
         return []
     if start_at is not None and end_at is not None and end_at <= start_at:
@@ -407,8 +414,8 @@ def list_candles_for_series_windows(
         if window_id in results:
             raise ValueError(f"duplicate candle window_id: {window_id}")
         results[window_id] = []
-        start_at = _parse_optional_timestamp(window.get("start"))
-        end_at = _parse_optional_timestamp(window.get("end"))
+        start_at = _candle_timestamp(window.get("start"))
+        end_at = _candle_timestamp(window.get("end"))
         if start_at is None or end_at is None or end_at <= start_at:
             continue
         normalized_windows.append(
@@ -527,8 +534,8 @@ def read_frozen_dataset_candles(
     if not normalized_dataset_id:
         raise ValueError("market_dataset_id_required")
     normalized_limit = max(1, min(int(limit or 320), 2000))
-    requested_start = _parse_optional_timestamp(start)
-    requested_end = _parse_optional_timestamp(end)
+    requested_start = _candle_timestamp(start)
+    requested_end = _candle_timestamp(end)
     if requested_start is not None and requested_end is not None and requested_end <= requested_start:
         return {"candles": [], "has_more_before": False, "has_more_after": False}
 
