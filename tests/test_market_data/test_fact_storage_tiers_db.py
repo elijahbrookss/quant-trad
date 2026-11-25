@@ -330,6 +330,7 @@ def test_direct_cold_historical_candle_ingest_is_retryable_and_freezes_exactly(s
     from portal.backend.db.models import Base
     from portal.backend.service.storage import history_policy
     from portal.backend.service.storage.repos import cold_history
+    from portal.backend.service.storage.repos import candles as candle_repo
     from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
     from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog
 
@@ -381,6 +382,18 @@ def test_direct_cold_historical_candle_ingest_is_retryable_and_freezes_exactly(s
     frozen_rows = storage.repo.read_dataset_series(dataset_id=frozen.dataset_id, series_id=series_id,
                                                   start=start, end=end)
     assert len(frozen_rows) == 1 and frozen_rows[0].fact.close == 101
+    monkeypatch.setattr(candle_repo, "db", storage.database)
+    monkeypatch.setattr(candle_repo, "canonical_fact_storage_repository", repository_module.canonical_fact_storage_repository)
+    window = dict(instrument_id="storage-fixture", timeframe="1m",
+                  start=start.isoformat().replace("+00:00", "Z"), end=end.isoformat().replace("+00:00", "Z"))
+    assert candle_repo.get_candle_storage_summary(**window)["candle_count"] == 1
+    assert candle_repo.list_candles_for_series(**window, limit=2)[0]["close"] == 108
+    assert candle_repo.list_candles_for_series_windows(instrument_id="storage-fixture", timeframe="1m",
+        windows=[dict(window_id="trade", start=window["start"], end=window["end"], limit=2)])["trade"][0]["close"] == 108
+    frozen_page = candle_repo.read_frozen_dataset_candles(dataset_id=frozen.dataset_id, series_id=series_id,
+        start=window["start"], end=window["end"], limit=2)
+    assert frozen_page["candles"][0]["close"] == 101
+    assert frozen_page["max_commit_seq"] == first.max_commit_seq
     with storage.database.session() as session:
         for relation in ("fact_versions", "fact_hot_payloads", "fact_identities"):
             assert session.execute(text(f"SELECT count(*) FROM market.{relation} WHERE series_id=:id"),
