@@ -19,6 +19,7 @@ code_paths:
   - src/market_data/stream_quality.py
   - src/data_providers/streams
   - src/data_providers/providers/coinbase.py
+  - src/data_providers/providers/okx_archive.py
   - src/market_data
   - portal/backend/db/market_data_models.py
   - portal/backend/db/session.py
@@ -70,6 +71,58 @@ The design extends, and does not replace, the contracts in:
 - [ADR 0024: Provider Credential References](../decisions/0024-use-provider-credential-references.md)
 - [ADR 0053: Tiered Market-Structure Archive And Replay Boundary](../decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md)
 - [Historical normalization and frozen-dataset implementation record](MARKET_STRUCTURE_PHASE_4_NORMALIZATION_DATASETS.md)
+
+## Blocked OKX Historical Archive Draft
+
+`src/data_providers/providers/okx_archive.py` is an **experimental, unqualified**
+finite-file decoder for the fixed `BTC-USDT-SWAP` module-5 pilot. It is not
+registered as an operational provider and has no acquisition, ingestion, CLI,
+collector, database or deployment wiring. Its synthetic tests exercise exact
+level translation, source-line limits and candidate clock behavior; they do not
+establish that the provider archive supports those semantics.
+
+The draft extends the existing L2 contracts rather than creating a second book
+engine. Explicit quantity increments can describe fractional contracts; an
+unspecified increment retains the whole-contract default. The candidate
+`historical_sample_time_inferred.v1` event clock preserves actual receipt and
+acceptance separately, while the default remains `platform_acceptance`.
+Canonical adapters and frozen replay do not yet propagate this historical method.
+The decoder's explicit delivery-offset argument is scaffolding, not the locked
+pilot's completed one-second interval-close availability method.
+
+Source admission is blocked on two specific requirements:
+
+- Authoritative module-5 rules must establish absolute updates, zero removal,
+  snapshot/reset behavior, and how quantities are removed or refreshed when
+  prices leave and re-enter the sampled 5,000-level boundary. Similar live
+  WebSocket rules do not establish their applicability to this archive.
+- Historical evidence must establish the contract value, quantity unit and
+  applicable tick/lot increments for October 5–7, 2026. A current instrument
+  response and its upcoming-change list do not establish past applicability.
+
+The bounded October 5 structural scan verified gzip integrity and one data
+member: 152,177,539 compressed bytes, 729,284,608 decoded container bytes,
+86,400 records and snapshots every 900 seconds. It found no empty updates or
+absent seconds in that file. Those observations do not prove an exchange-event
+sequence, complete depth reconstruction or later-day coverage. An empty,
+timestamped update is distinct from an absent record: the draft rejects the
+former pending a source contract and never treats the latter as quiet evidence.
+
+The proposed feature reuses `derive_book_features`, which selects the latest
+post-record state in each UTC second. The pilot consumes its latest 5-bps
+imbalance, not an event-weighted or time-weighted path average. Sampled source
+scope must remain in provenance and interpretation.
+
+After source admission, finite persistence, canonical clock propagation,
+complete-band checks, bounded replay, recovery, resource measurement and exact
+release qualification remain unfinished. No new schema or full-history
+conversion is established as necessary. The held clean-stop repair is excluded.
+The operational gate and request/file receipts remain under the engineering
+owner's `artifacts/okx-stage1/`; downloaded archives are not repository fixtures.
+
+Official references inspected: [archive field information](https://www.okx.com/en-us/historical-data)
+and [historical market-data API](https://www.okx.com/docs-v5/en/#public-data-rest-api-get-historical-market-data).
+Neither reference as inspected resolved the two requirements above.
 
 ## Decision Summary
 

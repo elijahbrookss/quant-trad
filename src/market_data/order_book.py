@@ -182,6 +182,7 @@ class L2ProductContract:
             raise ValueError("market_l2_invalid: quantity violates product increment")
         if (
             self.provider_size_unit is ProviderSizeUnit.CONTRACTS
+            and self.quantity_increment is None
             and quantity != quantity.to_integral_value()
         ):
             raise ValueError("market_l2_invalid: futures quantity is not integral contracts")
@@ -287,6 +288,7 @@ class L2EventFact:
     accepted_at: datetime
     known_at: datetime
     raw_record_id: str
+    known_at_method: str = "platform_acceptance"
 
     def __post_init__(self) -> None:
         try:
@@ -307,8 +309,15 @@ class L2EventFact:
         received = _utc(self.received_at, field_name="received_at")
         accepted = _utc(self.accepted_at, field_name="accepted_at")
         known = _utc(self.known_at, field_name="known_at")
-        if accepted < received or known < accepted:
+        method = str(self.known_at_method)
+        if method not in {"platform_acceptance", "historical_sample_time_inferred.v1"}:
+            raise ValueError("market_l2_invalid: unsupported availability method")
+        if accepted < received or (method == "platform_acceptance" and known < accepted):
             raise ValueError("market_l2_invalid: causal times are reversed")
+        if method == "historical_sample_time_inferred.v1" and known < max(
+            row.provider_event_time for row in mutations
+        ):
+            raise ValueError("market_l2_invalid: inferred availability precedes sample")
         object.__setattr__(self, "event_type", event_type)
         object.__setattr__(self, "product_definition_version_id", definition)
         object.__setattr__(self, "mutations", mutations)

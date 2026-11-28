@@ -68,6 +68,7 @@ class OrderingAssurance(str, Enum):
     PROVIDER_DELIVERY_GUARANTEED = "provider_delivery_guaranteed"
     RECEIPT_CONTIGUOUS = "receipt_contiguous"
     CONNECTION_HEALTH_ONLY = "connection_health_only"
+    SAMPLED_ARCHIVE_ORDERED = "sampled_archive_ordered"
 
 
 class ArchiveStatus(str, Enum):
